@@ -81,7 +81,9 @@ extern crate std;
 
 pub mod float64;
 pub mod histogram;
+#[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+pub mod lookup;
 pub mod mapping;
 
 pub use histogram::{Buckets, BucketsIter, Counter, Histogram, Histogram16, Histogram32};
-pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE};
+pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, map_to_index_lg};

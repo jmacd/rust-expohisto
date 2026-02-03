@@ -4,7 +4,7 @@
 //! Benchmarks for exponential histogram mapping functions.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rust_expohisto::Mapping;
+use rust_expohisto::{Mapping, map_to_index_lg};
 
 /// Test values spanning the full range of normal f64 values.
 const TEST_VALUES: &[f64] = &[
@@ -27,13 +27,32 @@ fn bench_map_to_index(c: &mut Criterion) {
         });
     }
 
-    // Positive scales (logarithm mapping)
-    for scale in [1, 4, 8, 10, 20] {
+    // Positive scales - these use lookup tables if enabled
+    for scale in [1, 4, 6, 8, 10, 20] {
         let mapping = Mapping::new(scale).unwrap();
-        group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
+        let label = if cfg!(any(
+            feature = "lookup-64",
+            feature = "lookup-256",
+            feature = "lookup-1024"
+        )) {
+            "lookup_or_log"
+        } else {
+            "logarithm"
+        };
+        group.bench_function(BenchmarkId::new(label, scale), |b| {
             b.iter(|| {
                 for &v in TEST_VALUES {
                     black_box(mapping.map_to_index(black_box(v)));
+                }
+            })
+        });
+
+        // Reference lg implementation for comparison
+        let scale_factor = core::f64::consts::LOG2_E * (1u64 << scale) as f64;
+        group.bench_function(BenchmarkId::new("lg_reference", scale), |b| {
+            b.iter(|| {
+                for &v in TEST_VALUES {
+                    black_box(map_to_index_lg(black_box(v), scale, scale_factor));
                 }
             })
         });
