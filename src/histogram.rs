@@ -228,29 +228,14 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
         core::mem::take(&mut self.counts[idx]).to_u64()
     }
 
-    /// Reverses elements in range [from, limit).
-    fn reverse(&mut self, from: i32, limit: i32) {
-        let num = ((from + limit) / 2) - from;
-        for i in 0..num {
-            let a = (from + i) as usize % SIZE;
-            let b = (limit - i - 1) as usize % SIZE;
-            self.counts.swap(a, b);
-        }
-    }
-
     /// Rotates the array so that index_start == index_base.
     fn rotate(&mut self) {
-        let bias = self.index_base - self.index_start;
+        let bias = (self.index_base - self.index_start) as usize;
         if bias == 0 {
             return;
         }
-
+        self.counts.rotate_right(bias);
         self.index_base = self.index_start;
-
-        let size = self.size();
-        self.reverse(0, size);
-        self.reverse(0, bias);
-        self.reverse(bias, size);
     }
 
     /// Downscales by collapsing 2^by buckets into 1.

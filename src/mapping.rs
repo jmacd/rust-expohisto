@@ -7,14 +7,14 @@
 //! to bucket indices based on the configured scale.
 
 use crate::float64::{
-    get_normal_base2, get_significand, MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE,
+    MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE, get_normal_base2, get_significand,
 };
 
-/// Minimum scale for the exponent mapping (most coarse resolution).
-/// At scale -10, bucket indices range from -1 to 1 for normal floats.
+/// Minimum scale for the exponent mapping supports two buckets
+/// At scale -10, bucket indices are 0 (<= 1.0) and 1 (> 1.0).
 pub const MIN_SCALE: i32 = -10;
 
-/// Maximum scale supported (finest resolution).
+/// Maximum scale supported is the finest resolution.
 /// At scale 20, indices require 31 bits of information.
 pub const MAX_SCALE: i32 = 20;
 
@@ -135,11 +135,7 @@ impl Mapping {
         let index = (value.ln() * self.scale_factor).floor() as i32;
 
         let max_idx = self.max_normal_lower_boundary_index_log();
-        if index >= max_idx {
-            max_idx
-        } else {
-            index
-        }
+        if index >= max_idx { max_idx } else { index }
     }
 
     /// Returns the lower boundary of a bucket at the given index.
@@ -238,10 +234,16 @@ mod tests {
     }
 
     #[test]
+    fn test_min_scale() {
+        let m = Mapping::new(MIN_SCALE).unwrap();
+        assert_eq!(m.scale(), MIN_SCALE);
+    }
+
+    #[test]
     fn test_map_to_index_scale_0() {
         let m = Mapping::new(0).unwrap();
         assert_eq!(m.scale(), 0, "scale should be 0");
-        
+
         let idx_1 = m.map_to_index(1.0);
 
         // Powers of 2 map to exponent - 1
@@ -250,7 +252,7 @@ mod tests {
         assert_eq!(m.map_to_index(4.0), 1, "4.0 should map to 1"); // 2^2 -> 1
         assert_eq!(m.map_to_index(0.5), -2, "0.5 should map to -2"); // 2^-1 -> -2
 
-        // Non-powers of 2 map to floor(log2(value)) 
+        // Non-powers of 2 map to floor(log2(value))
         // Actually: index = floor(log_base(value)) where base = 2 at scale 0
         // For value in (base^i, base^(i+1)], index = i
         assert_eq!(m.map_to_index(1.5), 0, "1.5 should map to 0"); // 1.5 in (1, 2] -> 0
@@ -273,9 +275,9 @@ mod tests {
         let m = Mapping::new(0).unwrap();
 
         // At scale 0, lower_boundary(index) = 2^index
-        assert_eq!(m.lower_boundary(0).unwrap(), 1.0);  // 2^0 = 1
-        assert_eq!(m.lower_boundary(1).unwrap(), 2.0);  // 2^1 = 2
+        assert_eq!(m.lower_boundary(0).unwrap(), 1.0); // 2^0 = 1
+        assert_eq!(m.lower_boundary(1).unwrap(), 2.0); // 2^1 = 2
         assert_eq!(m.lower_boundary(-1).unwrap(), 0.5); // 2^-1 = 0.5
-        assert_eq!(m.lower_boundary(2).unwrap(), 4.0);  // 2^2 = 4
+        assert_eq!(m.lower_boundary(2).unwrap(), 4.0); // 2^2 = 4
     }
 }
