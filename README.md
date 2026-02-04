@@ -1,8 +1,12 @@
-# rust-expohisto
+# Rust OpenTelemetry Exponential Histogram using Table Lookup
 
-An allocation-free implementation of the [OpenTelemetry Exponential Histogram](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram) in Rust.
+An allocation-free, table-lookup based implementation of the
+[OpenTelemetry Exponential Histogram](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
+in Rust.
 
 ## Overview
+
+The OpenTelemetry Exponential Histogram 
 
 Exponential histograms provide a compact, high-resolution representation of value distributions using logarithmically-spaced bucket boundaries. This implementation is designed for:
 
@@ -153,10 +157,10 @@ cd mapping-gen && cargo test
 ## References
 
 - [OpenTelemetry Exponential Histogram Specification](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
-- [go-expohisto](https://github.com/open-telemetry/otel-go-contrib/tree/main/exp/expohisto) - Reference Go implementation by the same author
-- [Dynatrace Lookup Table Prototype (PR #3841)](https://github.com/open-telemetry/opentelemetry-collector/pull/3841)
-- [NewRelic SubBucketLookupIndexer](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
-- [NewRelic Indexer Documentation](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/Indexer.md)
+- [Golang OpenTelemetry Exponential Histogram](https://github.com/lightstep/go-expohisto): Golang reference implementation by the same author
+- [Dynatrace lookup table algorithm by Otmar Ertl](https://github.com/open-telemetry/opentelemetry-collector/pull/3841)
+- [NewRelic lookup table algorithm by Yuke Zhuge](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/Indexer.md)
+- [NewRelic algorithm implementation](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
 
 ## License
 

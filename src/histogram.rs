@@ -591,51 +591,90 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
 
     /// Merges another histogram into this one.
     pub fn merge_from(&mut self, other: &Self) {
+        self.merge_from_histogram(other);
+    }
+
+    /// Merges a histogram with a potentially different counter type into this one.
+    ///
+    /// This enables aggregating histograms with smaller counter widths (e.g., U32)
+    /// into histograms with larger counter widths (e.g., U64). This is useful when
+    /// you want to maintain cumulative histograms with wide counters while sending
+    /// delta histograms with narrower counters.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rust_expohisto::Histogram;
+    ///
+    /// // Cumulative histogram with u64 counters
+    /// let mut cumulative: Histogram<u64, 16> = Histogram::new();
+    ///
+    /// // Delta histogram with u32 counters (more compact for transport)
+    /// let mut delta: Histogram<u32, 16> = Histogram::new();
+    /// delta.update(1.5);
+    /// delta.update(2.5);
+    ///
+    /// // Aggregate the delta into the cumulative
+    /// cumulative.merge_from_histogram(&delta);
+    ///
+    /// assert_eq!(cumulative.count(), 2);
+    /// ```
+    pub fn merge_from_histogram<C2: Counter>(&mut self, other: &Histogram<C2, SIZE>) {
+        // Early return if other is empty
+        if other.count == 0 {
+            return;
+        }
+
         // Update min/max
-        match (self.count == 0, other.count == 0) {
-            (true, false) => {
-                self.min = other.min;
-                self.max = other.max;
-            }
-            (false, false) => {
-                self.min = self.min.min(other.min);
-                self.max = self.max.max(other.max);
-            }
-            _ => {}
+        if self.count == 0 {
+            self.min = other.min;
+            self.max = other.max;
+        } else {
+            self.min = self.min.min(other.min);
+            self.max = self.max.max(other.max);
         }
 
         self.sum += other.sum;
         self.count += other.count;
         self.zero_count += other.zero_count;
 
+        // If other only has zeros, no bucket merging needed
+        if other.positive.is_empty() {
+            return;
+        }
+
         let min_scale = self.scale().min(other.scale());
 
         let hlp = self.high_low_at_scale(&self.positive, min_scale)
-            .merge(other.high_low_at_scale(&other.positive, min_scale));
+            .merge(Self::high_low_at_scale_for(&other.positive, other.scale(), min_scale));
 
         let min_scale = min_scale - change_scale(hlp, SIZE as i32);
 
         self.downscale(self.scale() - min_scale);
-        self.merge_buckets(other, min_scale);
+        self.merge_buckets_from(&other.positive, other.scale(), min_scale);
     }
 
     fn high_low_at_scale(&self, buckets: &Buckets<C, SIZE>, scale: i32) -> HighLow {
+        Self::high_low_at_scale_for(buckets, self.scale(), scale)
+    }
+
+    fn high_low_at_scale_for<C2: Counter>(buckets: &Buckets<C2, SIZE>, current_scale: i32, target_scale: i32) -> HighLow {
         if buckets.is_empty() {
             return HighLow::empty();
         }
-        let shift = self.scale() - scale;
+        let shift = current_scale - target_scale;
         HighLow {
             low: buckets.index_start >> shift,
             high: buckets.index_end >> shift,
         }
     }
 
-    fn merge_buckets(&mut self, other: &Self, scale: i32) {
-        let their_offset = other.positive.offset();
-        let their_change = other.scale() - scale;
+    fn merge_buckets_from<C2: Counter>(&mut self, other_buckets: &Buckets<C2, SIZE>, other_scale: i32, target_scale: i32) {
+        let their_offset = other_buckets.offset();
+        let their_change = other_scale - target_scale;
 
-        for i in 0..other.positive.len() {
-            let count = other.positive.at(i);
+        for i in 0..other_buckets.len() {
+            let count = other_buckets.at(i);
             if count == 0 {
                 continue;
             }
@@ -651,6 +690,9 @@ pub type Histogram16<const SIZE: usize> = Histogram<u16, SIZE>;
 
 /// Type alias for a histogram with u32 counters.
 pub type Histogram32<const SIZE: usize> = Histogram<u32, SIZE>;
+
+/// Type alias for a histogram with u64 counters (widest, for cumulative aggregation).
+pub type Histogram64<const SIZE: usize> = Histogram<u64, SIZE>;
 
 #[cfg(test)]
 mod tests {
@@ -758,5 +800,242 @@ mod tests {
         // Verify u8/8 is even smaller
         let size_small = core::mem::size_of::<Histogram<u8, 8>>();
         assert!(size_small < 100, "Small histogram should be very compact, got {} bytes", size_small);
+    }
+
+    #[test]
+    fn test_merge_u32_into_u64() {
+        // Simulate cumulative with U64, delta with U32
+        let mut cumulative: Histogram<u64, 16> = Histogram::new();
+        let mut delta: Histogram<u32, 16> = Histogram::new();
+
+        delta.update(1.0);
+        delta.update(2.0);
+        delta.update(3.0);
+
+        cumulative.merge_from_histogram(&delta);
+
+        assert_eq!(cumulative.count(), 3);
+        assert_eq!(cumulative.sum(), 6.0);
+        assert_eq!(cumulative.min(), 1.0);
+        assert_eq!(cumulative.max(), 3.0);
+    }
+
+    #[test]
+    fn test_merge_multiple_deltas_into_cumulative() {
+        // Simulates the common use case: cumulative U64, send deltas as U32
+        let mut cumulative: Histogram<u64, 16> = Histogram::new();
+
+        // First delta batch
+        let mut delta1: Histogram<u32, 16> = Histogram::new();
+        delta1.update(1.0);
+        delta1.update(2.0);
+        cumulative.merge_from_histogram(&delta1);
+
+        assert_eq!(cumulative.count(), 2);
+        assert_eq!(cumulative.sum(), 3.0);
+
+        // Second delta batch
+        let mut delta2: Histogram<u32, 16> = Histogram::new();
+        delta2.update(3.0);
+        delta2.update(4.0);
+        delta2.update(5.0);
+        cumulative.merge_from_histogram(&delta2);
+
+        assert_eq!(cumulative.count(), 5);
+        assert_eq!(cumulative.sum(), 15.0);
+        assert_eq!(cumulative.min(), 1.0);
+        assert_eq!(cumulative.max(), 5.0);
+    }
+
+    #[test]
+    fn test_merge_u16_into_u64() {
+        // Even narrower counter type
+        let mut cumulative: Histogram<u64, 16> = Histogram::new();
+        let mut delta: Histogram<u16, 16> = Histogram::new();
+
+        delta.update(10.0);
+        delta.update(20.0);
+
+        cumulative.merge_from_histogram(&delta);
+
+        assert_eq!(cumulative.count(), 2);
+        assert_eq!(cumulative.sum(), 30.0);
+    }
+
+    #[test]
+    fn test_merge_u8_into_u32() {
+        // Compact delta with u8 into u32 cumulative
+        let mut cumulative: Histogram<u32, 8> = Histogram::new();
+        let mut delta: Histogram<u8, 8> = Histogram::new();
+
+        delta.update(1.5);
+        delta.update(2.5);
+        delta.update(0.0); // zero value
+
+        cumulative.merge_from_histogram(&delta);
+
+        assert_eq!(cumulative.count(), 3);
+        assert_eq!(cumulative.zero_count(), 1);
+        assert_eq!(cumulative.sum(), 4.0);
+    }
+
+    #[test]
+    fn test_merge_cross_width_with_different_scales() {
+        // Create histograms that will have different scales
+        let mut cumulative: Histogram<u64, 4> = Histogram::new();
+        let mut delta: Histogram<u32, 4> = Histogram::new();
+
+        // Force downscaling by using wide value range
+        cumulative.update(1.0);
+        cumulative.update(1000.0);
+
+        delta.update(0.001);
+        delta.update(100.0);
+
+        let cumulative_scale_before = cumulative.scale();
+        cumulative.merge_from_histogram(&delta);
+
+        assert_eq!(cumulative.count(), 4);
+        // Scale may have changed due to merge
+        assert!(cumulative.scale() <= cumulative_scale_before);
+    }
+
+    #[test]
+    fn test_merge_empty_histogram_cross_width() {
+        let mut cumulative: Histogram<u64, 16> = Histogram::new();
+        cumulative.update(1.0);
+
+        // Merge an empty histogram
+        let empty: Histogram<u32, 16> = Histogram::new();
+        cumulative.merge_from_histogram(&empty);
+
+        assert_eq!(cumulative.count(), 1);
+        assert_eq!(cumulative.sum(), 1.0);
+    }
+
+    #[test]
+    fn test_merge_into_empty_histogram_cross_width() {
+        let mut cumulative: Histogram<u64, 16> = Histogram::new();
+        let mut delta: Histogram<u32, 16> = Histogram::new();
+
+        delta.update(5.0);
+        delta.update(10.0);
+
+        // Merge into empty
+        cumulative.merge_from_histogram(&delta);
+
+        assert_eq!(cumulative.count(), 2);
+        assert_eq!(cumulative.sum(), 15.0);
+        assert_eq!(cumulative.min(), 5.0);
+        assert_eq!(cumulative.max(), 10.0);
+    }
+
+    #[test]
+    fn test_merge_equivalence_comprehensive() {
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        // Test inputs: diverse values in 0-20 range, various patterns
+        let hardcoded_sets: &[&[f64]] = &[
+            &[],
+            &[0.0],
+            &[1.0],
+            &[0.0, 0.0],
+            &[0.0, 0.0, 0.0],
+            &[1.0, 1.0],
+            &[1.0, 2.0],
+            &[0.5, 1.5, 2.5],
+            &[0.001, 1.0, 20.0],
+            &[1.0, 1.0, 1.0, 1.0],
+            &[0.0, 1.0, 2.0, 0.0],
+            &[5.0, 10.0, 15.0, 20.0],
+            &[0.1, 0.2, 0.3, 0.4, 0.5],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0],
+            &[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5],
+            &[0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+            &[0.01, 0.1, 1.0, 10.0],
+            &[0.0, 20.0],
+            &[1.0, 19.0],
+            &[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+            &[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0],
+            &[15.0, 16.0, 17.0, 18.0, 19.0, 20.0],
+            &[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0],
+        ];
+
+        // Convert to owned vectors for uniform handling
+        let mut test_sets: Vec<Vec<f64>> = hardcoded_sets.iter().map(|s| s.to_vec()).collect();
+
+        // Generate 20 random sets with sizes in [0, 10]
+        let mut rng = StdRng::seed_from_u64(42); // Fixed seed for reproducibility
+        for _ in 0..20 {
+            let size = rng.gen_range(0..=10);
+            let set: Vec<f64> = (0..size).map(|_| rng.gen_range(0.0..20.0)).collect();
+            test_sets.push(set);
+        }
+
+        // Test with multiple histogram sizes to stress downscaling
+        test_merge_equivalence_for_size_owned::<2>(&test_sets);
+        test_merge_equivalence_for_size_owned::<3>(&test_sets);
+        test_merge_equivalence_for_size_owned::<4>(&test_sets);
+        test_merge_equivalence_for_size_owned::<8>(&test_sets);
+        test_merge_equivalence_for_size_owned::<16>(&test_sets);
+    }
+
+    fn test_merge_equivalence_for_size_owned<const SIZE: usize>(test_sets: &[Vec<f64>]) {
+        // Cross-product: for every pair (A, B), verify merge equivalence
+        for (i, set_a) in test_sets.iter().enumerate() {
+            for (j, set_b) in test_sets.iter().enumerate() {
+                // Build merged histogram: insert A, then merge B
+                let mut merged: Histogram<u64, SIZE> = Histogram::new();
+                for &v in set_a {
+                    merged.update(v);
+                }
+                let mut other: Histogram<u32, SIZE> = Histogram::new();
+                for &v in set_b {
+                    other.update(v);
+                }
+                merged.merge_from_histogram(&other);
+
+                // Build single histogram: insert A then B directly
+                let mut single: Histogram<u64, SIZE> = Histogram::new();
+                for &v in set_a {
+                    single.update(v);
+                }
+                for &v in set_b {
+                    single.update(v);
+                }
+
+                // Compare all properties
+                assert_eq!(merged.count(), single.count(), 
+                    "count mismatch for size={SIZE} sets {i} x {j}");
+                // Sum comparison with floating-point tolerance (order of additions can differ)
+                let sum_diff = (merged.sum() - single.sum()).abs();
+                assert!(sum_diff < 1e-10, 
+                    "sum mismatch for size={SIZE} sets {i} x {j}: {} vs {}", 
+                    merged.sum(), single.sum());
+                assert_eq!(merged.zero_count(), single.zero_count(), 
+                    "zero_count mismatch for size={SIZE} sets {i} x {j}");
+                assert_eq!(merged.min(), single.min(), 
+                    "min mismatch for size={SIZE} sets {i} x {j}");
+                assert_eq!(merged.max(), single.max(), 
+                    "max mismatch for size={SIZE} sets {i} x {j}");
+                assert_eq!(merged.scale(), single.scale(), 
+                    "scale mismatch for size={SIZE} sets {i} x {j}");
+
+                // Compare bucket data
+                let mb = merged.positive();
+                let sb = single.positive();
+                assert_eq!(mb.offset(), sb.offset(), 
+                    "offset mismatch for size={SIZE} sets {i} x {j}");
+                assert_eq!(mb.len(), sb.len(), 
+                    "bucket len mismatch for size={SIZE} sets {i} x {j}");
+                for k in 0..mb.len() {
+                    assert_eq!(mb.at(k), sb.at(k), 
+                        "bucket[{k}] mismatch for size={SIZE} sets {i} x {j}");
+                }
+            }
+        }
     }
 }

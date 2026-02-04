@@ -6,14 +6,14 @@
 //! This measures the cost of generating tables at runtime,
 //! which is relevant for lazy initialization strategies.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use expohisto_mapping_gen::LookupTables;
 
 fn bench_table_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("table_generation");
 
-    // Scale 12 takes ~2s, scale 14 takes ~45s due to BigUint verification
-    for scale in [4, 6, 8, 10, 12, 14] {
+    // Scale 10 takes ~61ms, 12 takes 2s, 14 takes 45s, etc.
+    for scale in [4, 6, 8, 10] {
         group.bench_function(BenchmarkId::new("generate", scale), |b| {
             b.iter(|| {
                 black_box(LookupTables::generate(black_box(scale)));
@@ -34,7 +34,12 @@ fn bench_table_sizes(c: &mut Criterion) {
         let total_bytes = index_bytes + boundary_bytes;
         println!(
             "Scale {:2}: {:5} buckets | {:6} bytes index + {:6} bytes boundaries = {:6} bytes ({:.1} KB)",
-            scale, n, index_bytes, boundary_bytes, total_bytes, total_bytes as f64 / 1024.0
+            scale,
+            n,
+            index_bytes,
+            boundary_bytes,
+            total_bytes,
+            total_bytes as f64 / 1024.0
         );
     }
     println!();

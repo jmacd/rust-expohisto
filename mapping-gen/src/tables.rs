@@ -3,14 +3,16 @@
 
 //! Lookup table generation for exponential histogram mapping.
 //!
-//! This module computes exact bucket boundaries using the algorithm:
-//! 1. Compute 2^position exactly (trivial for integer powers)
+//! This module computes exact bucket boundaries using te rug
+//! the algorithm:
+//!
+//! 1. Compute 2^position exactly
 //! 2. Take square root `scale` times to get 2^(position/2^scale)
 //! 3. Scale by 2^52 and verify using exact integer comparison
 
 use crate::float64::SIGNIFICAND_MASK;
-use rug::{Float, Integer};
 use rug::ops::Pow;
+use rug::{Float, Integer};
 
 /// Generated lookup tables for a specific scale.
 #[derive(Debug, Clone)]
@@ -57,28 +59,53 @@ impl LookupTables {
 
     /// Write the lookup tables as Rust source code.
     pub fn write_rust_source<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        writeln!(w, "// Auto-generated lookup tables for scale {}", self.scale)?;
+        writeln!(
+            w,
+            "// Auto-generated lookup tables for scale {}",
+            self.scale
+        )?;
         writeln!(w)?;
-        
+
         writeln!(w, "use crate::float64::SIGNIFICAND_WIDTH;")?;
         writeln!(w)?;
-        
+
         writeln!(w, "/// Maximum scale supported by this lookup table.")?;
         writeln!(w, "pub const LOOKUP_SCALE: i32 = {};", self.scale)?;
         writeln!(w)?;
-        
+
         writeln!(w, "/// Number of bits to index into 2*N linear buckets.")?;
-        writeln!(w, "const LINEAR_BUCKET_BITS: u32 = LOOKUP_SCALE as u32 + 1;")?;
-        writeln!(w)?;
-        
-        writeln!(w, "/// Shift to convert 52-bit mantissa to linear bucket index.")?;
-        writeln!(w, "/// mantissa >> MANTISSA_SHIFT yields an index in 0..2*N.")?;
-        writeln!(w, "pub const MANTISSA_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS;")?;
+        writeln!(
+            w,
+            "const LINEAR_BUCKET_BITS: u32 = LOOKUP_SCALE as u32 + 1;"
+        )?;
         writeln!(w)?;
 
-        writeln!(w, "/// Maps linear bucket index to approximate log bucket index.")?;
-        writeln!(w, "/// Linear bucket i starts at mantissa (i * 2^52) / (2 * N).")?;
-        writeln!(w, "pub const LOG_BUCKET_INDEX: [u16; 1 << LINEAR_BUCKET_BITS] = [")?;
+        writeln!(
+            w,
+            "/// Shift to convert 52-bit mantissa to linear bucket index."
+        )?;
+        writeln!(
+            w,
+            "/// mantissa >> MANTISSA_SHIFT yields an index in 0..2*N."
+        )?;
+        writeln!(
+            w,
+            "pub const MANTISSA_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS;"
+        )?;
+        writeln!(w)?;
+
+        writeln!(
+            w,
+            "/// Maps linear bucket index to approximate log bucket index."
+        )?;
+        writeln!(
+            w,
+            "/// Linear bucket i starts at mantissa (i * 2^52) / (2 * N)."
+        )?;
+        writeln!(
+            w,
+            "pub const LOG_BUCKET_INDEX: [u16; 1 << LINEAR_BUCKET_BITS] = ["
+        )?;
         for (i, &idx) in self.log_bucket_index.iter().enumerate() {
             if i % 16 == 0 {
                 write!(w, "    ")?;
@@ -92,9 +119,18 @@ impl LookupTables {
         writeln!(w)?;
 
         writeln!(w, "/// End mantissa (52-bit) for each log bucket.")?;
-        writeln!(w, "/// Bucket i contains values with mantissa in [boundary[i], boundary[i+1]).")?;
-        writeln!(w, "/// Last entry is a sentinel (2^52) for boundary checks.")?;
-        writeln!(w, "pub const LOG_BUCKET_END: [u64; (1 << LOOKUP_SCALE) + 1] = [")?;
+        writeln!(
+            w,
+            "/// Bucket i contains values with mantissa in [boundary[i], boundary[i+1])."
+        )?;
+        writeln!(
+            w,
+            "/// Last entry is a sentinel (2^52) for boundary checks."
+        )?;
+        writeln!(
+            w,
+            "pub const LOG_BUCKET_END: [u64; (1 << LOOKUP_SCALE) + 1] = ["
+        )?;
         for (i, &boundary) in self.log_bucket_end.iter().enumerate() {
             if i % 4 == 0 {
                 write!(w, "    ")?;
@@ -129,7 +165,7 @@ pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
     // Use sufficient precision for exact computation
     // 128 bits is plenty for scale up to 20
     const PRECISION: u32 = 128;
-    
+
     let mut boundaries = Vec::with_capacity(n);
 
     for position in 0..n {
@@ -187,13 +223,13 @@ pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
 pub fn map_to_index_exact(value: f64, scale: i32) -> i32 {
     let significand = crate::float64::get_significand(value);
     let exponent = crate::float64::get_normal_base2(value);
-    
+
     // Power of two: significand is 0, index is (exp << scale) - 1
     // This handles the upper-inclusive case: value 2^exp is in bucket (exp << scale) - 1
     if significand == 0 {
         return (exponent << scale) - 1;
     }
-    
+
     // For non-powers-of-two, we use the formula: index = floor(log2(value) * N)
     // where N = 2^scale.
     //
@@ -203,17 +239,17 @@ pub fn map_to_index_exact(value: f64, scale: i32) -> i32 {
     //
     // The subbucket floor(log2(1 + s/2^52) * N) is found by comparing against
     // exact boundaries: boundaries[k] = significand of 2^(k/N).
-    // 
+    //
     // If s is in [boundaries[k], boundaries[k+1]), then subbucket = k.
-    
+
     let n = 1usize << scale;
     let boundaries = compute_boundaries_exact(n, scale as u32);
-    
+
     // Binary search for the smallest k such that s < boundaries[k]
     // We search in 1..=n because boundaries[0] = 0 and s > 0.
     let mut lo = 1usize;
     let mut hi = n;
-    
+
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         if significand >= boundaries[mid] {
@@ -222,11 +258,11 @@ pub fn map_to_index_exact(value: f64, scale: i32) -> i32 {
             hi = mid;
         }
     }
-    
+
     // lo is the first k where s < boundaries[k]
     // So s is in [boundaries[lo-1], boundaries[lo]), and subbucket = lo - 1
     let subbucket = (lo - 1) as i32;
-    
+
     (exponent << scale) + subbucket
 }
 
@@ -318,7 +354,11 @@ mod tests {
         for scale in 1..=10 {
             let n = 1usize << scale;
             let boundaries = compute_boundaries_exact(n, scale);
-            assert_eq!(boundaries[0], 0, "boundary[0] should be 0 at scale {}", scale);
+            assert_eq!(
+                boundaries[0], 0,
+                "boundary[0] should be 0 at scale {}",
+                scale
+            );
         }
     }
 
@@ -415,7 +455,11 @@ mod tests {
                 assert!(
                     actual_idx == expected_idx || actual_idx == expected_idx + 1,
                     "boundary value 2^({}/{}) should give index {} or {}, got {}",
-                    k, tables.n, expected_idx, expected_idx + 1, actual_idx
+                    k,
+                    tables.n,
+                    expected_idx,
+                    expected_idx + 1,
+                    actual_idx
                 );
             }
         }
@@ -424,29 +468,33 @@ mod tests {
     #[test]
     fn test_map_to_index_exact_sanity() {
         // Sanity check the exact function with known values
-        
+
         // Power of two: 2^0 = 1.0 at scale 1 -> index = (0 << 1) - 1 = -1
         assert_eq!(map_to_index_exact(1.0, 1), -1);
-        
+
         // Power of two: 2^1 = 2.0 at scale 1 -> index = (1 << 1) - 1 = 1
         assert_eq!(map_to_index_exact(2.0, 1), 1);
-        
+
         // At scale 1, base = sqrt(2) ≈ 1.414
         // Bucket -1 contains (1/sqrt(2), 1]
-        // Bucket 0 contains (1, sqrt(2)]  
+        // Bucket 0 contains (1, sqrt(2)]
         // Bucket 1 contains (sqrt(2), 2]
-        
+
         // 1.1 is in (1, sqrt(2)] so index should be 0
         let idx = map_to_index_exact(1.1, 1);
         assert_eq!(idx, 0, "1.1 at scale 1 should be in bucket 0, got {}", idx);
-        
+
         // 1.5 is in (sqrt(2), 2] so index should be 1  (since 1.5 > 1.414)
         let idx = map_to_index_exact(1.5, 1);
         assert_eq!(idx, 1, "1.5 at scale 1 should be in bucket 1, got {}", idx);
-        
+
         // 0.9 is in (1/sqrt(2), 1] so index should be -1
         let idx = map_to_index_exact(0.9, 1);
-        assert_eq!(idx, -1, "0.9 at scale 1 should be in bucket -1, got {}", idx);
+        assert_eq!(
+            idx, -1,
+            "0.9 at scale 1 should be in bucket -1, got {}",
+            idx
+        );
     }
 
     #[test]
@@ -455,7 +503,7 @@ mod tests {
         let mut output = Vec::new();
         tables.write_rust_source(&mut output).unwrap();
         let source = String::from_utf8(output).unwrap();
-        
+
         assert!(source.contains("LOOKUP_SCALE: i32 = 6"));
         assert!(source.contains("LOG_BUCKET_INDEX: [u16; 1 << LINEAR_BUCKET_BITS]"));
         assert!(source.contains("LOG_BUCKET_END: [u64; (1 << LOOKUP_SCALE) + 1]"));
@@ -511,46 +559,50 @@ mod tests {
         // during table generation.
         //
         // We precompute boundaries once per scale (not per value!) to avoid slowness.
-        
+
         println!("=== Accuracy Analysis vs Exact ===");
         println!();
-        
+
         const STEPS_PER_BOUNDARY: i32 = 20;
-        
+
         // Test several table sizes
         for lookup_scale in [6u32, 8, 10] {
             let tables = LookupTables::generate(lookup_scale);
             let scale = lookup_scale as i32;
             let scale_factor = std::f64::consts::LOG2_E * (1u64 << scale) as f64;
             let buckets_per_octave = 1i32 << scale;
-            
+
             // Precompute boundaries ONCE
             let n = 1usize << scale;
             let boundaries = compute_boundaries_exact(n, scale as u32);
-            
-            println!("LOOKUP_SCALE={} ({} buckets per octave)", lookup_scale, tables.n);
-            
+
+            println!(
+                "LOOKUP_SCALE={} ({} buckets per octave)",
+                lookup_scale, tables.n
+            );
+
             let mut total_tests = 0u64;
             let mut lg_errors = 0u64;
             let mut lookup_errors = 0u64;
-            
+
             // Test boundaries within each octave from 2^-5 to 2^5
             for exp in -5..=5 {
                 for bucket_offset in 0..buckets_per_octave {
-                    let boundary_exp = (exp as f64) + (bucket_offset as f64) / (buckets_per_octave as f64);
+                    let boundary_exp =
+                        (exp as f64) + (bucket_offset as f64) / (buckets_per_octave as f64);
                     let boundary_value = 2.0_f64.powf(boundary_exp);
-                    
+
                     // Step through values near this boundary
                     let mut v = boundary_value;
                     for _ in 0..STEPS_PER_BOUNDARY {
                         v = next_up(v);
                         total_tests += 1;
-                        
+
                         // Exact using precomputed boundaries
                         let exact_idx = map_to_index_with_boundaries(v, scale, &boundaries);
                         let lg_idx = map_to_index_lg(v, scale, scale_factor);
                         let lookup_idx = map_to_index_lookup_at_native_scale(v, &tables);
-                        
+
                         if lg_idx != exact_idx {
                             lg_errors += 1;
                         }
@@ -558,16 +610,16 @@ mod tests {
                             lookup_errors += 1;
                         }
                     }
-                    
+
                     let mut v = boundary_value;
                     for _ in 0..STEPS_PER_BOUNDARY {
                         v = next_down(v);
                         total_tests += 1;
-                        
+
                         let exact_idx = map_to_index_with_boundaries(v, scale, &boundaries);
                         let lg_idx = map_to_index_lg(v, scale, scale_factor);
                         let lookup_idx = map_to_index_lookup_at_native_scale(v, &tables);
-                        
+
                         if lg_idx != exact_idx {
                             lg_errors += 1;
                         }
@@ -577,41 +629,46 @@ mod tests {
                     }
                 }
             }
-            
+
             let lg_rate = (lg_errors as f64 / total_tests as f64) * 100.0;
             let lookup_rate = (lookup_errors as f64 / total_tests as f64) * 100.0;
-            
+
             println!("  Tests: {}", total_tests);
             println!("  lg errors:     {:>6} ({:.4}%)", lg_errors, lg_rate);
-            println!("  lookup errors: {:>6} ({:.4}%)", lookup_errors, lookup_rate);
+            println!(
+                "  lookup errors: {:>6} ({:.4}%)",
+                lookup_errors, lookup_rate
+            );
             println!();
-            
+
             // Lookup should be exact (0 errors) - same boundaries used
-            assert_eq!(lookup_errors, 0, 
-                "Lookup table should be exact at LOOKUP_SCALE={}, but had {} errors", 
-                lookup_scale, lookup_errors);
+            assert_eq!(
+                lookup_errors, 0,
+                "Lookup table should be exact at LOOKUP_SCALE={}, but had {} errors",
+                lookup_scale, lookup_errors
+            );
         }
-        
+
         println!("Summary:");
         println!("  - Lookup is EXACT (0% error) - uses same precomputed boundaries");
         println!("  - lg has precision errors due to floating-point log()");
     }
-    
+
     /// Fast exact mapping using precomputed boundaries
     fn map_to_index_with_boundaries(value: f64, scale: i32, boundaries: &[u64]) -> i32 {
         let significand = get_significand(value);
         let exponent = get_normal_base2(value);
-        
+
         if significand == 0 {
             return (exponent << scale) - 1;
         }
-        
+
         let n = boundaries.len();
-        
+
         // Binary search for the smallest k such that significand < boundaries[k]
         let mut lo = 1usize;
         let mut hi = n;
-        
+
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             if significand >= boundaries[mid] {
@@ -620,7 +677,7 @@ mod tests {
                 hi = mid;
             }
         }
-        
+
         let subbucket = (lo - 1) as i32;
         (exponent << scale) + subbucket
     }

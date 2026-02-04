@@ -23,6 +23,7 @@ expohisto-mapping-gen = { path = "mapping-gen" }
 
 [dev-dependencies]
 criterion = "0.5"
+rand = "0.8"
 
 [[bench]]
 name = "mapping"
