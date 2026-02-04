@@ -6,6 +6,11 @@ license = "Apache-2.0"
 description = "Lookup table generation for exponential histogram mapping"
 
 [dependencies]
-num-bigint = "0.4"
-num-traits = "0.2"
-num-integer = "0.1"
+rug = "1.24"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "table_gen"
+harness = false

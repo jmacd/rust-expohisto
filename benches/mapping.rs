@@ -28,12 +28,15 @@ fn bench_map_to_index(c: &mut Criterion) {
     }
 
     // Positive scales - these use lookup tables if enabled
-    for scale in [1, 4, 6, 8, 10, 20] {
+    for scale in [1, 4, 6, 8, 10, 12, 14, 20] {
         let mapping = Mapping::new(scale).unwrap();
         let label = if cfg!(any(
-            feature = "lookup-64",
-            feature = "lookup-256",
-            feature = "lookup-1024"
+            feature = "lookup-4",
+            feature = "lookup-6",
+            feature = "lookup-8",
+            feature = "lookup-10",
+            feature = "lookup-12",
+            feature = "lookup-14"
         )) {
             "lookup_or_log"
         } else {
@@ -79,7 +82,7 @@ fn bench_lower_boundary(c: &mut Criterion) {
     }
 
     // Positive scales (logarithm mapping)
-    for scale in [1, 4, 8, 10, 20] {
+    for scale in [1, 4, 8, 10, 12, 14, 20] {
         let mapping = Mapping::new(scale).unwrap();
         // Use indices that are representative for this scale
         let indices: Vec<i32> = (-100..=100).collect();

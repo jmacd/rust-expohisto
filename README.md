@@ -7,27 +7,59 @@ An allocation-free implementation of the [OpenTelemetry Exponential Histogram](h
 Exponential histograms provide a compact, high-resolution representation of value distributions using logarithmically-spaced bucket boundaries. This implementation is designed for:
 
 - **No heap allocation**: Fixed-size bucket storage using const generics
-- **`no_std` compatible**: Works in embedded and kernel contexts (requires `libm`)
-- **High performance**: Optional lookup tables for O(1) index mapping
+- **High performance**: Lookup table provides 3.5× speedup over logarithm-based mapping
+- **Configurable table size**: Trade static memory for lookup acceleration at higher scales
 
-## Usage
+## Quick Start
 
 ```rust
-use rust_expohisto::{Histogram, Mapping};
+use rust_expohisto::Histogram;
 
-// Create a histogram with 160 buckets at scale 4
-let mut hist: Histogram<u64, 160> = Histogram::new(4);
+// Create a histogram with 64 buckets and u32 counters
+let mut hist: Histogram<u32, 64> = Histogram::new();
 
-// Record some values
+// Record observations
 hist.update(1.5);
 hist.update(2.7);
 hist.update(100.0);
 
-// Access bucket counts
-for (index, count) in hist.positive().iter() {
-    println!("bucket {}: {} values", index, count);
-}
+// Access statistics
+println!("count: {}, sum: {}", hist.count(), hist.sum());
+println!("scale: {}", hist.scale());
 ```
+
+## Performance
+
+Benchmark results (15 test values, per-value timing):
+
+| Method | Scale | Time | Notes |
+|--------|-------|------|-------|
+| Exponent | ≤0 | ~1.1 ns | Bit extraction only |
+| Lookup | 1-14 | ~1.7 ns | Integer-only, 3.5× faster than log |
+| Logarithm | 1-14 | ~6 ns | Fallback when lookup unavailable |
+| Logarithm | 15-20 | ~6 ns | No lookup table for scales >14 |
+
+The lookup table accelerates all scales from 1 up to the compiled maximum. Higher scales beyond the table fall back to logarithm computation.
+
+## Lookup Table Features
+
+Choose **one** feature based on your needs—each table supports all scales from 1 up to the maximum:
+
+```toml
+[dependencies]
+rust-expohisto = { version = "0.1", features = ["lookup-10"] }  # default
+```
+
+| Feature | Table Size | Scales Accelerated | Use Case |
+|---------|------------|-------------------|----------|
+| `lookup-4` | 0.2 KB | 1–4 | Minimal memory |
+| `lookup-6` | 0.8 KB | 1–6 | Embedded systems |
+| `lookup-8` | 3 KB | 1–8 | Balanced |
+| `lookup-10` | 12 KB | 1–10 | **Recommended** (default) |
+| `lookup-12` | 48 KB | 1–12 | High resolution |
+| `lookup-14` | 192 KB | 1–14 | Maximum coverage |
+
+Only one feature may be enabled—a compile-time check enforces this.
 
 ## Exponential Scale
 
@@ -64,37 +96,34 @@ if significand == 0 {
 
 For non-positive scales, the bucket index is derived directly from the IEEE 754 exponent bits—no floating-point math required.
 
-### Scale > 0: Logarithm Method (default)
+### Scale > 0: Lookup Table (default)
 
-For positive scales, the standard approach uses:
+When a lookup feature is enabled (default: `lookup-10`), mapping uses integer-only operations:
+
+1. Extract mantissa and exponent from the IEEE 754 representation
+2. Use the mantissa to index into a precomputed lookup table
+3. Apply a single boundary check to correct the approximation
+4. Combine with exponent to produce the final index
+
+For scales beyond the table's maximum, the implementation falls back to logarithm computation.
+
+### Scale > 0: Logarithm Fallback
+
+When no lookup table is available (or for scales above the table's maximum), the standard formula is used:
 
 ```
 index = floor(ln(value) × 2^scale / ln(2))
 ```
 
-This requires a logarithm computation (~50-100 cycles with `libm`).
+## Lookup Table Design
 
-### Scale > 0: Lookup Table Method (optional)
-
-For applications where mapping performance is critical, compile-time lookup tables provide O(1) integer-only mapping:
-
-```toml
-[dependencies]
-rust-expohisto = { version = "0.1", features = ["lookup-256"] }
-```
-
-Available features:
-- `lookup-64`: 1.5KB table, supports scales 1-6
-- `lookup-256`: 6KB table, supports scales 1-8  
-- `lookup-1024`: 24KB table, supports scales 1-10
-
-## Lookup Table Algorithm
-
-The lookup table approach eliminates floating-point operations by:
+The lookup table eliminates floating-point operations by:
 
 1. **Linear bucket approximation**: Divide the mantissa range `[0, 2^52)` into `2N` equal-width linear buckets
 2. **Precomputed mapping**: Each linear bucket maps to a log-scale bucket (with at most 1 bucket of error)
 3. **Boundary refinement**: A single integer comparison against the exact boundary corrects the approximation
+
+A single table at scale N supports all scales 1 through N by computing the index at full resolution and right-shifting the result.
 
 This algorithm was developed independently by [Dynatrace](https://github.com/open-telemetry/opentelemetry-collector/pull/3841) and [NewRelic](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java), with similar designs.
 

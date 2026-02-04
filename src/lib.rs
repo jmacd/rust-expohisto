@@ -13,7 +13,6 @@
 //! - **Configurable counter type**: Choose between `u8`, `u16`, `u32`, or `u64`
 //! - **Automatic scaling**: Scale adjusts automatically to fit data in available buckets
 //! - **Merge support**: Histograms can be merged in-place without allocation
-//! - **no_std compatible**: Can be used in embedded environments
 //!
 //! # Example
 //!
@@ -74,14 +73,9 @@
 //! At scale 20, each bucket represents a ~0.0001% change in value.
 //! At scale 0, each bucket represents a factor of 2 change.
 
-#![no_std]
-
-#[cfg(feature = "std")]
-extern crate std;
-
 pub mod float64;
 pub mod histogram;
-#[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+#[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
 pub mod lookup;
 pub mod mapping;
 

@@ -5,6 +5,29 @@
 //!
 //! This module provides fast integer-only mapping from f64 values to bucket indices
 //! using precomputed lookup tables. It is enabled by one of the `lookup-*` features.
+//!
+//! Only ONE lookup feature should be enabled. The table is generated at the selected
+//! scale and supports all scales from 1 up to that maximum by right-shifting the result.
+
+// Compile-time check: only one lookup feature allowed
+#[cfg(any(
+    all(feature = "lookup-4", feature = "lookup-6"),
+    all(feature = "lookup-4", feature = "lookup-8"),
+    all(feature = "lookup-4", feature = "lookup-10"),
+    all(feature = "lookup-4", feature = "lookup-12"),
+    all(feature = "lookup-4", feature = "lookup-14"),
+    all(feature = "lookup-6", feature = "lookup-8"),
+    all(feature = "lookup-6", feature = "lookup-10"),
+    all(feature = "lookup-6", feature = "lookup-12"),
+    all(feature = "lookup-6", feature = "lookup-14"),
+    all(feature = "lookup-8", feature = "lookup-10"),
+    all(feature = "lookup-8", feature = "lookup-12"),
+    all(feature = "lookup-8", feature = "lookup-14"),
+    all(feature = "lookup-10", feature = "lookup-12"),
+    all(feature = "lookup-10", feature = "lookup-14"),
+    all(feature = "lookup-12", feature = "lookup-14"),
+))]
+compile_error!("Only one lookup-* feature may be enabled. Choose one of: lookup-4, lookup-6, lookup-8, lookup-10, lookup-12, lookup-14");
 
 // Include the generated lookup tables
 include!(concat!(env!("OUT_DIR"), "/lookup_tables.rs"));

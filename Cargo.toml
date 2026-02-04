@@ -6,15 +6,17 @@ description = "Allocation-free OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
 
 [features]
-default = ["std"]
-std = []
-# Lookup table sizes for map_to_index optimization (choose at most one)
-lookup-64 = []    # 1.5KB table, supports up to scale 6
-lookup-256 = []   # 6KB table, supports up to scale 8
-lookup-1024 = []  # 24KB table, supports up to scale 10
+default = ["lookup-8"]
+# Lookup table for map_to_index optimization. Choose one.
+# Larger tables provide lookup acceleration for higher scales.
+lookup-4 = []     # 0.2KB, scales 1-4
+lookup-6 = []     # 0.8KB, scales 1-6
+lookup-8 = []     # 3KB, scales 1-8
+lookup-10 = []    # 12KB, scales 1-10
+lookup-12 = []    # 48KB, scales 1-12
+lookup-14 = []    # 192KB, scales 1-14
 
 [dependencies]
-libm = "0.2"
 
 [build-dependencies]
 expohisto-mapping-gen = { path = "mapping-gen" }

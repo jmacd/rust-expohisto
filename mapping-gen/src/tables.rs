@@ -9,8 +9,8 @@
 //! 3. Scale by 2^52 and verify using exact integer comparison
 
 use crate::float64::SIGNIFICAND_MASK;
-use num_bigint::BigUint;
-use num_traits::One;
+use rug::{Float, Integer};
+use rug::ops::Pow;
 
 /// Generated lookup tables for a specific scale.
 #[derive(Debug, Clone)]
@@ -58,37 +58,33 @@ impl LookupTables {
     /// Write the lookup tables as Rust source code.
     pub fn write_rust_source<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         writeln!(w, "// Auto-generated lookup tables for scale {}", self.scale)?;
-        writeln!(
-            w,
-            "// N = {} log buckets, {} linear buckets",
-            self.n,
-            2 * self.n
-        )?;
         writeln!(w)?;
+        
+        writeln!(w, "use crate::float64::SIGNIFICAND_WIDTH;")?;
+        writeln!(w)?;
+        
         writeln!(w, "/// Maximum scale supported by this lookup table.")?;
         writeln!(w, "pub const LOOKUP_SCALE: i32 = {};", self.scale)?;
         writeln!(w)?;
+        
+        writeln!(w, "/// Number of bits to index into 2*N linear buckets.")?;
+        writeln!(w, "const LINEAR_BUCKET_BITS: u32 = LOOKUP_SCALE as u32 + 1;")?;
+        writeln!(w)?;
+        
+        writeln!(w, "/// Shift to convert 52-bit mantissa to linear bucket index.")?;
+        writeln!(w, "/// mantissa >> MANTISSA_SHIFT yields an index in 0..2*N.")?;
+        writeln!(w, "pub const MANTISSA_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS;")?;
+        writeln!(w)?;
 
-        let linear_count = 2 * self.n;
-        writeln!(
-            w,
-            "/// Maps linear bucket index to approximate log bucket index."
-        )?;
-        writeln!(
-            w,
-            "/// Linear bucket i starts at mantissa (i * 2^52) / (2 * N)."
-        )?;
-        writeln!(
-            w,
-            "pub const LOG_BUCKET_INDEX: [u16; {}] = [",
-            linear_count
-        )?;
+        writeln!(w, "/// Maps linear bucket index to approximate log bucket index.")?;
+        writeln!(w, "/// Linear bucket i starts at mantissa (i * 2^52) / (2 * N).")?;
+        writeln!(w, "pub const LOG_BUCKET_INDEX: [u16; 1 << LINEAR_BUCKET_BITS] = [")?;
         for (i, &idx) in self.log_bucket_index.iter().enumerate() {
             if i % 16 == 0 {
                 write!(w, "    ")?;
             }
             write!(w, "{:4},", idx)?;
-            if i % 16 == 15 || i == linear_count - 1 {
+            if i % 16 == 15 || i == self.log_bucket_index.len() - 1 {
                 writeln!(w)?;
             }
         }
@@ -96,16 +92,9 @@ impl LookupTables {
         writeln!(w)?;
 
         writeln!(w, "/// End mantissa (52-bit) for each log bucket.")?;
-        writeln!(
-            w,
-            "/// Bucket i contains values with mantissa in [boundary[i], boundary[i+1])."
-        )?;
+        writeln!(w, "/// Bucket i contains values with mantissa in [boundary[i], boundary[i+1]).")?;
         writeln!(w, "/// Last entry is a sentinel (2^52) for boundary checks.")?;
-        writeln!(
-            w,
-            "pub const LOG_BUCKET_END: [u64; {}] = [",
-            self.log_bucket_end.len()
-        )?;
+        writeln!(w, "pub const LOG_BUCKET_END: [u64; (1 << LOOKUP_SCALE) + 1] = [")?;
         for (i, &boundary) in self.log_bucket_end.iter().enumerate() {
             if i % 4 == 0 {
                 write!(w, "    ")?;
@@ -120,13 +109,6 @@ impl LookupTables {
             }
         }
         writeln!(w, "];")?;
-        writeln!(w)?;
-
-        writeln!(
-            w,
-            "/// Shift to convert 52-bit mantissa to linear bucket index."
-        )?;
-        writeln!(w, "pub const MANTISSA_SHIFT: u32 = {};", self.mantissa_shift)?;
 
         Ok(())
     }
@@ -138,12 +120,16 @@ impl LookupTables {
 /// Since N = 2^scale, we use:
 ///   2^(position/N) = sqrt(sqrt(...sqrt(2^position)...)) applied `scale` times
 ///
-/// Algorithm from https://github.com/open-telemetry/opentelemetry-collector/pull/3841:
-/// 1. Compute 2^position exactly
-/// 2. Take square root `scale` times
+/// Algorithm (from Go implementation):
+/// 1. Compute 2^position exactly using arbitrary-precision float
+/// 2. Take square root `scale` times using arbitrary-precision sqrt
 /// 3. Scale by 2^52 and truncate to get candidate significand
 /// 4. Verify candidate^N >= 2^(52*N + position), increment if not
 pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
+    // Use sufficient precision for exact computation
+    // 128 bits is plenty for scale up to 20
+    const PRECISION: u32 = 128;
+    
     let mut boundaries = Vec::with_capacity(n);
 
     for position in 0..n {
@@ -155,29 +141,29 @@ pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
 
         // Compute 2^(position/N) using repeated square root
         // Start with 2^position, then take sqrt `scale` times
-        let mut x = 2.0_f64.powi(position as i32);
+        let mut x = Float::with_val(PRECISION, 1u32) << position as u32;
         for _ in 0..scale {
             x = x.sqrt();
         }
 
         // Scale by 2^52 to get the IEEE significand + 2^52
-        let scaled = x * (1u64 << 52) as f64;
-        let mut ieee_normalized = scaled as u64; // in range [2^52, 2^53)
+        x <<= 52;
+        let mut ieee_normalized = x.to_integer().unwrap().to_u64().unwrap();
 
         // Verify using exact integer arithmetic:
         // We need the smallest significand S such that S^N >= 2^(52*N + position)
-        let compare_to = BigUint::one() << (52 * n + position);
+        let compare_to = Integer::from(1u32) << (52 * n + position) as u32;
 
         // Check if ieee_normalized^N >= compare_to
-        let sig = BigUint::from(ieee_normalized);
-        if ipow(&sig, n) < compare_to {
+        let sig = Integer::from(ieee_normalized).pow(n as u32);
+        if sig < compare_to {
             ieee_normalized += 1;
         }
 
         // Validate: (ieee_normalized - 1)^N must be < compare_to
-        let sig_less_one = BigUint::from(ieee_normalized - 1);
+        let sig_less_one = Integer::from(ieee_normalized - 1).pow(n as u32);
         assert!(
-            ipow(&sig_less_one, n) < compare_to,
+            sig_less_one < compare_to,
             "incorrect boundary at position {}: off by more than 1 ULP",
             position
         );
@@ -188,18 +174,9 @@ pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
     boundaries
 }
 
-/// Compute b^p using repeated multiplication (exact for BigUint).
-pub fn ipow(b: &BigUint, p: usize) -> BigUint {
-    let mut result = BigUint::one();
-    for _ in 0..p {
-        result *= b;
-    }
-    result
-}
-
 /// Compute the TRUE bucket index for a value at a given scale using exact arithmetic.
 ///
-/// Uses the same BigUint boundary computation as `compute_boundaries_exact`.
+/// Uses rug Integer boundary computation.
 ///
 /// # Arguments
 /// * `value` - A positive, normal f64 value
@@ -313,6 +290,26 @@ mod tests {
         assert_eq!(tables.log_bucket_index.len(), 2048);
         assert_eq!(tables.log_bucket_end.len(), 1025);
         assert_eq!(tables.mantissa_shift, 41); // 52 - 11
+    }
+
+    #[test]
+    fn test_generate_scale_12() {
+        let tables = LookupTables::generate(12);
+        assert_eq!(tables.scale, 12);
+        assert_eq!(tables.n, 4096);
+        assert_eq!(tables.log_bucket_index.len(), 8192);
+        assert_eq!(tables.log_bucket_end.len(), 4097);
+        assert_eq!(tables.mantissa_shift, 39); // 52 - 13
+    }
+
+    #[test]
+    fn test_generate_scale_14() {
+        let tables = LookupTables::generate(14);
+        assert_eq!(tables.scale, 14);
+        assert_eq!(tables.n, 16384);
+        assert_eq!(tables.log_bucket_index.len(), 32768);
+        assert_eq!(tables.log_bucket_end.len(), 16385);
+        assert_eq!(tables.mantissa_shift, 37); // 52 - 15
     }
 
     #[test]
@@ -460,9 +457,9 @@ mod tests {
         let source = String::from_utf8(output).unwrap();
         
         assert!(source.contains("LOOKUP_SCALE: i32 = 6"));
-        assert!(source.contains("LOG_BUCKET_INDEX: [u16; 128]"));
-        assert!(source.contains("LOG_BUCKET_END: [u64; 65]"));
-        assert!(source.contains("MANTISSA_SHIFT: u32 = 45"));
+        assert!(source.contains("LOG_BUCKET_INDEX: [u16; 1 << LINEAR_BUCKET_BITS]"));
+        assert!(source.contains("LOG_BUCKET_END: [u64; (1 << LOOKUP_SCALE) + 1]"));
+        assert!(source.contains("MANTISSA_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS"));
     }
 
     /// Get the next representable f64 value greater than v.

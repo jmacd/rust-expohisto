@@ -33,7 +33,7 @@ pub fn map_to_index_lg(value: f64, scale: i32, scale_factor: f64) -> i32 {
     }
 
     // General case: use floor(log(value) * scaleFactor)
-    libm::floor(libm::log(value) * scale_factor) as i32
+    (value.ln() * scale_factor).floor() as i32
 }
 
 /// Minimum scale for the exponent mapping.
@@ -152,7 +152,7 @@ impl Mapping {
         }
 
         // Use lookup table if available and scale is supported
-        #[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+        #[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
         if crate::lookup::supports_scale(scale) {
             return crate::lookup::map_to_index_lookup(value, scale);
         }
@@ -164,7 +164,7 @@ impl Mapping {
         }
 
         // General case: use floor(log(value) * scaleFactor)
-        let index = libm::floor(libm::log(value) * self.scale_factor) as i32;
+        let index = (value.ln() * self.scale_factor).floor() as i32;
 
         let max_idx = self.max_normal_lower_boundary_index_log();
         if index >= max_idx { max_idx } else { index }
@@ -193,7 +193,7 @@ impl Mapping {
 
         // 2^(index << shift)
         let exp = index << shift;
-        Ok(libm::ldexp(1.0, exp))
+        Ok(2.0_f64.powi(exp))
     }
 
     fn lower_boundary_logarithm(&self, index: i32) -> Result<f64, MappingError> {
@@ -204,7 +204,7 @@ impl Mapping {
         if index >= max_idx {
             if index == max_idx {
                 // Use alternate equation to avoid overflow
-                return Ok(2.0 * libm::exp((index - (1 << scale)) as f64 * self.inverse_factor));
+                return Ok(2.0 * ((index - (1 << scale)) as f64 * self.inverse_factor).exp());
             }
             return Err(MappingError::Overflow);
         }
@@ -213,12 +213,12 @@ impl Mapping {
             if index == min_idx {
                 return Ok(MIN_VALUE);
             } else if index == min_idx - 1 {
-                return Ok(libm::exp((index + (1 << scale)) as f64 * self.inverse_factor) / 2.0);
+                return Ok(((index + (1 << scale)) as f64 * self.inverse_factor).exp() / 2.0);
             }
             return Err(MappingError::Underflow);
         }
 
-        Ok(libm::exp(index as f64 * self.inverse_factor))
+        Ok((index as f64 * self.inverse_factor).exp())
     }
 
     // Helper functions for boundary indices
@@ -334,13 +334,13 @@ mod tests {
         // Test that the reference lg function matches the pure logarithm Mapping implementation.
         // Note: When lookup tables are enabled, Mapping uses lookup which may differ 
         // at bucket boundaries due to table resolution. This test only runs without lookup.
-        #[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+        #[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
         {
             // Skip when lookup is enabled - lg matches pure logarithm, not lookup
             return;
         }
 
-        #[cfg(not(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024")))]
+        #[cfg(not(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14")))]
         {
             let test_values = [
                 1.0001, 1.1, 1.5, 1.9, 1.9999,
@@ -386,20 +386,20 @@ mod tests {
     }
 
     /// Get the next representable f64 value greater than v.
-    #[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+    #[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
     fn next_up(v: f64) -> f64 {
         let bits = v.to_bits();
         f64::from_bits(bits + 1)
     }
 
     /// Get the next representable f64 value less than v.
-    #[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+    #[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
     fn next_down(v: f64) -> f64 {
         let bits = v.to_bits();
         f64::from_bits(bits - 1)
     }
 
-    #[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+    #[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
     #[test]
     fn test_lookup_powers_of_two_boundary() {
         // Test that the lookup table correctly handles values at and near powers of two.
@@ -412,7 +412,7 @@ mod tests {
         
         for scale in 1..=max_lookup_scale {
             for exp in -100..=100 {
-                let power_of_two = libm::ldexp(1.0, exp);
+                let power_of_two = 2.0_f64.powi(exp);
                 let pow2_expected = (exp << scale) - 1;
                 
                 // Lookup must be correct for exact powers of two
@@ -426,7 +426,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+    #[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
     #[test]
     fn test_lg_precision_errors_at_scale_boundaries() {
         // Demonstrate that the pure logarithm implementation can have floating-point 
@@ -475,7 +475,7 @@ mod tests {
                 while bucket_offset < buckets_per_octave {
                     // The boundary value is 2^(exp + bucket_offset/2^scale)
                     let boundary_exp = (exp as f64) + (bucket_offset as f64) / (buckets_per_octave as f64);
-                    let boundary_value = libm::exp2(boundary_exp);
+                    let boundary_value = boundary_exp.exp2();
                     
                     // Step through values near this boundary
                     let mut v = boundary_value;
@@ -549,7 +549,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "lookup-64", feature = "lookup-256", feature = "lookup-1024"))]
+    #[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
     #[test]
     fn test_lg_and_lookup_agree_at_all_scales() {
         // Test that lg and lookup agree at all supported scales.
