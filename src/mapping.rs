@@ -11,7 +11,7 @@
 //! - `newrelic-*` features: lookup table-based mapping (exact, no FP errors)
 
 use crate::float64::{
-    MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE, get_normal_base2, get_significand,
+    MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE,
 };
 
 /// Minimum scale for the exponent mapping.
@@ -125,7 +125,7 @@ impl Mapping {
     #[inline]
     pub fn map_to_index(&self, value: f64) -> i32 {
         if self.scale <= 0 {
-            self.map_to_index_exponent(value)
+            crate::exponent::map_to_index(value, self.scale as i32)
         } else {
             self.map_to_index_positive_scale(value)
         }
@@ -181,50 +181,14 @@ impl Mapping {
         }
     }
 
-    /// Exponent-based mapping for scale <= 0.
-    #[inline]
-    fn map_to_index_exponent(&self, value: f64) -> i32 {
-        let shift = (-self.scale) as u32;
-
-        if value < MIN_VALUE {
-            return self.min_normal_lower_boundary_index_exp();
-        }
-
-        // Extract the raw exponent
-        let raw_exp = get_normal_base2(value);
-
-        // Correction for exact powers of two: if significand is 0, subtract 1
-        let significand = get_significand(value);
-        let correction = if significand == 0 { -1 } else { 0 };
-
-        // Arithmetic right shift handles negative exponents correctly
-        (raw_exp + correction) >> shift
-    }
-
     /// Returns the lower boundary of a bucket at the given index.
     #[inline]
     pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
         if self.scale <= 0 {
-            self.lower_boundary_exponent(index)
+            crate::exponent::lower_boundary(index, self.scale as i32)
         } else {
             self.lower_boundary_logarithm(index)
         }
-    }
-
-    fn lower_boundary_exponent(&self, index: i32) -> Result<f64, MappingError> {
-        let shift = (-self.scale) as u32;
-
-        if index < self.min_normal_lower_boundary_index_exp() {
-            return Err(MappingError::Underflow);
-        }
-
-        if index > self.max_normal_lower_boundary_index_exp() {
-            return Err(MappingError::Overflow);
-        }
-
-        // 2^(index << shift)
-        let exp = index << shift;
-        Ok(2.0_f64.powi(exp))
     }
 
     fn lower_boundary_logarithm(&self, index: i32) -> Result<f64, MappingError> {
@@ -253,23 +217,6 @@ impl Mapping {
     }
 
     // Helper functions for boundary indices
-
-    #[inline]
-    fn min_normal_lower_boundary_index_exp(&self) -> i32 {
-        let shift = (-self.scale) as u32;
-        let mut idx = MIN_NORMAL_EXPONENT >> shift;
-        if shift < 2 {
-            // For scales -1 and 0, 2^-1022 is a power-of-two multiple
-            idx -= 1;
-        }
-        idx
-    }
-
-    #[inline]
-    fn max_normal_lower_boundary_index_exp(&self) -> i32 {
-        let shift = (-self.scale) as u32;
-        MAX_NORMAL_EXPONENT >> shift
-    }
 
     #[inline]
     fn min_normal_lower_boundary_index_log(&self) -> i32 {
