@@ -27,9 +27,7 @@ pub(crate) const MAX_NORMAL_EXPONENT: i32 = EXPONENT_BIAS;
 /// Smallest normal f64 value: 2^-1022.
 pub(crate) const MIN_VALUE: f64 = 2.2250738585072014e-308; // 0x1p-1022
 
-/// Extracts the normalized base-2 fractional exponent.
-/// Returns k for the equation f × 2^k where f is in the range [1, 2).
-/// Note: This function is not called for subnormal numbers.
+/// Extracts the normalized base-2 exponent from an f64.
 #[inline]
 pub(crate) fn get_normal_base2(value: f64) -> i32 {
     let raw_bits = value.to_bits();

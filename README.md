@@ -104,8 +104,8 @@ For non-positive scales, the bucket index is derived directly from the IEEE 754 
 
 When a lookup feature is enabled (default: `lookup-10`), mapping uses integer-only operations:
 
-1. Extract mantissa and exponent from the IEEE 754 representation
-2. Use the mantissa to index into a precomputed lookup table
+1. Extract significand and exponent from the IEEE 754 representation
+2. Use the significand to index into a precomputed lookup table
 3. Apply a single boundary check to correct the approximation
 4. Combine with exponent to produce the final index
 
@@ -123,7 +123,7 @@ index = floor(ln(value) × 2^scale / ln(2))
 
 The lookup table eliminates floating-point operations by:
 
-1. **Linear bucket approximation**: Divide the mantissa range `[0, 2^52)` into `2N` equal-width linear buckets
+1. **Linear bucket approximation**: Divide the significand range `[0, 2^52)` into `2N` equal-width linear buckets
 2. **Precomputed mapping**: Each linear bucket maps to a log-scale bucket (with at most 1 bucket of error)
 3. **Boundary refinement**: A single integer comparison against the exact boundary corrects the approximation
 

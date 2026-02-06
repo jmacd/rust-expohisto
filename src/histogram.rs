@@ -2,32 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Allocation-free exponential histogram implementation.
-//!
-//! This module provides a fixed-size exponential histogram that stores
-//! bucket counts in a fixed-size array, avoiding any heap allocation.
-//!
-//! # Type Parameters
-//!
-//! - `C`: Counter type (e.g., `u16`, `u32`) - determines the maximum count per bucket
-//! - `SIZE`: Maximum number of buckets (power of 2 recommended for slightly faster modular arithmetic)
-//!
-//! # Example
-//!
-//! ```
-//! use rust_expohisto::Histogram;
-//!
-//! // Create a histogram with 16 u16 buckets
-//! let mut hist: Histogram<u16, 16> = Histogram::new();
-//!
-//! // Record some values
-//! hist.update(1.5);
-//! hist.update(2.5);
-//! hist.update(100.0);
-//!
-//! assert_eq!(hist.count(), 3);
-//! ```
 
-use crate::mapping::{Mapping, MAX_SCALE};
+use crate::mapping::{Mapping, max_scale};
 
 /// Trait for counter types that can be used in the histogram.
 pub trait Counter: Copy + Default + Ord {
@@ -328,26 +304,6 @@ impl<'a, C: Counter, const SIZE: usize> IntoIterator for &'a Buckets<C, SIZE> {
 }
 
 /// An allocation-free exponential histogram for non-negative values.
-///
-/// # Type Parameters
-///
-/// - `C`: Counter type (`u8`, `u16`, `u32`, or `u64`)
-/// - `SIZE`: Maximum number of buckets
-///
-/// # Size Calculation
-///
-/// For SIZE=16 and C=u16:
-/// - sum: 8 bytes
-/// - count: 8 bytes
-/// - zero_count: 8 bytes
-/// - min: 8 bytes
-/// - max: 8 bytes
-/// - mapping: ~24 bytes (scale + factors)
-/// - buckets.counts: 32 bytes (16 * 2)
-/// - buckets indices: 12 bytes (3 * i32)
-/// - Total: ~108 bytes ≈ 14 words
-///
-/// For positive-only with smaller counters, this fits in roughly 10+ words.
 #[derive(Debug, Clone)]
 pub struct Histogram<C: Counter, const SIZE: usize> {
     // Statistics
@@ -371,7 +327,7 @@ impl<C: Counter, const SIZE: usize> Default for Histogram<C, SIZE> {
 }
 
 impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
-    /// Creates a new histogram at the maximum scale.
+    /// Creates a new histogram at the maximum supported scale.
     #[inline]
     pub fn new() -> Self {
         Self {
@@ -380,15 +336,12 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             zero_count: 0,
             min: 0.0,
             max: 0.0,
-            mapping: Mapping::new(MAX_SCALE).unwrap(),
+            mapping: Mapping::new(max_scale()).unwrap(),
             positive: Buckets::new(),
         }
     }
 
     /// Creates a new histogram at the specified scale.
-    ///
-    /// # Panics
-    /// Panics if the scale is out of range.
     #[inline]
     pub fn with_scale(scale: i32) -> Self {
         Self {
@@ -457,7 +410,7 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         self.zero_count = 0;
         self.min = 0.0;
         self.max = 0.0;
-        self.mapping = Mapping::new(MAX_SCALE).unwrap();
+        self.mapping = Mapping::new(max_scale()).unwrap();
     }
 
     /// Swaps contents with another histogram.
@@ -467,18 +420,12 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     }
 
     /// Records a single value.
-    ///
-    /// # Panics
-    /// Panics if value is negative, NaN, or infinite.
     #[inline]
     pub fn update(&mut self, value: f64) {
         self.update_by_incr(value, 1);
     }
 
-    /// Records a value with a specified increment (count).
-    ///
-    /// # Panics
-    /// Panics if value is negative, NaN, or infinite.
+    /// Records a value with a specified increment.
     pub fn update_by_incr(&mut self, value: f64, incr: u64) {
         debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
         debug_assert!(value.is_finite(), "Histogram only accepts finite values");
@@ -595,30 +542,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     }
 
     /// Merges a histogram with a potentially different counter type into this one.
-    ///
-    /// This enables aggregating histograms with smaller counter widths (e.g., U32)
-    /// into histograms with larger counter widths (e.g., U64). This is useful when
-    /// you want to maintain cumulative histograms with wide counters while sending
-    /// delta histograms with narrower counters.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use rust_expohisto::Histogram;
-    ///
-    /// // Cumulative histogram with u64 counters
-    /// let mut cumulative: Histogram<u64, 16> = Histogram::new();
-    ///
-    /// // Delta histogram with u32 counters (more compact for transport)
-    /// let mut delta: Histogram<u32, 16> = Histogram::new();
-    /// delta.update(1.5);
-    /// delta.update(2.5);
-    ///
-    /// // Aggregate the delta into the cumulative
-    /// cumulative.merge_from_histogram(&delta);
-    ///
-    /// assert_eq!(cumulative.count(), 2);
-    /// ```
     pub fn merge_from_histogram<C2: Counter>(&mut self, other: &Histogram<C2, SIZE>) {
         // Early return if other is empty
         if other.count == 0 {
@@ -743,7 +666,7 @@ mod tests {
         h.update(1000.0);
 
         assert_eq!(h.count(), 2);
-        assert!(h.scale() < MAX_SCALE);
+        assert!(h.scale() < max_scale());
     }
 
     #[test]

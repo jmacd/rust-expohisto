@@ -7,12 +7,24 @@
 //! to avoid any heap allocation. The histogram automatically adjusts its scale
 //! to accommodate the range of input data.
 //!
+//! # Mapping Algorithms
+//!
+//! This crate supports multiple mapping algorithms, selected at compile time:
+//!
+//! - **`logarithm`** (default): Pure logarithm-based mapping using `floor(ln(value) * scaleFactor)`.
+//!   Works for all scales, small binary size, but has floating-point precision errors near boundaries.
+//!
+//! - **`newrelic-*`**: Lookup table-based mapping from NewRelic. Exact (no FP errors),
+//!   uses integer-only computation. Choose table size based on your max scale needs:
+//!   `newrelic-4`, `newrelic-6`, `newrelic-8`, `newrelic-10`, `newrelic-12`, `newrelic-14`.
+//!
 //! # Features
 //!
 //! - **Allocation-free**: Uses fixed-size arrays via const generics
 //! - **Configurable counter type**: Choose between `u8`, `u16`, `u32`, or `u64`
 //! - **Automatic scaling**: Scale adjusts automatically to fit data in available buckets
 //! - **Merge support**: Histograms can be merged in-place without allocation
+//! - **Algorithm choice**: Select mapping algorithm at compile time
 //!
 //! # Example
 //!
@@ -75,9 +87,21 @@
 
 pub mod float64;
 pub mod histogram;
-#[cfg(any(feature = "lookup-4", feature = "lookup-6", feature = "lookup-8", feature = "lookup-10", feature = "lookup-12", feature = "lookup-14"))]
-pub mod lookup;
 pub mod mapping;
 
+// Algorithm modules - conditionally compiled
+#[cfg(feature = "logarithm")]
+pub mod logarithm;
+
+#[cfg(any(
+    feature = "newrelic-4",
+    feature = "newrelic-6",
+    feature = "newrelic-8",
+    feature = "newrelic-10",
+    feature = "newrelic-12",
+    feature = "newrelic-14"
+))]
+pub mod newrelic;
+
 pub use histogram::{Buckets, BucketsIter, Counter, Histogram, Histogram16, Histogram32, Histogram64};
-pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, map_to_index_lg};
+pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};

@@ -12,11 +12,11 @@ use expohisto_mapping_gen::LookupTables;
 fn bench_table_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("table_generation");
 
-    // Scale 10 takes ~61ms, 12 takes 2s, 14 takes 45s, etc.
-    for scale in [4, 6, 8, 10] {
-        group.bench_function(BenchmarkId::new("generate", scale), |b| {
+    // index_bits=10 takes ~61ms, 12 takes 2s, 14 takes 45s, etc.
+    for index_bits in [4, 6, 8, 10] {
+        group.bench_function(BenchmarkId::new("generate", index_bits), |b| {
             b.iter(|| {
-                black_box(LookupTables::generate(black_box(scale)));
+                black_box(LookupTables::generate(black_box(index_bits)));
             })
         });
     }
@@ -27,14 +27,14 @@ fn bench_table_generation(c: &mut Criterion) {
 fn bench_table_sizes(c: &mut Criterion) {
     // Just report the sizes, not really a benchmark
     println!("\n=== Table Sizes ===");
-    for scale in [4u32, 6, 8, 10, 12, 14] {
-        let n = 1usize << scale;
+    for index_bits in [4u32, 6, 8, 10, 12, 14] {
+        let n = 1usize << index_bits;
         let index_bytes = 2 * n * 2; // 2N entries × 2 bytes (u16)
         let boundary_bytes = (n + 1) * 8; // (N+1) entries × 8 bytes (u64)
         let total_bytes = index_bytes + boundary_bytes;
         println!(
-            "Scale {:2}: {:5} buckets | {:6} bytes index + {:6} bytes boundaries = {:6} bytes ({:.1} KB)",
-            scale,
+            "index_bits {:2}: {:5} buckets | {:6} bytes index + {:6} bytes boundaries = {:6} bytes ({:.1} KB)",
+            index_bits,
             n,
             index_bytes,
             boundary_bytes,

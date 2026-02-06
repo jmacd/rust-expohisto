@@ -4,7 +4,7 @@
 //! Benchmarks for exponential histogram mapping functions.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rust_expohisto::{Mapping, map_to_index_lg};
+use rust_expohisto::{Mapping, max_scale};
 
 /// Test values spanning the full range of normal f64 values.
 const TEST_VALUES: &[f64] = &[
@@ -14,6 +14,20 @@ const TEST_VALUES: &[f64] = &[
 
 fn bench_map_to_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("map_to_index");
+
+    // Determine the algorithm label
+    let algo_label = if cfg!(any(
+        feature = "newrelic-4",
+        feature = "newrelic-6",
+        feature = "newrelic-8",
+        feature = "newrelic-10",
+        feature = "newrelic-12",
+        feature = "newrelic-14"
+    )) {
+        "newrelic"
+    } else {
+        "logarithm"
+    };
 
     // Non-positive scales (exponent mapping)
     for scale in [-10, -5, -1, 0] {
@@ -27,35 +41,19 @@ fn bench_map_to_index(c: &mut Criterion) {
         });
     }
 
-    // Positive scales - these use lookup tables if enabled
-    for scale in [1, 4, 6, 8, 10, 12, 14, 20] {
+    // Positive scales - benchmark up to max_scale()
+    let max = max_scale();
+    let scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20]
+        .into_iter()
+        .filter(|&s| s <= max)
+        .collect();
+
+    for scale in scales {
         let mapping = Mapping::new(scale).unwrap();
-        let label = if cfg!(any(
-            feature = "lookup-4",
-            feature = "lookup-6",
-            feature = "lookup-8",
-            feature = "lookup-10",
-            feature = "lookup-12",
-            feature = "lookup-14"
-        )) {
-            "lookup_or_log"
-        } else {
-            "logarithm"
-        };
-        group.bench_function(BenchmarkId::new(label, scale), |b| {
+        group.bench_function(BenchmarkId::new(algo_label, scale), |b| {
             b.iter(|| {
                 for &v in TEST_VALUES {
                     black_box(mapping.map_to_index(black_box(v)));
-                }
-            })
-        });
-
-        // Reference lg implementation for comparison
-        let scale_factor = core::f64::consts::LOG2_E * (1u64 << scale) as f64;
-        group.bench_function(BenchmarkId::new("lg_reference", scale), |b| {
-            b.iter(|| {
-                for &v in TEST_VALUES {
-                    black_box(map_to_index_lg(black_box(v), scale, scale_factor));
                 }
             })
         });
@@ -81,8 +79,14 @@ fn bench_lower_boundary(c: &mut Criterion) {
         });
     }
 
-    // Positive scales (logarithm mapping)
-    for scale in [1, 4, 8, 10, 12, 14, 20] {
+    // Positive scales - benchmark up to max_scale()
+    let max = max_scale();
+    let scales: Vec<i32> = [1, 4, 8, 10, 12, 14, 20]
+        .into_iter()
+        .filter(|&s| s <= max)
+        .collect();
+
+    for scale in scales {
         let mapping = Mapping::new(scale).unwrap();
         // Use indices that are representative for this scale
         let indices: Vec<i32> = (-100..=100).collect();

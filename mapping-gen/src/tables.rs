@@ -2,42 +2,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Lookup table generation for exponential histogram mapping.
-//!
-//! This module computes exact bucket boundaries using te rug
-//! the algorithm:
-//!
-//! 1. Compute 2^position exactly
-//! 2. Take square root `scale` times to get 2^(position/2^scale)
-//! 3. Scale by 2^52 and verify using exact integer comparison
 
 use crate::float64::SIGNIFICAND_MASK;
 use rug::ops::Pow;
 use rug::{Float, Integer};
 
-/// Generated lookup tables for a specific scale.
+/// Generated lookup tables for a specific size.
 #[derive(Debug, Clone)]
 pub struct LookupTables {
-    /// The scale these tables were generated for.
-    pub scale: u32,
-    /// Number of log buckets (N = 2^scale).
+    /// log_2 of table size (N = 2^index_bits buckets).
+    /// Also equals the maximum histogram scale supported.
+    pub index_bits: u32,
+    /// Number of log buckets (N = 2^index_bits).
     pub n: usize,
     /// Maps linear bucket index to approximate log bucket index.
     /// Has 2*N entries.
     pub log_bucket_index: Vec<u16>,
-    /// End mantissa (52-bit) for each log bucket.
+    /// End significand (52-bit) for each log bucket.
     /// Has N+1 entries (last is sentinel).
     pub log_bucket_end: Vec<u64>,
-    /// Shift to convert 52-bit mantissa to linear bucket index.
-    pub mantissa_shift: u32,
+    /// Shift to convert 52-bit significand to linear bucket index.
+    pub significand_shift: u32,
 }
 
 impl LookupTables {
-    /// Generate lookup tables for a given scale.
-    ///
-    /// The scale determines the number of buckets: N = 2^scale.
-    pub fn generate(scale: u32) -> Self {
-        let n = 1usize << scale;
-        let boundaries = compute_boundaries_exact(n, scale);
+    /// Generates lookup tables for a given number of index bits.
+    pub fn generate(index_bits: u32) -> Self {
+        let n = 1usize << index_bits;
+        let boundaries = compute_boundaries_exact(n, index_bits);
         let log_bucket_index = compute_linear_to_log_mapping(n, &boundaries);
 
         // LOG_BUCKET_END stores the boundaries array plus a sentinel
@@ -46,14 +38,14 @@ impl LookupTables {
         let mut log_bucket_end = boundaries.clone();
         log_bucket_end.push(1u64 << 52); // sentinel = 2^52
 
-        let mantissa_shift = 52 - (scale + 1); // +1 for 2N linear buckets
+        let significand_shift = 52 - (index_bits + 1); // +1 for 2N linear buckets
 
         Self {
-            scale,
+            index_bits,
             n,
             log_bucket_index,
             log_bucket_end,
-            mantissa_shift,
+            significand_shift,
         }
     }
 
@@ -61,16 +53,17 @@ impl LookupTables {
     pub fn write_rust_source<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
         writeln!(
             w,
-            "// Auto-generated lookup tables for scale {}",
-            self.scale
+            "// Auto-generated lookup tables with {} index bits ({} buckets)",
+            self.index_bits,
+            self.n
         )?;
         writeln!(w)?;
 
         writeln!(w, "use crate::float64::SIGNIFICAND_WIDTH;")?;
         writeln!(w)?;
 
-        writeln!(w, "/// Maximum scale supported by this lookup table.")?;
-        writeln!(w, "pub const LOOKUP_SCALE: i32 = {};", self.scale)?;
+        writeln!(w, "/// Maximum histogram scale supported by this lookup table.")?;
+        writeln!(w, "pub const LOOKUP_SCALE: i32 = {};", self.index_bits)?;
         writeln!(w)?;
 
         writeln!(w, "/// Number of bits to index into 2*N linear buckets.")?;
@@ -82,15 +75,15 @@ impl LookupTables {
 
         writeln!(
             w,
-            "/// Shift to convert 52-bit mantissa to linear bucket index."
+            "/// Shift to convert 52-bit significand to linear bucket index."
         )?;
         writeln!(
             w,
-            "/// mantissa >> MANTISSA_SHIFT yields an index in 0..2*N."
+            "/// significand >> SIGNIFICAND_SHIFT yields an index in 0..2*N."
         )?;
         writeln!(
             w,
-            "pub const MANTISSA_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS;"
+            "pub const SIGNIFICAND_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS;"
         )?;
         writeln!(w)?;
 
@@ -100,7 +93,7 @@ impl LookupTables {
         )?;
         writeln!(
             w,
-            "/// Linear bucket i starts at mantissa (i * 2^52) / (2 * N)."
+            "/// Linear bucket i starts at significand (i * 2^52) / (2 * N)."
         )?;
         writeln!(
             w,
@@ -118,10 +111,10 @@ impl LookupTables {
         writeln!(w, "];")?;
         writeln!(w)?;
 
-        writeln!(w, "/// End mantissa (52-bit) for each log bucket.")?;
+        writeln!(w, "/// End significand (52-bit) for each log bucket.")?;
         writeln!(
             w,
-            "/// Bucket i contains values with mantissa in [boundary[i], boundary[i+1])."
+            "/// Bucket i contains values with significand in [boundary[i], boundary[i+1])."
         )?;
         writeln!(
             w,
@@ -150,20 +143,10 @@ impl LookupTables {
     }
 }
 
-/// Compute log bucket end boundaries as 52-bit mantissas using exact arithmetic.
-///
-/// For position in 0..N, we compute the 52-bit significand of 2^(position/N).
-/// Since N = 2^scale, we use:
-///   2^(position/N) = sqrt(sqrt(...sqrt(2^position)...)) applied `scale` times
-///
-/// Algorithm (from Go implementation):
-/// 1. Compute 2^position exactly using arbitrary-precision float
-/// 2. Take square root `scale` times using arbitrary-precision sqrt
-/// 3. Scale by 2^52 and truncate to get candidate significand
-/// 4. Verify candidate^N >= 2^(52*N + position), increment if not
-pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
+/// Computes log bucket end boundaries as 52-bit significands using exact arithmetic.
+pub fn compute_boundaries_exact(n: usize, index_bits: u32) -> Vec<u64> {
     // Use sufficient precision for exact computation
-    // 128 bits is plenty for scale up to 20
+    // 128 bits is plenty for index_bits up to 20
     const PRECISION: u32 = 128;
 
     let mut boundaries = Vec::with_capacity(n);
@@ -176,9 +159,9 @@ pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
         }
 
         // Compute 2^(position/N) using repeated square root
-        // Start with 2^position, then take sqrt `scale` times
+        // Start with 2^position, then take sqrt `index_bits` times
         let mut x = Float::with_val(PRECISION, 1u32) << position as u32;
-        for _ in 0..scale {
+        for _ in 0..index_bits {
             x = x.sqrt();
         }
 
@@ -210,16 +193,7 @@ pub fn compute_boundaries_exact(n: usize, scale: u32) -> Vec<u64> {
     boundaries
 }
 
-/// Compute the TRUE bucket index for a value at a given scale using exact arithmetic.
-///
-/// Uses rug Integer boundary computation.
-///
-/// # Arguments
-/// * `value` - A positive, normal f64 value
-/// * `scale` - The histogram scale (must be > 0)
-///
-/// # Returns
-/// The mathematically correct bucket index.
+/// Computes the exact bucket index for a value at a given scale.
 pub fn map_to_index_exact(value: f64, scale: i32) -> i32 {
     let significand = crate::float64::get_significand(value);
     let exponent = crate::float64::get_normal_base2(value);
@@ -271,7 +245,7 @@ pub fn compute_linear_to_log_mapping(n: usize, boundaries: &[u64]) -> Vec<u16> {
     let linear_count = 2 * n;
     let mut mapping = Vec::with_capacity(linear_count);
 
-    // Linear bucket i starts at mantissa = (i * 2^52) / (2N)
+    // Linear bucket i starts at significand = (i * 2^52) / (2N)
     for i in 0..linear_count {
         let linear_start = ((i as u128) << 52) / (linear_count as u128);
         let linear_start = linear_start as u64;
@@ -299,79 +273,79 @@ mod tests {
     use crate::float64::{get_normal_base2, get_significand};
 
     #[test]
-    fn test_generate_scale_6() {
+    fn test_generate_6_bits() {
         let tables = LookupTables::generate(6);
-        assert_eq!(tables.scale, 6);
+        assert_eq!(tables.index_bits, 6);
         assert_eq!(tables.n, 64);
         assert_eq!(tables.log_bucket_index.len(), 128);
         assert_eq!(tables.log_bucket_end.len(), 65); // 64 + sentinel
-        assert_eq!(tables.mantissa_shift, 45); // 52 - 7
+        assert_eq!(tables.significand_shift, 45); // 52 - 7
     }
 
     #[test]
-    fn test_generate_scale_8() {
+    fn test_generate_8_bits() {
         let tables = LookupTables::generate(8);
-        assert_eq!(tables.scale, 8);
+        assert_eq!(tables.index_bits, 8);
         assert_eq!(tables.n, 256);
         assert_eq!(tables.log_bucket_index.len(), 512);
         assert_eq!(tables.log_bucket_end.len(), 257);
-        assert_eq!(tables.mantissa_shift, 43); // 52 - 9
+        assert_eq!(tables.significand_shift, 43); // 52 - 9
     }
 
     #[test]
-    fn test_generate_scale_10() {
+    fn test_generate_10_bits() {
         let tables = LookupTables::generate(10);
-        assert_eq!(tables.scale, 10);
+        assert_eq!(tables.index_bits, 10);
         assert_eq!(tables.n, 1024);
         assert_eq!(tables.log_bucket_index.len(), 2048);
         assert_eq!(tables.log_bucket_end.len(), 1025);
-        assert_eq!(tables.mantissa_shift, 41); // 52 - 11
+        assert_eq!(tables.significand_shift, 41); // 52 - 11
     }
 
     #[test]
-    fn test_generate_scale_12() {
+    fn test_generate_12_bits() {
         let tables = LookupTables::generate(12);
-        assert_eq!(tables.scale, 12);
+        assert_eq!(tables.index_bits, 12);
         assert_eq!(tables.n, 4096);
         assert_eq!(tables.log_bucket_index.len(), 8192);
         assert_eq!(tables.log_bucket_end.len(), 4097);
-        assert_eq!(tables.mantissa_shift, 39); // 52 - 13
+        assert_eq!(tables.significand_shift, 39); // 52 - 13
     }
 
     #[test]
-    fn test_generate_scale_14() {
+    fn test_generate_14_bits() {
         let tables = LookupTables::generate(14);
-        assert_eq!(tables.scale, 14);
+        assert_eq!(tables.index_bits, 14);
         assert_eq!(tables.n, 16384);
         assert_eq!(tables.log_bucket_index.len(), 32768);
         assert_eq!(tables.log_bucket_end.len(), 16385);
-        assert_eq!(tables.mantissa_shift, 37); // 52 - 15
+        assert_eq!(tables.significand_shift, 37); // 52 - 15
     }
 
     #[test]
     fn test_boundaries_position_0() {
         // Position 0 should always be 0 (2^0 = 1.0, significand = 0)
-        for scale in 1..=10 {
-            let n = 1usize << scale;
-            let boundaries = compute_boundaries_exact(n, scale);
+        for index_bits in 1..=10 {
+            let n = 1usize << index_bits;
+            let boundaries = compute_boundaries_exact(n, index_bits);
             assert_eq!(
                 boundaries[0], 0,
-                "boundary[0] should be 0 at scale {}",
-                scale
+                "boundary[0] should be 0 at index_bits {}",
+                index_bits
             );
         }
     }
 
     #[test]
     fn test_boundaries_monotonic() {
-        for scale in 1..=10 {
-            let n = 1usize << scale;
-            let boundaries = compute_boundaries_exact(n, scale);
+        for index_bits in 1..=10 {
+            let n = 1usize << index_bits;
+            let boundaries = compute_boundaries_exact(n, index_bits);
             for i in 1..boundaries.len() {
                 assert!(
                     boundaries[i] > boundaries[i - 1],
-                    "boundaries not monotonic at scale {}, position {}",
-                    scale,
+                    "boundaries not monotonic at index_bits {}, position {}",
+                    index_bits,
                     i
                 );
             }
@@ -399,7 +373,7 @@ mod tests {
                 let expected_idx = (value.ln() * scale_factor).floor() as i32;
 
                 // Use lookup
-                let linear_idx = (significand >> tables.mantissa_shift) as usize;
+                let linear_idx = (significand >> tables.significand_shift) as usize;
                 let approx_bucket = tables.log_bucket_index[linear_idx] as usize;
                 let bucket = if significand >= tables.log_bucket_end[approx_bucket] {
                     approx_bucket + 1
@@ -436,7 +410,7 @@ mod tests {
                 }
 
                 // Use lookup
-                let linear_idx = (significand >> tables.mantissa_shift) as usize;
+                let linear_idx = (significand >> tables.significand_shift) as usize;
                 let approx_bucket = tables.log_bucket_index[linear_idx] as usize;
                 let bucket = if significand >= tables.log_bucket_end[approx_bucket] {
                     approx_bucket + 1
@@ -507,7 +481,7 @@ mod tests {
         assert!(source.contains("LOOKUP_SCALE: i32 = 6"));
         assert!(source.contains("LOG_BUCKET_INDEX: [u16; 1 << LINEAR_BUCKET_BITS]"));
         assert!(source.contains("LOG_BUCKET_END: [u64; (1 << LOOKUP_SCALE) + 1]"));
-        assert!(source.contains("MANTISSA_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS"));
+        assert!(source.contains("SIGNIFICAND_SHIFT: u32 = SIGNIFICAND_WIDTH - LINEAR_BUCKET_BITS"));
     }
 
     /// Get the next representable f64 value greater than v.
@@ -529,17 +503,17 @@ mod tests {
         (value.ln() * scale_factor).floor() as i32
     }
 
-    /// Lookup table implementation at LOOKUP_SCALE (no downscaling)
+    /// Lookup table implementation at native table resolution (no downscaling)
     fn map_to_index_lookup_at_native_scale(value: f64, tables: &LookupTables) -> i32 {
         let significand = get_significand(value);
         let exponent = get_normal_base2(value);
-        let scale = tables.scale as i32;
+        let scale = tables.index_bits as i32; // At native resolution, histogram scale = index_bits
 
         if significand == 0 {
             return (exponent << scale) - 1;
         }
 
-        let linear_idx = (significand >> tables.mantissa_shift) as usize;
+        let linear_idx = (significand >> tables.significand_shift) as usize;
         let approx_bucket = tables.log_bucket_index[linear_idx] as usize;
         let bucket = if significand >= tables.log_bucket_end[approx_bucket] {
             approx_bucket + 1
