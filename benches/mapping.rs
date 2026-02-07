@@ -15,7 +15,7 @@ const TEST_VALUES: &[f64] = &[
 fn bench_map_to_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("map_to_index");
 
-    // Determine the algorithm label
+    // Determine the algorithm label for the primary (Mapping-dispatched) algorithm
     let algo_label = if cfg!(any(
         feature = "newrelic-4",
         feature = "newrelic-6",
@@ -25,6 +25,15 @@ fn bench_map_to_index(c: &mut Criterion) {
         feature = "newrelic-14"
     )) {
         "newrelic"
+    } else if cfg!(any(
+        feature = "dynatrace-4",
+        feature = "dynatrace-6",
+        feature = "dynatrace-8",
+        feature = "dynatrace-10",
+        feature = "dynatrace-12",
+        feature = "dynatrace-14"
+    )) {
+        "dynatrace"
     } else {
         "logarithm"
     };
@@ -41,14 +50,14 @@ fn bench_map_to_index(c: &mut Criterion) {
         });
     }
 
-    // Positive scales - benchmark up to max_scale()
+    // Positive scales - benchmark the primary algorithm via Mapping
     let max = max_scale();
     let scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20]
         .into_iter()
         .filter(|&s| s <= max)
         .collect();
 
-    for scale in scales {
+    for &scale in &scales {
         let mapping = Mapping::new(scale).unwrap();
         group.bench_function(BenchmarkId::new(algo_label, scale), |b| {
             b.iter(|| {
@@ -57,6 +66,63 @@ fn bench_map_to_index(c: &mut Criterion) {
                 }
             })
         });
+    }
+
+    // When bench-all is enabled, also benchmark the non-primary algorithms directly
+    #[cfg(feature = "bench-all")]
+    {
+        // Dynatrace direct (when newrelic is primary via Mapping)
+        #[cfg(any(
+            feature = "dynatrace-4",
+            feature = "dynatrace-6",
+            feature = "dynatrace-8",
+            feature = "dynatrace-10",
+            feature = "dynatrace-12",
+            feature = "dynatrace-14"
+        ))]
+        {
+            let dt_max = rust_expohisto::dynatrace::table_scale();
+            let dt_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14]
+                .into_iter()
+                .filter(|&s| s <= dt_max)
+                .collect();
+
+            for &scale in &dt_scales {
+                let sm = rust_expohisto::dynatrace::get_scale_mapping(scale);
+                group.bench_function(BenchmarkId::new("dynatrace", scale), |b| {
+                    b.iter(|| {
+                        for &v in TEST_VALUES {
+                            black_box(rust_expohisto::dynatrace::map_to_index(
+                                black_box(v),
+                                scale,
+                                sm,
+                            ));
+                        }
+                    })
+                });
+            }
+        }
+
+        // Logarithm direct
+        #[cfg(feature = "logarithm")]
+        {
+            let log_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20].to_vec();
+
+            for &scale in &log_scales {
+                let sf = rust_expohisto::logarithm::scale_factor(scale);
+                group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
+                    b.iter(|| {
+                        for &v in TEST_VALUES {
+                            black_box(rust_expohisto::logarithm::map_to_index(
+                                black_box(v),
+                                scale,
+                                sf,
+                            ));
+                        }
+                    })
+                });
+            }
+        }
     }
 
     group.finish();

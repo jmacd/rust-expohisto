@@ -7,7 +7,7 @@
 //! used to map f64 values to histogram bucket indices efficiently.
 
 mod float64;
-mod tables;
+mod newrelic_table;
 
 pub use float64::*;
-pub use tables::*;
+pub use newrelic_table::*;

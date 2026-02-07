@@ -104,5 +104,15 @@ pub mod logarithm;
 ))]
 pub mod newrelic;
 
+#[cfg(any(
+    feature = "dynatrace-4",
+    feature = "dynatrace-6",
+    feature = "dynatrace-8",
+    feature = "dynatrace-10",
+    feature = "dynatrace-12",
+    feature = "dynatrace-14"
+))]
+pub mod dynatrace;
+
 pub use histogram::{Buckets, BucketsIter, Counter, Histogram, Histogram16, Histogram32, Histogram64};
 pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};

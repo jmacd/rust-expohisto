@@ -39,6 +39,7 @@ pub enum MappingError {
 ///
 /// - `logarithm`: supports all scales up to MAX_SCALE (20)
 /// - `newrelic-*`: supports scales up to the table scale (4, 6, 8, 10, 12, or 14)
+/// - `dynatrace-*`: supports scales up to the table scale (4, 6, 8, 10, 12, or 14)
 #[inline]
 pub const fn max_scale() -> i32 {
     #[cfg(any(
@@ -53,13 +54,41 @@ pub const fn max_scale() -> i32 {
         crate::newrelic::TABLE_SCALE
     }
 
+    #[cfg(all(
+        not(any(
+            feature = "newrelic-4",
+            feature = "newrelic-6",
+            feature = "newrelic-8",
+            feature = "newrelic-10",
+            feature = "newrelic-12",
+            feature = "newrelic-14"
+        )),
+        any(
+            feature = "dynatrace-4",
+            feature = "dynatrace-6",
+            feature = "dynatrace-8",
+            feature = "dynatrace-10",
+            feature = "dynatrace-12",
+            feature = "dynatrace-14"
+        )
+    ))]
+    {
+        crate::dynatrace::TABLE_SCALE
+    }
+
     #[cfg(not(any(
         feature = "newrelic-4",
         feature = "newrelic-6",
         feature = "newrelic-8",
         feature = "newrelic-10",
         feature = "newrelic-12",
-        feature = "newrelic-14"
+        feature = "newrelic-14",
+        feature = "dynatrace-4",
+        feature = "dynatrace-6",
+        feature = "dynatrace-8",
+        feature = "dynatrace-10",
+        feature = "dynatrace-12",
+        feature = "dynatrace-14"
     )))]
     {
         MAX_SCALE
@@ -75,6 +104,26 @@ pub struct Mapping {
     scale_factor: f64,
     // Pre-computed inverse factor for boundary computation
     inverse_factor: f64,
+    // Per-scale lookup tables (newrelic only)
+    #[cfg(any(
+        feature = "newrelic-4",
+        feature = "newrelic-6",
+        feature = "newrelic-8",
+        feature = "newrelic-10",
+        feature = "newrelic-12",
+        feature = "newrelic-14"
+    ))]
+    newrelic_mapping: &'static crate::newrelic::NewrelicScaleMapping,
+    // Per-scale lookup tables (dynatrace only)
+    #[cfg(any(
+        feature = "dynatrace-4",
+        feature = "dynatrace-6",
+        feature = "dynatrace-8",
+        feature = "dynatrace-10",
+        feature = "dynatrace-12",
+        feature = "dynatrace-14"
+    ))]
+    dynatrace_mapping: &'static crate::dynatrace::DynatraceScaleMapping,
 }
 
 impl Mapping {
@@ -107,11 +156,59 @@ impl Mapping {
             0.0
         };
 
+        #[cfg(any(
+            feature = "newrelic-4",
+            feature = "newrelic-6",
+            feature = "newrelic-8",
+            feature = "newrelic-10",
+            feature = "newrelic-12",
+            feature = "newrelic-14"
+        ))]
+        let newrelic_mapping = if scale > 0 && scale <= crate::newrelic::TABLE_SCALE {
+            crate::newrelic::get_scale_mapping(scale)
+        } else {
+            // Placeholder -- won't be used for scale <= 0 or beyond newrelic table
+            crate::newrelic::get_scale_mapping(1)
+        };
+
+        #[cfg(any(
+            feature = "dynatrace-4",
+            feature = "dynatrace-6",
+            feature = "dynatrace-8",
+            feature = "dynatrace-10",
+            feature = "dynatrace-12",
+            feature = "dynatrace-14"
+        ))]
+        let dynatrace_mapping = if scale > 0 && scale <= crate::dynatrace::TABLE_SCALE {
+            crate::dynatrace::get_scale_mapping(scale)
+        } else {
+            // Placeholder -- won't be used for scale <= 0 or beyond dynatrace table
+            crate::dynatrace::get_scale_mapping(1)
+        };
+
         Ok(Self {
             scale: scale as i8,
             #[cfg(feature = "logarithm")]
             scale_factor,
             inverse_factor,
+            #[cfg(any(
+                feature = "newrelic-4",
+                feature = "newrelic-6",
+                feature = "newrelic-8",
+                feature = "newrelic-10",
+                feature = "newrelic-12",
+                feature = "newrelic-14"
+            ))]
+            newrelic_mapping,
+            #[cfg(any(
+                feature = "dynatrace-4",
+                feature = "dynatrace-6",
+                feature = "dynatrace-8",
+                feature = "dynatrace-10",
+                feature = "dynatrace-12",
+                feature = "dynatrace-14"
+            ))]
+            dynatrace_mapping,
         })
     }
 
@@ -144,7 +241,30 @@ impl Mapping {
             feature = "newrelic-14"
         ))]
         {
-            crate::newrelic::map_to_index(value, self.scale as i32)
+            crate::newrelic::map_to_index(value, self.scale as i32, self.newrelic_mapping)
+        }
+
+        // Dynatrace lookup table next
+        #[cfg(all(
+            any(
+                feature = "dynatrace-4",
+                feature = "dynatrace-6",
+                feature = "dynatrace-8",
+                feature = "dynatrace-10",
+                feature = "dynatrace-12",
+                feature = "dynatrace-14"
+            ),
+            not(any(
+                feature = "newrelic-4",
+                feature = "newrelic-6",
+                feature = "newrelic-8",
+                feature = "newrelic-10",
+                feature = "newrelic-12",
+                feature = "newrelic-14"
+            ))
+        ))]
+        {
+            crate::dynatrace::map_to_index(value, self.scale as i32, self.dynatrace_mapping)
         }
 
         // Fallback to logarithm
@@ -156,7 +276,13 @@ impl Mapping {
                 feature = "newrelic-8",
                 feature = "newrelic-10",
                 feature = "newrelic-12",
-                feature = "newrelic-14"
+                feature = "newrelic-14",
+                feature = "dynatrace-4",
+                feature = "dynatrace-6",
+                feature = "dynatrace-8",
+                feature = "dynatrace-10",
+                feature = "dynatrace-12",
+                feature = "dynatrace-14"
             ))
         ))]
         {
@@ -171,7 +297,13 @@ impl Mapping {
             feature = "newrelic-8",
             feature = "newrelic-10",
             feature = "newrelic-12",
-            feature = "newrelic-14"
+            feature = "newrelic-14",
+            feature = "dynatrace-4",
+            feature = "dynatrace-6",
+            feature = "dynatrace-8",
+            feature = "dynatrace-10",
+            feature = "dynatrace-12",
+            feature = "dynatrace-14"
         )))]
         {
             // Return a placeholder to make rustc happy, but this path is unreachable

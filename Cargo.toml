@@ -6,7 +6,7 @@ description = "Allocation-free OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
 
 [features]
-default = ["logarithm"]
+default = ["newrelic-8"]
 
 # Mapping algorithms - choose one for production, enable multiple for benchmarks.
 # At least one must be enabled. If multiple are enabled, newrelic takes precedence.
@@ -27,8 +27,18 @@ newrelic-10 = []    # 12KB, scales 1-10
 newrelic-12 = []    # 48KB, scales 1-12
 newrelic-14 = []    # 192KB, scales 1-14
 
+# Dynatrace lookup table-based mapping.
+# Pros: Exact (no FP errors), ~50% smaller index table than NewRelic.
+# Cons: Two branch corrections vs one; table scale limits useful range.
+dynatrace-4 = []
+dynatrace-6 = []
+dynatrace-8 = []
+dynatrace-10 = []
+dynatrace-12 = []
+dynatrace-14 = []
+
 # For benchmarking all algorithms together
-bench-all = ["logarithm", "newrelic-8"]
+bench-all = ["logarithm", "newrelic-8", "dynatrace-8"]
 
 [dependencies]
 
@@ -38,6 +48,7 @@ expohisto-mapping-gen = { path = "mapping-gen" }
 [dev-dependencies]
 criterion = "0.5"
 rand = "0.8"
+expohisto-mapping-gen = { path = "mapping-gen" }
 
 [[bench]]
 name = "mapping"
