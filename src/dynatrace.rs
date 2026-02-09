@@ -22,7 +22,7 @@ pub struct DynatraceScaleMapping {
     pub significand_shift: u32,
     /// Maps each of N linear buckets to an approximate log bucket index.
     /// Length = 1 << scale.
-    pub indices: &'static [i16],
+    pub indices: &'static [u16],
     /// Exact boundary significands, with two sentinels at the end.
     /// Length = (1 << scale) + 2.
     /// boundaries[k] = significand of 2^(k/N).

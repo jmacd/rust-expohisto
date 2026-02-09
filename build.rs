@@ -3,7 +3,7 @@
 
 //! Build script to generate lookup tables for exponential histogram mapping.
 
-use expohisto_mapping_gen::{compute_linear_to_log_mapping, LookupTables};
+use expohisto_mapping_gen::{compute_dynatrace_indices, compute_linear_to_log_mapping, LookupTables};
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -96,22 +96,6 @@ fn generate_dynatrace_tables(out_dir: &str) {
     }
 }
 
-/// Compute Dynatrace-style indices: N linear buckets mapping to approximate log bucket.
-/// Each linear bucket i starts at significand = i << (52 - scale).
-/// The index is the largest boundary index c such that boundaries[c] <= lower_bound.
-fn compute_dynatrace_indices(n: usize, boundaries: &[u64], scale: u32) -> Vec<i16> {
-    let mut indices = vec![0i16; n];
-    let mut c: i16 = 0;
-    for i in 0..n {
-        let mantissa_lower_bound = (i as u64) << (52 - scale);
-        while boundaries[(c + 1) as usize] <= mantissa_lower_bound {
-            c += 1;
-        }
-        indices[i] = c;
-    }
-    indices
-}
-
 fn write_dynatrace_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -> std::io::Result<()> {
     let table_scale = tables.index_bits;
 
@@ -151,7 +135,7 @@ fn write_dynatrace_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -
         let indices = compute_dynatrace_indices(n_s, &boundaries, s);
 
         // Emit INDICES for this scale (N entries)
-        writeln!(w, "static DT_INDICES_{}: [i16; {}] = [", s, n_s)?;
+        writeln!(w, "static DT_INDICES_{}: [u16; {}] = [", s, n_s)?;
         for (i, &idx) in indices.iter().enumerate() {
             if i % 16 == 0 {
                 write!(w, "    ")?;

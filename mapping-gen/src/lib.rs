@@ -7,7 +7,9 @@
 //! used to map f64 values to histogram bucket indices efficiently.
 
 mod float64;
+mod dynatrace_table;
 mod newrelic_table;
 
+pub use dynatrace_table::*;
 pub use float64::*;
 pub use newrelic_table::*;
