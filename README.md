@@ -34,7 +34,7 @@ println!("scale: {}", hist.scale());
 
 ## Performance
 
-Benchmark results (15 test values, per-value timing):
+Benchmark results (100 test values, per-iteration timing):
 
 | Method | Scale | Time | Notes |
 |--------|-------|------|-------|
@@ -140,7 +140,7 @@ Bucket boundaries are computed exactly at build time using the algorithm from [P
 3. Scale by `2^52` and truncate to get candidate significand
 4. Verify using exact BigUint arithmetic: `candidate^N ≥ 2^(52N + position)`
 5. Increment if needed to find the exact boundary
-
+w
 This guarantees boundaries are correct to 1 ULP (unit in last place).
 
 ## Crate Structure
@@ -158,7 +158,7 @@ cd mapping-gen && cargo test
 
 - [OpenTelemetry Exponential Histogram Specification](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
 - [Golang OpenTelemetry Exponential Histogram](https://github.com/lightstep/go-expohisto): Golang reference implementation by the same author
-- [Dynatrace lookup table algorithm by Otmar Ertl](https://github.com/open-telemetry/opentelemetry-collector/pull/3841)
+- [Dynatrace DynaHist library by Otmar Ertl](https://github.com/dynatrace-oss/dynahist) (see [ExponentialHistogramLargeInclusiveLayout](https://github.com/dynatrace-oss/dynahist/blob/main/src/main/java/com/dynatrace/dynahist/layout/ExponentialHistogramLargeInclusiveLayout.java))
 - [NewRelic lookup table algorithm by Yuke Zhuge](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/Indexer.md)
 - [NewRelic algorithm implementation](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
 

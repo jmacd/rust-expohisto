@@ -6,14 +6,34 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rust_expohisto::{Mapping, max_scale};
 
-/// Test values spanning the full range of normal f64 values.
+/// 100 test values with significands roughly uniformly distributed across [1.0, 2.0).
+/// 10 base significands × 10 magnitude groups = 100 values.
 const TEST_VALUES: &[f64] = &[
-    1e-300, 1e-100, 1e-10, 0.001, 0.1, 0.5, 1.0, 1.5, 2.0, core::f64::consts::PI, 10.0, 100.0, 1e10, 1e100,
-    1e300,
+    // Base significands (approx binary): 1.03, 1.13, 1.24, 1.35, 1.47, 1.58, 1.69, 1.78, 1.87, 1.96
+    // Group 1: magnitude ~2^-996 to ~2^-664
+    1.03e-300, 1.13e-280, 1.24e-260, 1.35e-240, 1.47e-220, 1.58e-210, 1.69e-205, 1.78e-201, 1.87e-200, 1.96e-200,
+    // Group 2: magnitude ~2^-332 to ~2^-166
+    1.03e-100, 1.13e-90, 1.24e-80, 1.35e-70, 1.47e-65, 1.58e-60, 1.69e-55, 1.78e-52, 1.87e-51, 1.96e-50,
+    // Group 3: magnitude ~2^-33 to ~2^-7
+    1.03e-10, 1.13e-8, 1.24e-7, 1.35e-6, 1.47e-5, 1.58e-4, 1.69e-3, 1.78e-3, 1.87e-2, 1.96e-2,
+    // Group 4: magnitude ~2^-3 to ~2^0
+    0.129, 0.226, 0.311, 0.423, 0.587, 0.632, 0.743, 0.891, 0.937, 0.981,
+    // Group 5: magnitude ~2^0 (near 1)
+    1.03, 1.13, 1.24, 1.35, 1.47, 1.58, 1.69, 1.78, 1.87, 1.96,
+    // Group 6: magnitude ~2^1 to ~2^6
+    2.06, 2.83, 3.72, 5.41, 7.35, 9.48, 12.4, 21.3, 33.7, 56.8,
+    // Group 7: magnitude ~2^7 to ~2^13
+    103.0, 226.0, 496.0, 778.0, 1350.0, 2470.0, 3690.0, 5580.0, 7140.0, 8920.0,
+    // Group 8: magnitude ~2^16 to ~2^33
+    1.03e5, 1.13e6, 1.24e7, 1.35e8, 1.47e8, 1.58e9, 1.69e9, 1.78e9, 1.87e10, 1.96e10,
+    // Group 9: magnitude ~2^50 to ~2^166
+    1.03e15, 1.13e20, 1.24e25, 1.35e30, 1.47e35, 1.58e40, 1.69e42, 1.78e45, 1.87e48, 1.96e50,
+    // Group 10: magnitude ~2^200 to ~2^1000
+    1.03e60, 1.13e100, 1.24e140, 1.35e170, 1.47e200, 1.58e220, 1.69e250, 1.78e275, 1.87e290, 1.96e307,
 ];
 
 fn bench_map_to_index(c: &mut Criterion) {
-    let mut group = c.benchmark_group("map_to_index");
+    let mut group = c.benchmark_group("map_to_index_100x");
 
     // Determine the algorithm label for the primary (Mapping-dispatched) algorithm
     let algo_label = if cfg!(any(

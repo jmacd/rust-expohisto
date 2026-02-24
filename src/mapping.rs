@@ -101,6 +101,7 @@ pub struct Mapping {
     scale: i8,
     // Pre-computed scale factor for logarithm mapping (scale > 0)
     #[cfg(feature = "logarithm")]
+    #[allow(dead_code)] // unused when a lookup table takes precedence
     scale_factor: f64,
     // Pre-computed inverse factor for boundary computation
     inverse_factor: f64,
@@ -123,6 +124,7 @@ pub struct Mapping {
         feature = "dynatrace-12",
         feature = "dynatrace-14"
     ))]
+    #[allow(dead_code)] // unused when newrelic takes precedence
     dynatrace_mapping: &'static crate::dynatrace::DynatraceScaleMapping,
 }
 
