@@ -11,18 +11,26 @@
 //! Lower scales are derived by right-shifting: `map_at_S(v) = map_at_H(v) >> (H - S)`.
 
 use crate::float64::{get_normal_base2, get_significand};
-use crate::lookup::{BOUNDARIES, DT_INDEX, DT_SIGNIFICAND_SHIFT, TABLE_SCALE};
+use crate::lookup::{BOUNDARIES, TABLE_SCALE, derive_index_table};
 
-/// Maps a positive f64 value to a bucket index using the Dynatrace
-/// two-branch correction algorithm at TABLE_SCALE, then right-shifts.
+/// Number of log buckets at TABLE_SCALE.
+const N: usize = 1 << (TABLE_SCALE as usize);
+
+/// Significand shift for N linear buckets: one less bit of resolution than NR.
+const SIGNIFICAND_SHIFT: u32 = 52 - TABLE_SCALE as u32;
+
+/// Returns the linear-to-log index table (N entries), derived from
+/// BOUNDARIES on first use.
+#[inline]
+fn index_table() -> &'static [u16] {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<u16>> = OnceLock::new();
+    TABLE.get_or_init(|| derive_index_table(N, SIGNIFICAND_SHIFT))
+}
+
+/// Maps a positive f64 value to a bucket index.
 ///
-/// Upper-inclusive semantics are built into the boundary table: the sentinel
-/// at position 0 and `BOUNDARIES[1] = 1` ensure that `significand == 0`
-/// (exact powers of two) naturally maps one bucket lower without a branch.
-///
-/// # Arguments
-/// * `value` - A positive f64 value (must be > 0, finite)
-/// * `scale` - The histogram scale (must be in 1..=TABLE_SCALE)
+/// Uses N linear buckets and two branch corrections.
 #[inline]
 pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
@@ -33,18 +41,15 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);
 
-    let linear_idx = (significand >> DT_SIGNIFICAND_SHIFT) as usize;
-    let rough = DT_INDEX[linear_idx] as usize;
+    let index = index_table();
+    let linear_idx = (significand >> SIGNIFICAND_SHIFT) as usize;
+    let approx = index[linear_idx] as usize;
 
-    let mut offset = rough as i32 - 1;
-    if significand >= BOUNDARIES[rough + 1] {
-        offset += 1;
-    }
-    if significand >= BOUNDARIES[rough + 2] {
-        offset += 1;
-    }
+    let mut bucket = approx as i32;
+    if significand >= BOUNDARIES[approx + 1] { bucket += 1; }
+    if significand >= BOUNDARIES[approx + 2] { bucket += 1; }
 
-    let fine_index = (exponent << TABLE_SCALE) + offset;
+    let fine_index = (exponent << TABLE_SCALE) + bucket - 1;
     fine_index >> (TABLE_SCALE - scale)
 }
 

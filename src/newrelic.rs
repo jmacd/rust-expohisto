@@ -9,18 +9,26 @@
 //! right-shifting the result: `map_at_S(v) = map_at_H(v) >> (H - S)`.
 
 use crate::float64::{get_normal_base2, get_significand};
-use crate::lookup::{BOUNDARIES, NR_INDEX, NR_SIGNIFICAND_SHIFT, TABLE_SCALE};
+use crate::lookup::{BOUNDARIES, TABLE_SCALE, derive_index_table};
 
-/// Maps a positive f64 value to a bucket index using pre-computed
-/// lookup tables at TABLE_SCALE, then right-shifts to the requested scale.
+/// Number of log buckets at TABLE_SCALE.
+const N: usize = 1 << (TABLE_SCALE as usize);
+
+/// Significand shift for 2N linear buckets: one more bit of resolution than DT.
+const SIGNIFICAND_SHIFT: u32 = 52 - TABLE_SCALE as u32 - 1;
+
+/// Returns the linear-to-log index table (2N entries), derived from
+/// BOUNDARIES on first use.
+#[inline]
+fn index_table() -> &'static [u16] {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<Vec<u16>> = OnceLock::new();
+    TABLE.get_or_init(|| derive_index_table(2 * N, SIGNIFICAND_SHIFT))
+}
+
+/// Maps a positive f64 value to a bucket index.
 ///
-/// Upper-inclusive semantics are baked into the boundary table:
-/// `BOUNDARIES[1] = 1` ensures that `significand == 0` (exact powers of two)
-/// naturally fails the `>=` check, placing them in the bucket below.
-///
-/// # Arguments
-/// * `value` - A positive f64 value (must be > 0, finite)
-/// * `scale` - The histogram scale (must be in 1..=TABLE_SCALE)
+/// Uses 2N linear buckets and one branch correction.
 #[inline]
 pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
@@ -31,13 +39,12 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);
 
-    let linear_idx = (significand >> NR_SIGNIFICAND_SHIFT) as usize;
-    let approx = NR_INDEX[linear_idx] as usize;
-    let bucket = if significand >= BOUNDARIES[approx + 1] {
-        approx + 1
-    } else {
-        approx
-    } as i32;
+    let index = index_table();
+    let linear_idx = (significand >> SIGNIFICAND_SHIFT) as usize;
+    let approx = index[linear_idx] as usize;
+
+    let mut bucket = approx as i32;
+    if significand >= BOUNDARIES[approx + 1] { bucket += 1; }
 
     let fine_index = (exponent << TABLE_SCALE) + bucket - 1;
     fine_index >> (TABLE_SCALE - scale)
