@@ -24,8 +24,11 @@ pub fn map_to_index(value: f64, scale: i32, scale_factor: f64) -> i32 {
     debug_assert!(value > 0.0);
     debug_assert!(value.is_finite());
 
-    // Exact power-of-two: significand is 0, index is (exp << scale) - 1
-    if get_significand(value) == 0 {
+    // Exact power-of-two: significand is 0, index is (exp << scale) - 1.
+    // We use the exponent directly rather than ln() to avoid FP imprecision.
+    // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
+    let significand = get_significand(value);
+    if significand == 0 {
         let exp = get_normal_base2(value);
         return (exp << scale) - 1;
     }
