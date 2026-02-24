@@ -13,7 +13,7 @@
 //! Tables are generated at compile time for every scale from 1 to TABLE_SCALE,
 //! so each scale has its own compact arrays.
 
-use crate::float64::{SIGNIFICAND_WIDTH, get_normal_base2, get_significand};
+use crate::float64::{get_normal_base2, get_significand};
 
 /// Per-scale lookup tables for the Dynatrace algorithm.
 #[derive(Debug)]
@@ -69,11 +69,10 @@ pub fn map_to_index(value: f64, scale: i32, sm: &DynatraceScaleMapping) -> i32 {
         offset += 1;
     }
 
-    // Upper-inclusive correction: arithmetic right-shift of (sig - 1)
-    // gives -1 when sig is 0, 0 otherwise — no comparison needed.
+    // Upper-inclusive correction: exact powers of two (significand == 0)
+    // must map one bucket lower.
     // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
-    let correction = ((significand as i64 - 1) >> SIGNIFICAND_WIDTH) as i32;
-    (exponent << scale) + offset as i32 + correction
+    (exponent << scale) + offset as i32 - (significand == 0) as i32
 }
 
 /// Returns the native scale (resolution) of the lookup table.

@@ -11,7 +11,7 @@
 //! Only scales <= TABLE_SCALE are supported. Higher scales require a larger
 //! table or a different algorithm (e.g., logarithm).
 
-use crate::float64::{SIGNIFICAND_WIDTH, get_normal_base2, get_significand};
+use crate::float64::{get_normal_base2, get_significand};
 
 /// Per-scale lookup tables for the newrelic algorithm.
 #[derive(Debug)]
@@ -57,12 +57,10 @@ pub fn map_to_index(value: f64, scale: i32, sm: &NewrelicScaleMapping) -> i32 {
         approx_bucket
     } as i32;
 
-    // Upper-inclusive correction: arithmetic right-shift of (sig - 1)
-    // gives -1 when sig is 0, 0 otherwise — no comparison needed.
-    // Combined with the existing -1 from NewRelic's 1-based indexing.
+    // Upper-inclusive correction: exact powers of two (significand == 0)
+    // must map one bucket lower.
     // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
-    let correction = ((significand as i64 - 1) >> SIGNIFICAND_WIDTH) as i32;
-    (exponent << scale) + bucket - 1 + correction
+    (exponent << scale) + bucket - 1 - (significand == 0) as i32
 }
 
 /// Returns the native scale (resolution) of the lookup table.

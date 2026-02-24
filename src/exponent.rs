@@ -8,8 +8,7 @@
 //! This is the simplest and fastest algorithm, always used for non-positive scales.
 
 use crate::float64::{
-    MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE, SIGNIFICAND_WIDTH, get_normal_base2,
-    get_significand,
+    MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE, get_normal_base2, get_significand,
 };
 use crate::mapping::MappingError;
 
@@ -34,10 +33,9 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     let raw_exp = get_normal_base2(value);
 
     // Upper-inclusive correction: exact powers of two (significand == 0)
-    // must map one bucket lower.  Arithmetic right-shift of (sig - 1)
-    // gives -1 when sig is 0, 0 otherwise — no branch needed.
+    // must map one bucket lower.
     // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
-    let correction = ((get_significand(value) as i64 - 1) >> SIGNIFICAND_WIDTH) as i32;
+    let correction = if get_significand(value) == 0 { -1 } else { 0 };
 
     // Arithmetic right shift handles negative exponents correctly
     (raw_exp + correction) >> shift
