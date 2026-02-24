@@ -75,7 +75,7 @@ LOG_BUCKET_INDEX[i] = smallest log bucket k such that k's start ≤ linear_bucke
 ```
 LOG_BUCKET_END[k] = significand of 2^(k/N) = the upper boundary of bucket k
 ```
-The last entry is a sentinel value `2^52` for bounds checking.
+The first entry is `1` (not `0`) to implement upper-inclusive bucket semantics — this ensures exact powers of two (significand 0) map one bucket lower without a branch. The last entry is a sentinel value `2^52` for bounds checking.
 
 ### Runtime Lookup (Integer-Only)
 
@@ -84,16 +84,13 @@ fn map_to_index_lookup(value: f64, scale: i32) -> i32 {
     let significand = value.to_bits() & SIGNIFICAND_MASK;  // bits 0-51
     let exponent = ((value.to_bits() >> 52) & 0x7FF) as i32 - 1023;
 
-    // Special case: exact powers of two (significand == 0)
-    if significand == 0 {
-        return (exponent << scale) - 1;  // upper-inclusive boundary
-    }
-
     // Step 1: Linear approximation
     let linear_idx = significand >> SIGNIFICAND_SHIFT;  // top bits select linear bucket
     let approx_bucket = LOG_BUCKET_INDEX[linear_idx];
 
     // Step 2: Boundary correction (at most +1)
+    // Upper-inclusive is baked in: boundary[0] = 1, so significand == 0
+    // (exact powers of two) fails this check, staying in the bucket below.
     let bucket = if significand >= LOG_BUCKET_END[approx_bucket] {
         approx_bucket + 1
     } else {
@@ -354,7 +351,13 @@ Per OpenTelemetry spec (for Prometheus compatibility), bucket `k` contains value
 `(base^k, base^(k+1)]`—the upper boundary is **inclusive**.
 
 This means exact powers of two fall into the bucket **below** the naive logarithm
-result. The lookup handles this with:
+result. For the lookup table algorithm, this is handled without a branch by setting
+`boundary[0] = 1` instead of `0`. Since the only exact bucket boundary that
+coincides with an IEEE 754 representable value is `2^(0/N) = 1.0` (significand 0),
+changing boundary[0] from 0 to 1 makes the `>=` comparison naturally exclude
+exact powers of two from sub-bucket 0, placing them in the bucket below.
+
+For the logarithm fallback (not table-based), an explicit check is still needed:
 
 ```rust
 if significand == 0 {

@@ -34,6 +34,10 @@ pub fn get_scale_mapping(scale: i32) -> &'static NewrelicScaleMapping {
 /// Maps a positive f64 value to a bucket index using the pre-computed
 /// per-scale lookup tables.
 ///
+/// Upper-inclusive semantics are baked into the table: `log_bucket_end[0] = 1`
+/// (instead of 0) ensures that `significand == 0` (exact powers of two)
+/// naturally fails the `>=` check, placing them in the bucket below.
+///
 /// # Arguments
 /// * `value` - A positive f64 value (must be > 0, finite)
 /// * `scale` - The histogram scale (must be in 1..=TABLE_SCALE)
@@ -57,10 +61,7 @@ pub fn map_to_index(value: f64, scale: i32, sm: &NewrelicScaleMapping) -> i32 {
         approx_bucket
     } as i32;
 
-    // Upper-inclusive correction: exact powers of two (significand == 0)
-    // must map one bucket lower.
-    // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
-    (exponent << scale) + bucket - 1 - (significand == 0) as i32
+    (exponent << scale) + bucket - 1
 }
 
 /// Returns the native scale (resolution) of the lookup table.

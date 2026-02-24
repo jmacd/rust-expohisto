@@ -29,12 +29,21 @@ impl LookupTables {
     /// Generates lookup tables for a given number of index bits.
     pub fn generate(index_bits: u32) -> Self {
         let n = 1usize << index_bits;
-        let boundaries = compute_boundaries_exact(n, index_bits);
+        let mut boundaries = compute_boundaries_exact(n, index_bits);
+
+        // Upper-inclusive adjustment: change boundary[0] from 0 to 1.
+        // This makes the ">=" comparison naturally exclude significand=0
+        // (exact powers of two) from sub-bucket 0, placing them in the
+        // bucket below — matching OTel's upper-inclusive bucket semantics.
+        // All other boundaries are ceilings of irrational values, so this
+        // change only affects exact powers of two.
+        debug_assert_eq!(boundaries[0], 0);
+        boundaries[0] = 1;
+
         let log_bucket_index = compute_linear_to_log_mapping(n, &boundaries);
 
-        // LOG_BUCKET_END stores the boundaries array plus a sentinel
-        // boundaries[k] = significand of 2^(k/N)
-        // LOG_BUCKET_END[k] = boundaries[k], with sentinel at the end
+        // LOG_BUCKET_END stores the adjusted boundaries plus a sentinel.
+        // boundaries[0] = 1 (upper-inclusive), boundaries[k] = significand of 2^(k/N) for k>0.
         let mut log_bucket_end = boundaries.clone();
         log_bucket_end.push(1u64 << 52); // sentinel = 2^52
 
@@ -111,10 +120,14 @@ impl LookupTables {
         writeln!(w, "];")?;
         writeln!(w)?;
 
-        writeln!(w, "/// End significand (52-bit) for each log bucket.")?;
+        writeln!(w, "/// End significand (52-bit) for each log bucket (upper-inclusive).")?;
         writeln!(
             w,
-            "/// Bucket i contains values with significand in [boundary[i], boundary[i+1])."
+            "/// boundary[0] = 1 handles upper-inclusive semantics: significand 0"
+        )?;
+        writeln!(
+            w,
+            "/// (exact powers of two) falls below boundary[0], mapping to sub-bucket -1."
         )?;
         writeln!(
             w,
@@ -404,12 +417,9 @@ mod tests {
                 let significand = get_significand(value);
                 let exponent = get_normal_base2(value);
 
-                if significand == 0 {
-                    // Power of two, handled separately
-                    continue;
-                }
-
-                // Use lookup
+                // Use lookup — upper-inclusive semantics are baked into the
+                // table (boundary[0] = 1), so no special case needed even
+                // for significand == 0 (exact powers of two).
                 let linear_idx = (significand >> tables.significand_shift) as usize;
                 let approx_bucket = tables.log_bucket_index[linear_idx] as usize;
                 let bucket = if significand >= tables.log_bucket_end[approx_bucket] {
@@ -509,10 +519,8 @@ mod tests {
         let exponent = get_normal_base2(value);
         let scale = tables.index_bits as i32; // At native resolution, histogram scale = index_bits
 
-        if significand == 0 {
-            return (exponent << scale) - 1;
-        }
-
+        // Upper-inclusive semantics are baked into the table (boundary[0] = 1),
+        // so no special case for significand == 0 is needed.
         let linear_idx = (significand >> tables.significand_shift) as usize;
         let approx_bucket = tables.log_bucket_index[linear_idx] as usize;
         let bucket = if significand >= tables.log_bucket_end[approx_bucket] {

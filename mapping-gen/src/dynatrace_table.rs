@@ -21,11 +21,14 @@ pub struct DynatraceTables {
     /// Number of log buckets (N = 2^index_bits).
     pub n: usize,
     /// Maps each of N equidistant linear buckets to an approximate log bucket.
-    /// Has N entries. The rough index may be off by up to 2, corrected
-    /// by two comparisons against the boundaries array.
+    /// Has N entries. The correction uses `rough as i32 - 1` as base, then
+    /// two comparisons adjust upward — so `offset` ranges from -1 to rough+1.
     pub indices: Vec<u16>,
-    /// Exact boundary significands: boundaries[k] = significand of 2^(k/N).
-    /// Has N+2 entries: N boundaries followed by two sentinels (2^52).
+    /// Boundary significands with upper-inclusive sentinel at position 0.
+    /// Layout: [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
+    /// Has N+3 entries. The sentinel at position 0 and b[0]=1 ensure that
+    /// significand=0 (exact powers of two) naturally maps one bucket lower,
+    /// implementing OTel's upper-inclusive bucket semantics without a branch.
     pub boundaries: Vec<u64>,
     /// Shift to convert 52-bit significand to linear bucket index: 52 - scale.
     pub significand_shift: u32,
@@ -37,10 +40,20 @@ impl DynatraceTables {
         let n = 1usize << index_bits;
         let raw_boundaries = compute_boundaries_exact(n, index_bits);
 
-        // Build the full boundaries array: N boundaries + 2 sentinels
-        let mut boundaries = raw_boundaries;
-        boundaries.push(1u64 << 52); // sentinel 1
-        boundaries.push(1u64 << 52); // sentinel 2
+        // Build boundaries with upper-inclusive sentinel at position 0:
+        // [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
+        //
+        // The sentinel at position 0 and b[0]=1 handle upper-inclusive semantics:
+        // - For significand=0 (power of two), rough=0, offset starts at -1,
+        //   neither correction fires → result = (exp << scale) - 1. Correct.
+        // - For significand>=1, the b[0]=1 check fires, bringing offset to 0+.
+        let mut boundaries = Vec::with_capacity(n + 3);
+        boundaries.push(0); // sentinel at position 0
+        debug_assert_eq!(raw_boundaries[0], 0);
+        boundaries.push(1); // upper-inclusive: b[0] = 1 instead of 0
+        boundaries.extend_from_slice(&raw_boundaries[1..]);
+        boundaries.push(1u64 << 52); // sentinel
+        boundaries.push(1u64 << 52); // sentinel
 
         let indices = compute_dynatrace_indices(n, &boundaries, index_bits);
         let significand_shift = 52 - index_bits;
@@ -58,7 +71,7 @@ impl DynatraceTables {
 /// Compute the Dynatrace index table: N linear buckets, each mapping to
 /// the largest boundary index c such that boundaries[c+1] <= lower_bound.
 ///
-/// `boundaries` must have N+2 entries (N boundaries + 2 sentinels).
+/// `boundaries` must have N+3 entries (sentinel + N+1 boundaries + sentinel).
 /// Linear bucket i covers significands starting at i << (52 - scale).
 /// The index c is chosen so that looking at boundaries[c+1] and boundaries[c+2]
 /// is sufficient to find the exact log bucket (at most 2 corrections needed).
@@ -80,22 +93,22 @@ pub fn compute_dynatrace_indices(n: usize, boundaries: &[u64], scale: u32) -> Ve
 /// This is the reference implementation used for testing the generated tables.
 /// The production version lives in `src/dynatrace.rs` and uses pre-generated
 /// static tables.
+///
+/// Upper-inclusive semantics are built into the boundary table: the sentinel
+/// at position 0 and boundary[1]=1 ensure that significand=0 (exact powers
+/// of two) naturally maps one bucket lower without a branch.
 pub fn map_to_index_dynatrace(value: f64, tables: &DynatraceTables) -> i32 {
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);
     let scale = tables.index_bits as i32;
 
-    // Exact power-of-two: significand is 0
-    if significand == 0 {
-        return (exponent << scale) - 1;
-    }
-
     // Look up the rough bucket from N equidistant linear buckets
     let linear_idx = (significand >> tables.significand_shift) as usize;
     let rough = tables.indices[linear_idx] as usize;
 
-    // Two-branch correction: the rough index may be off by up to 2
-    let mut offset = rough;
+    // Start at rough - 1 (may be -1 for significand=0 at rough=0).
+    // Two corrections adjust upward based on boundary comparisons.
+    let mut offset = rough as i32 - 1;
     if significand >= tables.boundaries[rough + 1] {
         offset += 1;
     }
@@ -103,12 +116,7 @@ pub fn map_to_index_dynatrace(value: f64, tables: &DynatraceTables) -> i32 {
         offset += 1;
     }
 
-    // offset is the sub-bucket index (0-based) within the octave.
-    // For non-power-of-two values: result = (exponent << scale) + offset
-    // This is correct because boundaries[0] = 0, and any significand > 0
-    // does NOT satisfy significand >= boundaries[0+1] for values in sub-bucket 0,
-    // giving offset = 0 = the correct sub-bucket.
-    (exponent << scale) + offset as i32
+    (exponent << scale) + offset
 }
 
 #[cfg(test)]
@@ -123,29 +131,33 @@ mod tests {
             let n = 1usize << index_bits;
             assert_eq!(tables.n, n);
             assert_eq!(tables.indices.len(), n, "scale {}", index_bits);
-            assert_eq!(tables.boundaries.len(), n + 2, "scale {}", index_bits);
+            assert_eq!(tables.boundaries.len(), n + 3, "scale {}", index_bits);
             assert_eq!(tables.significand_shift, 52 - index_bits);
         }
     }
 
     #[test]
     fn test_boundaries_match_newrelic() {
-        // Dynatrace and NewRelic use the same exact boundaries
+        // Dynatrace and NewRelic use the same exact boundaries (with different layout).
+        // Dynatrace: [sentinel=0, b[0]=1, b[1], ..., b[N-1], S, S]  (N+3 entries)
+        // NewRelic:  [b[0]=1, b[1], ..., b[N-1], S]                  (N+1 entries)
         for index_bits in [4, 6, 8, 10] {
             let dt = DynatraceTables::generate(index_bits);
             let nr = crate::newrelic_table::LookupTables::generate(index_bits);
 
-            // First N boundaries should match
+            // Dynatrace boundaries[1..N+1] should match NewRelic log_bucket_end[0..N]
             for k in 0..dt.n {
                 assert_eq!(
-                    dt.boundaries[k], nr.log_bucket_end[k],
+                    dt.boundaries[k + 1], nr.log_bucket_end[k],
                     "boundary mismatch at scale={}, k={}",
                     index_bits, k
                 );
             }
-            // Sentinels
-            assert_eq!(dt.boundaries[dt.n], 1u64 << 52);
+            // Sentinel at position 0
+            assert_eq!(dt.boundaries[0], 0);
+            // Sentinels at the end
             assert_eq!(dt.boundaries[dt.n + 1], 1u64 << 52);
+            assert_eq!(dt.boundaries[dt.n + 2], 1u64 << 52);
         }
     }
 
@@ -223,7 +235,8 @@ mod tests {
 
     #[test]
     fn test_vs_newrelic() {
-        // Verify Dynatrace and NewRelic give identical results
+        // Verify Dynatrace and NewRelic give identical results.
+        // Both now use upper-inclusive boundaries baked into the table.
         use crate::newrelic_table::LookupTables;
 
         for index_bits in [4, 6, 8, 10] {
@@ -241,21 +254,17 @@ mod tests {
             for &v in test_values {
                 let dt_idx = map_to_index_dynatrace(v, &dt);
 
-                // NewRelic mapping
+                // NewRelic mapping (upper-inclusive baked into tables, no sig==0 branch)
                 let significand = get_significand(v);
                 let exponent = get_normal_base2(v);
-                let nr_idx = if significand == 0 {
-                    (exponent << scale) - 1
+                let linear_idx = (significand >> nr.significand_shift) as usize;
+                let approx = nr.log_bucket_index[linear_idx] as usize;
+                let bucket = if significand >= nr.log_bucket_end[approx] {
+                    approx + 1
                 } else {
-                    let linear_idx = (significand >> nr.significand_shift) as usize;
-                    let approx = nr.log_bucket_index[linear_idx] as usize;
-                    let bucket = if significand >= nr.log_bucket_end[approx] {
-                        approx + 1
-                    } else {
-                        approx
-                    } as i32;
-                    (exponent << scale) + bucket - 1
-                };
+                    approx
+                } as i32;
+                let nr_idx = (exponent << scale) + bucket - 1;
 
                 assert_eq!(
                     dt_idx, nr_idx,

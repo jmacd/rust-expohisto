@@ -112,6 +112,7 @@ fn write_dynatrace_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -
     writeln!(w)?;
 
     // Extract the fine-resolution boundaries (without sentinel) from log_bucket_end
+    // Note: log_bucket_end[0] is already 1 (upper-inclusive) from LookupTables::generate
     let fine_boundaries: Vec<u64> = tables.log_bucket_end[..tables.n].to_vec();
 
     // Generate per-scale tables
@@ -120,18 +121,22 @@ fn write_dynatrace_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -
         let sig_shift = 52 - s;
 
         // Derive boundaries for this scale
-        let mut boundaries = if s == table_scale {
+        let derived = if s == table_scale {
             fine_boundaries.clone()
         } else {
             derive_boundaries(&fine_boundaries, table_scale, s)
         };
 
-        // Add two sentinels (2^52) for safe two-branch correction access
-        boundaries.push(1u64 << 52);
-        boundaries.push(1u64 << 52);
+        // Build Dynatrace boundaries with upper-inclusive sentinel at position 0:
+        // [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
+        // Total: N+3 entries
+        let mut boundaries = Vec::with_capacity(n_s + 3);
+        boundaries.push(0u64); // sentinel at position 0
+        boundaries.extend_from_slice(&derived);
+        boundaries.push(1u64 << 52); // sentinel
+        boundaries.push(1u64 << 52); // sentinel
 
-        // Compute Dynatrace-style indices (N entries, not 2N)
-        // boundaries must include sentinels for this to work
+        // Compute Dynatrace-style indices (N entries) with the new boundary layout
         let indices = compute_dynatrace_indices(n_s, &boundaries, s);
 
         // Emit INDICES for this scale (N entries)
@@ -148,14 +153,15 @@ fn write_dynatrace_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -
         writeln!(w, "];")?;
         writeln!(w)?;
 
-        // Emit BOUNDARIES for this scale (N + 2 entries: N boundaries + 2 sentinels)
-        // boundaries already has sentinels appended
-        writeln!(w, "static DT_BOUNDARIES_{}: [u64; {}] = [", s, n_s + 2)?;
+        // Emit BOUNDARIES for this scale (N + 3 entries: sentinel + N+1 boundaries + sentinel)
+        writeln!(w, "static DT_BOUNDARIES_{}: [u64; {}] = [", s, n_s + 3)?;
         for (i, &boundary) in boundaries.iter().enumerate() {
             if i % 4 == 0 {
                 write!(w, "    ")?;
             }
-            if i >= n_s {
+            if i == 0 {
+                writeln!(w, "0x{:013X}, // sentinel (upper-inclusive)", boundary)?;
+            } else if i > n_s {
                 writeln!(w, "0x{:013X}, // sentinel", boundary)?;
             } else {
                 write!(w, "0x{:013X},", boundary)?;
@@ -164,8 +170,12 @@ fn write_dynatrace_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -
                 }
             }
         }
-        if boundaries.len() % 4 != 0 && boundaries.last().map(|_| boundaries.len() - 1 < n_s).unwrap_or(false) {
-            writeln!(w)?;
+        if boundaries.len() % 4 != 0 {
+            // Ensure we end the line if the last non-sentinel entry didn't
+            let last_non_sentinel = boundaries.len().saturating_sub(1);
+            if last_non_sentinel <= n_s && last_non_sentinel % 4 != 0 {
+                // Already handled by the sentinel writeln above
+            }
         }
         writeln!(w, "];")?;
         writeln!(w)?;
@@ -206,7 +216,8 @@ fn write_newrelic_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) ->
     writeln!(w, "pub const TABLE_SCALE: i32 = {};", table_scale)?;
     writeln!(w)?;
 
-    // Extract the fine-resolution boundaries (without sentinel) from log_bucket_end
+    // Extract the fine-resolution boundaries (without sentinel) from log_bucket_end.
+    // Note: log_bucket_end[0] is 1 (upper-inclusive) from LookupTables::generate.
     let fine_boundaries: Vec<u64> = tables.log_bucket_end[..tables.n].to_vec();
 
     // Generate per-scale tables
@@ -214,7 +225,8 @@ fn write_newrelic_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) ->
         let n_s = 1usize << s;
         let sig_shift = 52 - (s + 1);
 
-        // Derive boundaries for this scale
+        // Derive boundaries for this scale.
+        // boundary[0] = 1 (upper-inclusive) propagates through derivation.
         let boundaries = if s == table_scale {
             fine_boundaries.clone()
         } else {

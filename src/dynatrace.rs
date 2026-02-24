@@ -23,9 +23,9 @@ pub struct DynatraceScaleMapping {
     /// Maps each of N linear buckets to an approximate log bucket index.
     /// Length = 1 << scale.
     pub indices: &'static [u16],
-    /// Exact boundary significands, with two sentinels at the end.
-    /// Length = (1 << scale) + 2.
-    /// boundaries[k] = significand of 2^(k/N).
+    /// Boundary significands with upper-inclusive sentinel at position 0.
+    /// Layout: [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
+    /// Length = (1 << scale) + 3.
     pub boundaries: &'static [u64],
 }
 
@@ -41,6 +41,10 @@ pub fn get_scale_mapping(scale: i32) -> &'static DynatraceScaleMapping {
 
 /// Maps a positive f64 value to a bucket index using the Dynatrace
 /// two-branch correction algorithm.
+///
+/// Upper-inclusive semantics are baked into the boundary table: the sentinel
+/// at position 0 and `boundaries[1] = 1` ensure that `significand == 0`
+/// (exact powers of two) naturally maps one bucket lower without a branch.
 ///
 /// # Arguments
 /// * `value` - A positive f64 value (must be > 0, finite)
@@ -60,8 +64,9 @@ pub fn map_to_index(value: f64, scale: i32, sm: &DynatraceScaleMapping) -> i32 {
     let linear_idx = (significand >> sm.significand_shift) as usize;
     let rough = sm.indices[linear_idx] as usize;
 
-    // Two-branch correction: the rough index may be off by up to 2
-    let mut offset = rough;
+    // Start at rough - 1 (may be -1 for significand=0 at rough=0).
+    // Two corrections adjust upward based on boundary comparisons.
+    let mut offset = rough as i32 - 1;
     if significand >= sm.boundaries[rough + 1] {
         offset += 1;
     }
@@ -69,10 +74,7 @@ pub fn map_to_index(value: f64, scale: i32, sm: &DynatraceScaleMapping) -> i32 {
         offset += 1;
     }
 
-    // Upper-inclusive correction: exact powers of two (significand == 0)
-    // must map one bucket lower.
-    // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
-    (exponent << scale) + offset as i32 - (significand == 0) as i32
+    (exponent << scale) + offset
 }
 
 /// Returns the native scale (resolution) of the lookup table.
