@@ -1,9 +1,13 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Build script to generate lookup tables for exponential histogram mapping.
+//! Build script to generate a single shared lookup table for exponential histogram mapping.
+//!
+//! Generates one boundary table at the highest compiled-in scale, shared by
+//! both NewRelic and Dynatrace algorithms. Lower scales are derived at runtime
+//! by right-shifting the result: `map_at_S(v) = map_at_H(v) >> (H - S)`.
 
-use expohisto_mapping_gen::{compute_dynatrace_indices, compute_linear_to_log_mapping, LookupTables};
+use expohisto_mapping_gen::{compute_dynatrace_indices, LookupTables};
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -12,22 +16,31 @@ use std::path::Path;
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
 
-    // Generate NewRelic lookup tables if any newrelic feature is enabled
-    generate_newrelic_tables(&out_dir);
+    let nr_scale = newrelic_scale();
+    let dt_scale = dynatrace_scale();
 
-    // Generate Dynatrace lookup tables if any dynatrace feature is enabled
-    generate_dynatrace_tables(&out_dir);
+    let table_scale = match (nr_scale, dt_scale) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
 
-    // Tell cargo to rerun if features change
+    let dest_path = Path::new(&out_dir).join("lookup_tables.rs");
+    let mut file = File::create(&dest_path).unwrap();
+
+    if let Some(scale) = table_scale {
+        generate_tables(&mut file, scale, nr_scale.is_some(), dt_scale.is_some()).unwrap();
+    } else {
+        writeln!(file, "// No table features enabled").unwrap();
+        writeln!(file, "pub const TABLE_SCALE: i32 = 0;").unwrap();
+    }
+
     println!("cargo:rerun-if-changed=build.rs");
 }
 
-fn generate_newrelic_tables(out_dir: &str) {
-    let dest_path = Path::new(out_dir).join("newrelic_tables.rs");
-    let mut file = File::create(&dest_path).unwrap();
-
-    // Determine which table size to generate based on features
-    let scale: Option<u32> = if cfg!(feature = "newrelic-14") {
+fn newrelic_scale() -> Option<u32> {
+    if cfg!(feature = "newrelic-14") {
         Some(14)
     } else if cfg!(feature = "newrelic-12") {
         Some(12)
@@ -41,36 +54,11 @@ fn generate_newrelic_tables(out_dir: &str) {
         Some(4)
     } else {
         None
-    };
-
-    if let Some(scale) = scale {
-        let tables = LookupTables::generate(scale);
-        write_newrelic_source(&mut file, &tables).unwrap();
-    } else {
-        // Generate stub - this file won't be included if no newrelic feature is enabled
-        writeln!(file, "// No newrelic feature enabled").unwrap();
-        writeln!(file, "pub const TABLE_SCALE: i32 = 0;").unwrap();
     }
 }
 
-/// Derive coarser-scale boundaries from the finest table.
-/// For scale S < TABLE_SCALE, boundary[k] at scale S = boundary[k * 2^(TABLE_SCALE-S)] at TABLE_SCALE.
-fn derive_boundaries(fine_boundaries: &[u64], table_scale: u32, target_scale: u32) -> Vec<u64> {
-    let step = 1usize << (table_scale - target_scale);
-    let n = 1usize << target_scale;
-    let mut boundaries = Vec::with_capacity(n);
-    for k in 0..n {
-        boundaries.push(fine_boundaries[k * step]);
-    }
-    boundaries
-}
-
-fn generate_dynatrace_tables(out_dir: &str) {
-    let dest_path = Path::new(out_dir).join("dynatrace_tables.rs");
-    let mut file = File::create(&dest_path).unwrap();
-
-    // Determine which table size to generate based on features
-    let scale: Option<u32> = if cfg!(feature = "dynatrace-14") {
+fn dynatrace_scale() -> Option<u32> {
+    if cfg!(feature = "dynatrace-14") {
         Some(14)
     } else if cfg!(feature = "dynatrace-12") {
         Some(12)
@@ -84,205 +72,137 @@ fn generate_dynatrace_tables(out_dir: &str) {
         Some(4)
     } else {
         None
-    };
-
-    if let Some(scale) = scale {
-        let tables = LookupTables::generate(scale);
-        write_dynatrace_source(&mut file, &tables).unwrap();
-    } else {
-        // Generate stub
-        writeln!(file, "// No dynatrace feature enabled").unwrap();
-        writeln!(file, "pub const TABLE_SCALE: i32 = 0;").unwrap();
     }
 }
 
-fn write_dynatrace_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -> std::io::Result<()> {
-    let table_scale = tables.index_bits;
+fn generate_tables<W: Write>(
+    w: &mut W,
+    table_scale: u32,
+    emit_nr: bool,
+    emit_dt: bool,
+) -> std::io::Result<()> {
+    let tables = LookupTables::generate(table_scale);
+    let n = tables.n; // 2^table_scale
 
     writeln!(
         w,
-        "// Auto-generated Dynatrace lookup tables with {} index bits ({} buckets)",
-        table_scale, tables.n
+        "// Auto-generated lookup tables at scale {} ({} log buckets)",
+        table_scale, n
     )?;
-    writeln!(w, "// Per-scale tables for scales 1..={}", table_scale)?;
     writeln!(w)?;
 
-    writeln!(w, "/// Maximum histogram scale supported by this lookup table.")?;
+    writeln!(
+        w,
+        "/// Maximum histogram scale supported by this lookup table."
+    )?;
     writeln!(w, "pub const TABLE_SCALE: i32 = {};", table_scale)?;
     writeln!(w)?;
 
-    // Extract the fine-resolution boundaries (without sentinel) from log_bucket_end
-    // Note: log_bucket_end[0] is already 1 (upper-inclusive) from LookupTables::generate
-    let fine_boundaries: Vec<u64> = tables.log_bucket_end[..tables.n].to_vec();
+    // Extract raw boundaries: [1, b[1], ..., b[N-1]] (N entries)
+    let raw_boundaries = &tables.log_bucket_end[..n];
 
-    // Generate per-scale tables
-    for s in 1..=table_scale {
-        let n_s = 1usize << s;
-        let sig_shift = 52 - s;
+    // Build shared boundary array in DT layout:
+    // [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
+    let mut shared_boundaries = Vec::with_capacity(n + 3);
+    shared_boundaries.push(0u64);
+    shared_boundaries.extend_from_slice(raw_boundaries);
+    shared_boundaries.push(1u64 << 52);
+    shared_boundaries.push(1u64 << 52);
 
-        // Derive boundaries for this scale
-        let derived = if s == table_scale {
-            fine_boundaries.clone()
+    // Emit shared boundaries
+    writeln!(
+        w,
+        "/// Shared boundary significands for exponential histogram mapping."
+    )?;
+    writeln!(
+        w,
+        "/// Layout: [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]"
+    )?;
+    writeln!(w, "/// where N = 2^TABLE_SCALE = {}.", n)?;
+    writeln!(
+        w,
+        "/// Both NewRelic and Dynatrace algorithms reference this same array."
+    )?;
+    writeln!(w, "pub static BOUNDARIES: [u64; {}] = [", n + 3)?;
+    for (i, &b) in shared_boundaries.iter().enumerate() {
+        if i % 4 == 0 {
+            write!(w, "    ")?;
+        }
+        if i == 0 {
+            writeln!(w, "0x{:013X}, // sentinel", b)?;
+        } else if i > n {
+            writeln!(w, "0x{:013X}, // sentinel = 2^52", b)?;
         } else {
-            derive_boundaries(&fine_boundaries, table_scale, s)
-        };
+            write!(w, "0x{:013X},", b)?;
+            if i % 4 == 3 {
+                writeln!(w)?;
+            }
+        }
+    }
+    writeln!(w, "];")?;
+    writeln!(w)?;
 
-        // Build Dynatrace boundaries with upper-inclusive sentinel at position 0:
-        // [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
-        // Total: N+3 entries
-        let mut boundaries = Vec::with_capacity(n_s + 3);
-        boundaries.push(0u64); // sentinel at position 0
-        boundaries.extend_from_slice(&derived);
-        boundaries.push(1u64 << 52); // sentinel
-        boundaries.push(1u64 << 52); // sentinel
+    // NewRelic index table
+    if emit_nr {
+        let nr_shift = 52 - (table_scale + 1);
+        writeln!(
+            w,
+            "/// NewRelic significand shift: 52 - (TABLE_SCALE + 1) = {}",
+            nr_shift
+        )?;
+        writeln!(w, "pub const NR_SIGNIFICAND_SHIFT: u32 = {};", nr_shift)?;
+        writeln!(w)?;
 
-        // Compute Dynatrace-style indices (N entries) with the new boundary layout
-        let indices = compute_dynatrace_indices(n_s, &boundaries, s);
-
-        // Emit INDICES for this scale (N entries)
-        writeln!(w, "static DT_INDICES_{}: [u16; {}] = [", s, n_s)?;
-        for (i, &idx) in indices.iter().enumerate() {
+        // NR index table is already computed by LookupTables::generate
+        writeln!(
+            w,
+            "/// NewRelic linear-to-log index table (2N = {} entries).",
+            2 * n
+        )?;
+        writeln!(w, "pub static NR_INDEX: [u16; {}] = [", 2 * n)?;
+        for (i, &idx) in tables.log_bucket_index.iter().enumerate() {
             if i % 16 == 0 {
                 write!(w, "    ")?;
             }
             write!(w, "{:4},", idx)?;
-            if i % 16 == 15 || i == indices.len() - 1 {
+            if i % 16 == 15 || i == tables.log_bucket_index.len() - 1 {
                 writeln!(w)?;
             }
         }
         writeln!(w, "];")?;
         writeln!(w)?;
-
-        // Emit BOUNDARIES for this scale (N + 3 entries: sentinel + N+1 boundaries + sentinel)
-        writeln!(w, "static DT_BOUNDARIES_{}: [u64; {}] = [", s, n_s + 3)?;
-        for (i, &boundary) in boundaries.iter().enumerate() {
-            if i % 4 == 0 {
-                write!(w, "    ")?;
-            }
-            if i == 0 {
-                writeln!(w, "0x{:013X}, // sentinel (upper-inclusive)", boundary)?;
-            } else if i > n_s {
-                writeln!(w, "0x{:013X}, // sentinel", boundary)?;
-            } else {
-                write!(w, "0x{:013X},", boundary)?;
-                if i % 4 == 3 {
-                    writeln!(w)?;
-                }
-            }
-        }
-        if boundaries.len() % 4 != 0 {
-            // Ensure we end the line if the last non-sentinel entry didn't
-            let last_non_sentinel = boundaries.len().saturating_sub(1);
-            if last_non_sentinel <= n_s && last_non_sentinel % 4 != 0 {
-                // Already handled by the sentinel writeln above
-            }
-        }
-        writeln!(w, "];")?;
-        writeln!(w)?;
-
-        writeln!(w, "// Scale {}: {} log buckets, {} linear buckets, significand_shift={}",
-            s, n_s, n_s, sig_shift)?;
-        writeln!(w)?;
     }
 
-    // Emit the SCALE_MAPPINGS array
-    writeln!(w, "/// Per-scale lookup table mappings, indexed by (scale - 1).")?;
-    writeln!(w, "pub static SCALE_MAPPINGS: [DynatraceScaleMapping; TABLE_SCALE as usize] = [")?;
-    for s in 1..=table_scale {
-        let sig_shift = 52 - s;
-        writeln!(w, "    DynatraceScaleMapping {{")?;
-        writeln!(w, "        significand_shift: {},", sig_shift)?;
-        writeln!(w, "        indices: &DT_INDICES_{},", s)?;
-        writeln!(w, "        boundaries: &DT_BOUNDARIES_{},", s)?;
-        writeln!(w, "    }},")?;
-    }
-    writeln!(w, "];")?;
+    // Dynatrace index table
+    if emit_dt {
+        let dt_shift = 52 - table_scale;
+        writeln!(
+            w,
+            "/// Dynatrace significand shift: 52 - TABLE_SCALE = {}",
+            dt_shift
+        )?;
+        writeln!(w, "pub const DT_SIGNIFICAND_SHIFT: u32 = {};", dt_shift)?;
+        writeln!(w)?;
 
-    Ok(())
-}
-
-fn write_newrelic_source<W: std::io::Write>(w: &mut W, tables: &LookupTables) -> std::io::Result<()> {
-    let table_scale = tables.index_bits;
-
-    writeln!(
-        w,
-        "// Auto-generated NewRelic lookup tables with {} index bits ({} buckets)",
-        table_scale, tables.n
-    )?;
-    writeln!(w, "// Per-scale tables for scales 1..={}", table_scale)?;
-    writeln!(w)?;
-
-    writeln!(w, "/// Maximum histogram scale supported by this lookup table.")?;
-    writeln!(w, "pub const TABLE_SCALE: i32 = {};", table_scale)?;
-    writeln!(w)?;
-
-    // Extract the fine-resolution boundaries (without sentinel) from log_bucket_end.
-    // Note: log_bucket_end[0] is 1 (upper-inclusive) from LookupTables::generate.
-    let fine_boundaries: Vec<u64> = tables.log_bucket_end[..tables.n].to_vec();
-
-    // Generate per-scale tables
-    for s in 1..=table_scale {
-        let n_s = 1usize << s;
-        let sig_shift = 52 - (s + 1);
-
-        // Derive boundaries for this scale.
-        // boundary[0] = 1 (upper-inclusive) propagates through derivation.
-        let boundaries = if s == table_scale {
-            fine_boundaries.clone()
-        } else {
-            derive_boundaries(&fine_boundaries, table_scale, s)
-        };
-
-        // Compute linear-to-log mapping for this scale's resolution
-        let log_bucket_index = compute_linear_to_log_mapping(n_s, &boundaries);
-
-        // Emit LOG_BUCKET_INDEX for this scale
-        writeln!(w, "static LOG_BUCKET_INDEX_{}: [u16; {}] = [", s, 2 * n_s)?;
-        for (i, &idx) in log_bucket_index.iter().enumerate() {
+        let dt_index = compute_dynatrace_indices(n, &shared_boundaries, table_scale);
+        writeln!(
+            w,
+            "/// Dynatrace linear-to-log index table (N = {} entries).",
+            n
+        )?;
+        writeln!(w, "pub static DT_INDEX: [u16; {}] = [", n)?;
+        for (i, &idx) in dt_index.iter().enumerate() {
             if i % 16 == 0 {
                 write!(w, "    ")?;
             }
             write!(w, "{:4},", idx)?;
-            if i % 16 == 15 || i == log_bucket_index.len() - 1 {
+            if i % 16 == 15 || i == dt_index.len() - 1 {
                 writeln!(w)?;
             }
         }
         writeln!(w, "];")?;
         writeln!(w)?;
-
-        // Emit LOG_BUCKET_END for this scale (boundaries + sentinel)
-        writeln!(w, "static LOG_BUCKET_END_{}: [u64; {}] = [", s, n_s + 1)?;
-        for (i, &boundary) in boundaries.iter().enumerate() {
-            if i % 4 == 0 {
-                write!(w, "    ")?;
-            }
-            write!(w, "0x{:013X},", boundary)?;
-            if i % 4 == 3 || i == boundaries.len() - 1 {
-                writeln!(w)?;
-            }
-        }
-        // Sentinel
-        writeln!(w, "    0x{:013X}, // sentinel = 2^52", 1u64 << 52)?;
-        writeln!(w, "];")?;
-        writeln!(w)?;
-
-        writeln!(w, "// Scale {}: {} log buckets, {} linear buckets, significand_shift={}",
-            s, n_s, 2 * n_s, sig_shift)?;
-        writeln!(w)?;
     }
-
-    // Emit the SCALE_MAPPINGS array
-    writeln!(w, "/// Per-scale lookup table mappings, indexed by (scale - 1).")?;
-    writeln!(w, "pub static SCALE_MAPPINGS: [NewrelicScaleMapping; TABLE_SCALE as usize] = [")?;
-    for s in 1..=table_scale {
-        let sig_shift = 52 - (s + 1);
-        writeln!(w, "    NewrelicScaleMapping {{")?;
-        writeln!(w, "        significand_shift: {},", sig_shift)?;
-        writeln!(w, "        log_bucket_index: &LOG_BUCKET_INDEX_{},", s)?;
-        writeln!(w, "        log_bucket_end: &LOG_BUCKET_END_{},", s)?;
-        writeln!(w, "    }},")?;
-    }
-    writeln!(w, "];")?;
 
     Ok(())
 }

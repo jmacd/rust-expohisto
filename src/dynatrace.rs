@@ -3,55 +3,28 @@
 
 //! Dynatrace lookup table-based mapping for exponential histograms.
 //!
-//! This algorithm uses pre-computed lookup tables with N linear buckets
-//! (one per log bucket) and two branch corrections instead of NewRelic's
-//! 2N linear buckets with one branch correction.
-//!
+//! This algorithm uses N linear buckets (one per log bucket) and two branch
+//! corrections instead of NewRelic's 2N linear buckets with one branch correction.
 //! Trade-off: ~50% smaller index table at the cost of one extra comparison.
-//! On modern CPUs where cache pressure matters, this can be a net win.
 //!
-//! Tables are generated at compile time for every scale from 1 to TABLE_SCALE,
-//! so each scale has its own compact arrays.
+//! A single table is compiled at the highest requested scale (TABLE_SCALE).
+//! Lower scales are derived by right-shifting: `map_at_S(v) = map_at_H(v) >> (H - S)`.
 
 use crate::float64::{get_normal_base2, get_significand};
-
-/// Per-scale lookup tables for the Dynatrace algorithm.
-#[derive(Debug)]
-pub struct DynatraceScaleMapping {
-    /// Shift to convert 52-bit significand to N linear buckets: 52 - scale.
-    pub significand_shift: u32,
-    /// Maps each of N linear buckets to an approximate log bucket index.
-    /// Length = 1 << scale.
-    pub indices: &'static [u16],
-    /// Boundary significands with upper-inclusive sentinel at position 0.
-    /// Layout: [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
-    /// Length = (1 << scale) + 3.
-    pub boundaries: &'static [u64],
-}
-
-// Include the generated lookup tables (provides TABLE_SCALE and SCALE_MAPPINGS)
-include!(concat!(env!("OUT_DIR"), "/dynatrace_tables.rs"));
-
-/// Returns the `DynatraceScaleMapping` for the given positive scale.
-#[inline]
-pub fn get_scale_mapping(scale: i32) -> &'static DynatraceScaleMapping {
-    debug_assert!(scale >= 1 && scale <= TABLE_SCALE);
-    &SCALE_MAPPINGS[(scale - 1) as usize]
-}
+use crate::lookup::{BOUNDARIES, DT_INDEX, DT_SIGNIFICAND_SHIFT, TABLE_SCALE};
 
 /// Maps a positive f64 value to a bucket index using the Dynatrace
-/// two-branch correction algorithm.
+/// two-branch correction algorithm at TABLE_SCALE, then right-shifts.
 ///
-/// Upper-inclusive semantics are baked into the boundary table: the sentinel
-/// at position 0 and `boundaries[1] = 1` ensure that `significand == 0`
+/// Upper-inclusive semantics are built into the boundary table: the sentinel
+/// at position 0 and `BOUNDARIES[1] = 1` ensure that `significand == 0`
 /// (exact powers of two) naturally maps one bucket lower without a branch.
 ///
 /// # Arguments
 /// * `value` - A positive f64 value (must be > 0, finite)
 /// * `scale` - The histogram scale (must be in 1..=TABLE_SCALE)
-/// * `sm` - The per-scale mapping tables (from `get_scale_mapping`)
 #[inline]
-pub fn map_to_index(value: f64, scale: i32, sm: &DynatraceScaleMapping) -> i32 {
+pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
     debug_assert!(scale <= TABLE_SCALE);
     debug_assert!(value > 0.0);
@@ -60,21 +33,19 @@ pub fn map_to_index(value: f64, scale: i32, sm: &DynatraceScaleMapping) -> i32 {
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);
 
-    // Look up the rough bucket from N equidistant linear buckets
-    let linear_idx = (significand >> sm.significand_shift) as usize;
-    let rough = sm.indices[linear_idx] as usize;
+    let linear_idx = (significand >> DT_SIGNIFICAND_SHIFT) as usize;
+    let rough = DT_INDEX[linear_idx] as usize;
 
-    // Start at rough - 1 (may be -1 for significand=0 at rough=0).
-    // Two corrections adjust upward based on boundary comparisons.
     let mut offset = rough as i32 - 1;
-    if significand >= sm.boundaries[rough + 1] {
+    if significand >= BOUNDARIES[rough + 1] {
         offset += 1;
     }
-    if significand >= sm.boundaries[rough + 2] {
+    if significand >= BOUNDARIES[rough + 2] {
         offset += 1;
     }
 
-    (exponent << scale) + offset
+    let fine_index = (exponent << TABLE_SCALE) + offset;
+    fine_index >> (TABLE_SCALE - scale)
 }
 
 /// Returns the native scale (resolution) of the lookup table.
@@ -89,13 +60,11 @@ mod tests {
 
     #[test]
     fn test_powers_of_two() {
-        // Powers of two should map to (exp << scale) - 1
         for scale in 1..=TABLE_SCALE {
-            let sm = get_scale_mapping(scale);
             for exp in -10..=10 {
                 let value = 2.0_f64.powi(exp);
                 let expected = (exp << scale) - 1;
-                let actual = map_to_index(value, scale, sm);
+                let actual = map_to_index(value, scale);
                 assert_eq!(
                     actual, expected,
                     "power of two mismatch at scale={}, exp={}: got {}, expected {}",
@@ -108,17 +77,13 @@ mod tests {
     #[test]
     fn test_basic_values() {
         let scale = TABLE_SCALE.min(4);
-        let sm = get_scale_mapping(scale);
 
-        // 1.0 is 2^0, should map to -1
-        assert_eq!(map_to_index(1.0, scale, sm), -1);
+        assert_eq!(map_to_index(1.0, scale), -1);
 
-        // 2.0 is 2^1, should map to (1 << scale) - 1
         let expected = (1 << scale) - 1;
-        assert_eq!(map_to_index(2.0, scale, sm), expected);
+        assert_eq!(map_to_index(2.0, scale), expected);
 
-        // Values between 1 and 2 should be in buckets 0..(1 << scale) - 1
-        let idx = map_to_index(1.5, scale, sm);
+        let idx = map_to_index(1.5, scale);
         let max_idx = (1 << scale) - 1;
         assert!(
             idx >= 0 && idx < max_idx,
@@ -131,33 +96,27 @@ mod tests {
     #[test]
     fn test_table_scale() {
         #[cfg(feature = "dynatrace-4")]
-        assert_eq!(TABLE_SCALE, 4);
+        assert!(TABLE_SCALE >= 4);
         #[cfg(feature = "dynatrace-6")]
-        assert_eq!(TABLE_SCALE, 6);
+        assert!(TABLE_SCALE >= 6);
         #[cfg(feature = "dynatrace-8")]
-        assert_eq!(TABLE_SCALE, 8);
+        assert!(TABLE_SCALE >= 8);
         #[cfg(feature = "dynatrace-10")]
-        assert_eq!(TABLE_SCALE, 10);
+        assert!(TABLE_SCALE >= 10);
         #[cfg(feature = "dynatrace-12")]
-        assert_eq!(TABLE_SCALE, 12);
+        assert!(TABLE_SCALE >= 12);
         #[cfg(feature = "dynatrace-14")]
-        assert_eq!(TABLE_SCALE, 14);
+        assert!(TABLE_SCALE >= 14);
     }
 
     #[test]
     fn test_all_scales_consistent() {
-        // Verify that lower-scale tables give the same result as
-        // computing at TABLE_SCALE and right-shifting.
-        let sm_fine = get_scale_mapping(TABLE_SCALE);
         let test_values: &[f64] = &[1.1, 1.5, 1.9, 2.5, 3.3, 7.7, 0.3, 0.7, 100.0, 1e-10, 1e10];
 
         for scale in 1..TABLE_SCALE {
-            let sm = get_scale_mapping(scale);
             for &v in test_values {
-                let direct = map_to_index(v, scale, sm);
-
-                // Reference: compute at TABLE_SCALE and shift
-                let fine = map_to_index(v, TABLE_SCALE, sm_fine);
+                let direct = map_to_index(v, scale);
+                let fine = map_to_index(v, TABLE_SCALE);
                 let shifted = fine >> (TABLE_SCALE - scale);
 
                 assert_eq!(
@@ -171,8 +130,6 @@ mod tests {
 
     #[test]
     fn test_matches_newrelic() {
-        // When both newrelic and dynatrace are compiled (bench-all),
-        // verify they produce identical results for all values.
         #[cfg(any(
             feature = "newrelic-4",
             feature = "newrelic-6",
@@ -182,19 +139,16 @@ mod tests {
             feature = "newrelic-14"
         ))]
         {
-            let max_common = TABLE_SCALE.min(crate::newrelic::table_scale());
             let test_values: &[f64] = &[
                 1e-300, 1e-100, 1e-10, 0.001, 0.1, 0.5, 1.0, 1.5, 2.0,
                 core::f64::consts::PI, 10.0, 100.0, 1e10, 1e100, 1e300,
                 1.0000000000001, 1.9999999999999, 0.9999999999999,
             ];
 
-            for scale in 1..=max_common {
-                let dt_sm = get_scale_mapping(scale);
-                let nr_sm = crate::newrelic::get_scale_mapping(scale);
+            for scale in 1..=TABLE_SCALE {
                 for &v in test_values {
-                    let dt_idx = map_to_index(v, scale, dt_sm);
-                    let nr_idx = crate::newrelic::map_to_index(v, scale, nr_sm);
+                    let dt_idx = map_to_index(v, scale);
+                    let nr_idx = crate::newrelic::map_to_index(v, scale);
                     assert_eq!(
                         dt_idx, nr_idx,
                         "dynatrace vs newrelic mismatch at scale={}, value={}: dt={}, nr={}",

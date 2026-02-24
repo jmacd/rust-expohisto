@@ -108,14 +108,12 @@ fn bench_map_to_index(c: &mut Criterion) {
                 .collect();
 
             for &scale in &dt_scales {
-                let sm = rust_expohisto::dynatrace::get_scale_mapping(scale);
                 group.bench_function(BenchmarkId::new("dynatrace", scale), |b| {
                     b.iter(|| {
                         for &v in TEST_VALUES {
                             black_box(rust_expohisto::dynatrace::map_to_index(
                                 black_box(v),
                                 scale,
-                                sm,
                             ));
                         }
                     })

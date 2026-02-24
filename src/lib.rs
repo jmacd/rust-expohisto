@@ -100,6 +100,22 @@ pub mod logarithm;
     feature = "newrelic-8",
     feature = "newrelic-10",
     feature = "newrelic-12",
+    feature = "newrelic-14",
+    feature = "dynatrace-4",
+    feature = "dynatrace-6",
+    feature = "dynatrace-8",
+    feature = "dynatrace-10",
+    feature = "dynatrace-12",
+    feature = "dynatrace-14"
+))]
+pub mod lookup;
+
+#[cfg(any(
+    feature = "newrelic-4",
+    feature = "newrelic-6",
+    feature = "newrelic-8",
+    feature = "newrelic-10",
+    feature = "newrelic-12",
     feature = "newrelic-14"
 ))]
 pub mod newrelic;
