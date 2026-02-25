@@ -42,36 +42,24 @@ pub enum MappingError {
 #[inline]
 pub const fn max_scale() -> i32 {
     #[cfg(any(
-        feature = "newrelic-4",
-        feature = "newrelic-6",
-        feature = "newrelic-8",
-        feature = "newrelic-10",
-        feature = "newrelic-12",
-        feature = "newrelic-14",
-        feature = "dynatrace-4",
-        feature = "dynatrace-6",
-        feature = "dynatrace-8",
-        feature = "dynatrace-10",
-        feature = "dynatrace-12",
-        feature = "dynatrace-14"
+        feature = "scale-4",
+        feature = "scale-6",
+        feature = "scale-8",
+        feature = "scale-10",
+        feature = "scale-12",
+        feature = "scale-14"
     ))]
     {
         crate::lookup::TABLE_SCALE
     }
 
     #[cfg(not(any(
-        feature = "newrelic-4",
-        feature = "newrelic-6",
-        feature = "newrelic-8",
-        feature = "newrelic-10",
-        feature = "newrelic-12",
-        feature = "newrelic-14",
-        feature = "dynatrace-4",
-        feature = "dynatrace-6",
-        feature = "dynatrace-8",
-        feature = "dynatrace-10",
-        feature = "dynatrace-12",
-        feature = "dynatrace-14"
+        feature = "scale-4",
+        feature = "scale-6",
+        feature = "scale-8",
+        feature = "scale-10",
+        feature = "scale-12",
+        feature = "scale-14"
     )))]
     {
         MAX_SCALE
@@ -95,7 +83,7 @@ impl Mapping {
     ///
     /// Returns `MappingError::InvalidScale` if scale is outside [-10, 20].
     /// Returns `MappingError::ScaleNotSupported` if the scale exceeds what
-    /// the selected algorithm supports (e.g., newrelic-8 only supports scales 1-8).
+    /// the selected algorithm supports (e.g., scale-8 only supports scales 1-8).
     pub fn new(scale: i32) -> Result<Self, MappingError> {
         if !(MIN_SCALE..=MAX_SCALE).contains(&scale) {
             return Err(MappingError::InvalidScale);
@@ -148,37 +136,13 @@ impl Mapping {
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
         // NewRelic lookup table takes precedence if enabled
-        #[cfg(any(
-            feature = "newrelic-4",
-            feature = "newrelic-6",
-            feature = "newrelic-8",
-            feature = "newrelic-10",
-            feature = "newrelic-12",
-            feature = "newrelic-14"
-        ))]
+        #[cfg(feature = "newrelic")]
         {
             crate::newrelic::map_to_index(value, self.scale as i32)
         }
 
         // Dynatrace lookup table next
-        #[cfg(all(
-            any(
-                feature = "dynatrace-4",
-                feature = "dynatrace-6",
-                feature = "dynatrace-8",
-                feature = "dynatrace-10",
-                feature = "dynatrace-12",
-                feature = "dynatrace-14"
-            ),
-            not(any(
-                feature = "newrelic-4",
-                feature = "newrelic-6",
-                feature = "newrelic-8",
-                feature = "newrelic-10",
-                feature = "newrelic-12",
-                feature = "newrelic-14"
-            ))
-        ))]
+        #[cfg(all(feature = "dynatrace", not(feature = "newrelic")))]
         {
             crate::dynatrace::map_to_index(value, self.scale as i32)
         }
@@ -186,40 +150,18 @@ impl Mapping {
         // Fallback to logarithm
         #[cfg(all(
             feature = "logarithm",
-            not(any(
-                feature = "newrelic-4",
-                feature = "newrelic-6",
-                feature = "newrelic-8",
-                feature = "newrelic-10",
-                feature = "newrelic-12",
-                feature = "newrelic-14",
-                feature = "dynatrace-4",
-                feature = "dynatrace-6",
-                feature = "dynatrace-8",
-                feature = "dynatrace-10",
-                feature = "dynatrace-12",
-                feature = "dynatrace-14"
-            ))
+            not(feature = "newrelic"),
+            not(feature = "dynatrace")
         ))]
         {
             crate::logarithm::map_to_index(value, self.scale as i32, self.scale_factor)
         }
 
-        // No algorithm selected - this won't compile
+        // No algorithm selected
         #[cfg(not(any(
             feature = "logarithm",
-            feature = "newrelic-4",
-            feature = "newrelic-6",
-            feature = "newrelic-8",
-            feature = "newrelic-10",
-            feature = "newrelic-12",
-            feature = "newrelic-14",
-            feature = "dynatrace-4",
-            feature = "dynatrace-6",
-            feature = "dynatrace-8",
-            feature = "dynatrace-10",
-            feature = "dynatrace-12",
-            feature = "dynatrace-14"
+            feature = "newrelic",
+            feature = "dynatrace"
         )))]
         {
             let _ = value;

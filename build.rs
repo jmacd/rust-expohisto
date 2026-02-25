@@ -29,17 +29,17 @@ fn main() {
 }
 
 fn table_scale() -> Option<u32> {
-    if cfg!(feature = "newrelic-14") || cfg!(feature = "dynatrace-14") {
+    if cfg!(feature = "scale-14") {
         Some(14)
-    } else if cfg!(feature = "newrelic-12") || cfg!(feature = "dynatrace-12") {
+    } else if cfg!(feature = "scale-12") {
         Some(12)
-    } else if cfg!(feature = "newrelic-10") || cfg!(feature = "dynatrace-10") {
+    } else if cfg!(feature = "scale-10") {
         Some(10)
-    } else if cfg!(feature = "newrelic-8") || cfg!(feature = "dynatrace-8") {
+    } else if cfg!(feature = "scale-8") {
         Some(8)
-    } else if cfg!(feature = "newrelic-6") || cfg!(feature = "dynatrace-6") {
+    } else if cfg!(feature = "scale-6") {
         Some(6)
-    } else if cfg!(feature = "newrelic-4") || cfg!(feature = "dynatrace-4") {
+    } else if cfg!(feature = "scale-4") {
         Some(4)
     } else {
         None

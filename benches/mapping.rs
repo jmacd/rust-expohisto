@@ -36,23 +36,9 @@ fn bench_map_to_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("map_to_index_100x");
 
     // Determine the algorithm label for the primary (Mapping-dispatched) algorithm
-    let algo_label = if cfg!(any(
-        feature = "newrelic-4",
-        feature = "newrelic-6",
-        feature = "newrelic-8",
-        feature = "newrelic-10",
-        feature = "newrelic-12",
-        feature = "newrelic-14"
-    )) {
+    let algo_label = if cfg!(feature = "newrelic") {
         "newrelic"
-    } else if cfg!(any(
-        feature = "dynatrace-4",
-        feature = "dynatrace-6",
-        feature = "dynatrace-8",
-        feature = "dynatrace-10",
-        feature = "dynatrace-12",
-        feature = "dynatrace-14"
-    )) {
+    } else if cfg!(feature = "dynatrace") {
         "dynatrace"
     } else {
         "logarithm"
@@ -92,14 +78,7 @@ fn bench_map_to_index(c: &mut Criterion) {
     #[cfg(feature = "bench-all")]
     {
         // Dynatrace direct (when newrelic is primary via Mapping)
-        #[cfg(any(
-            feature = "dynatrace-4",
-            feature = "dynatrace-6",
-            feature = "dynatrace-8",
-            feature = "dynatrace-10",
-            feature = "dynatrace-12",
-            feature = "dynatrace-14"
-        ))]
+        #[cfg(feature = "dynatrace")]
         {
             let dt_max = rust_expohisto::dynatrace::table_scale();
             let dt_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14]

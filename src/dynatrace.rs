@@ -100,17 +100,17 @@ mod tests {
 
     #[test]
     fn test_table_scale() {
-        #[cfg(feature = "dynatrace-4")]
+        #[cfg(feature = "scale-4")]
         assert!(TABLE_SCALE >= 4);
-        #[cfg(feature = "dynatrace-6")]
+        #[cfg(feature = "scale-6")]
         assert!(TABLE_SCALE >= 6);
-        #[cfg(feature = "dynatrace-8")]
+        #[cfg(feature = "scale-8")]
         assert!(TABLE_SCALE >= 8);
-        #[cfg(feature = "dynatrace-10")]
+        #[cfg(feature = "scale-10")]
         assert!(TABLE_SCALE >= 10);
-        #[cfg(feature = "dynatrace-12")]
+        #[cfg(feature = "scale-12")]
         assert!(TABLE_SCALE >= 12);
-        #[cfg(feature = "dynatrace-14")]
+        #[cfg(feature = "scale-14")]
         assert!(TABLE_SCALE >= 14);
     }
 
@@ -135,14 +135,7 @@ mod tests {
 
     #[test]
     fn test_matches_newrelic() {
-        #[cfg(any(
-            feature = "newrelic-4",
-            feature = "newrelic-6",
-            feature = "newrelic-8",
-            feature = "newrelic-10",
-            feature = "newrelic-12",
-            feature = "newrelic-14"
-        ))]
+        #[cfg(feature = "newrelic")]
         {
             let test_values: &[f64] = &[
                 1e-300, 1e-100, 1e-10, 0.001, 0.1, 0.5, 1.0, 1.5, 2.0,

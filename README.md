@@ -45,23 +45,33 @@ The lookup table accelerates all scales from 1 up to the compiled maximum. Highe
 
 ## Lookup Table Features
 
-Choose **one** feature based on your needs—each table supports all scales from 1 up to the maximum:
+Choose a **scale** feature to set the table size, and an **algorithm** feature to select the mapping method:
 
 ```toml
 [dependencies]
-rust-expohisto = { version = "0.1", features = ["newrelic-8"] }  # default
+rust-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # default
 ```
+
+### Scale (table size)
 
 | Feature | Table Size | Scales Accelerated | Use Case |
 |---------|------------|-------------------|----------|
-| `newrelic-4` / `dynatrace-4` | 0.2 KB | 1–4 | Minimal memory |
-| `newrelic-6` / `dynatrace-6` | 0.6–0.8 KB | 1–6 | Embedded systems |
-| `newrelic-8` / `dynatrace-8` | 2.5–3.0 KB | 1–8 | **Default** |
-| `newrelic-10` / `dynatrace-10` | 10–12 KB | 1–10 | Recommended |
-| `newrelic-12` / `dynatrace-12` | 40–48 KB | 1–12 | High resolution |
-| `newrelic-14` / `dynatrace-14` | 160–192 KB | 1–14 | Maximum coverage |
+| `scale-4` | 0.2 KB | 1–4 | Minimal memory |
+| `scale-6` | 0.6–0.8 KB | 1–6 | Embedded systems |
+| `scale-8` | 2.5–3.0 KB | 1–8 | **Default** |
+| `scale-10` | 10–12 KB | 1–10 | Recommended |
+| `scale-12` | 40–48 KB | 1–12 | High resolution |
+| `scale-14` | 160–192 KB | 1–14 | Maximum coverage |
 
-Only one feature may be enabled—a compile-time check enforces this. The two algorithms produce identical results, are equally tested, and perform the same at runtime—choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](#lookup-table-design)).
+### Algorithm
+
+| Feature | Linear Buckets | Max Corrections | Notes |
+|---------|---------------|-----------------|-------|
+| `newrelic` | 2N | 1 | Slightly larger index table |
+| `dynatrace` | N | 2 | ~50% smaller index table |
+| `logarithm` | — | — | No table needed, FP precision errors |
+
+The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](#lookup-table-design)).
 
 ## Exponential Scale
 
@@ -118,7 +128,7 @@ For non-positive scales, the bucket index is derived directly from the IEEE 754 
 
 ### Scale > 0: Lookup Table (default)
 
-When a lookup feature is enabled (default: `newrelic-8`), mapping uses integer-only operations:
+When a lookup feature is enabled (default: `newrelic` + `scale-8`), mapping uses integer-only operations:
 
 1. Extract significand and exponent from the IEEE 754 representation
 2. Use the significand to index into a precomputed lookup table

@@ -79,6 +79,16 @@ impl HighLow {
     }
 }
 
+/// Result of attempting to increment a bucket.
+enum IncrResult {
+    /// Bucket was successfully incremented.
+    Ok,
+    /// Span exceeds bucket capacity; downscale by the given range.
+    NeedsDownscale(HighLow),
+    /// The counter type overflowed.
+    CounterOverflow,
+}
+
 /// Computes how much downscaling is needed for indices to fit in `size` buckets.
 #[inline]
 fn change_scale(mut hl: HighLow, size: i32) -> i32 {
@@ -215,7 +225,8 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
     }
 
     /// Downscales by collapsing 2^by buckets into 1.
-    fn downscale(&mut self, by: i32) {
+    /// Returns `false` if combining buckets would overflow the counter type.
+    fn downscale(&mut self, by: i32) -> bool {
         self.rotate();
 
         let size = 1 + self.index_end - self.index_start;
@@ -229,7 +240,9 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
 
             let mut i = mod_val;
             while i < each && inpos < size {
-                self.relocate_bucket(outpos, inpos);
+                if !self.relocate_bucket(outpos, inpos) {
+                    return false;
+                }
                 inpos += 1;
                 pos += 1;
                 i += 1;
@@ -240,16 +253,18 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
         self.index_start >>= by;
         self.index_end >>= by;
         self.index_base = self.index_start;
+        true
     }
 
     /// Moves count from src bucket to dest bucket.
-    fn relocate_bucket(&mut self, dest: i32, src: i32) {
+    ///
+    /// Returns `false` if the combined count would overflow the counter type.
+    fn relocate_bucket(&mut self, dest: i32, src: i32) -> bool {
         if dest == src {
-            return;
+            return true;
         }
         let count = self.empty_bucket(src);
-        // In a fixed-size implementation, we assume counts fit
-        self.try_increment(dest, count);
+        self.try_increment(dest, count)
     }
 
     /// Returns an iterator over the bucket counts.
@@ -420,15 +435,24 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     }
 
     /// Records a single value.
+    ///
+    /// Returns `false` if a bucket counter overflowed.
     #[inline]
-    pub fn update(&mut self, value: f64) {
-        self.update_by_incr(value, 1);
+    pub fn update(&mut self, value: f64) -> bool {
+        self.update_by_incr(value, 1)
     }
 
     /// Records a value with a specified increment.
-    pub fn update_by_incr(&mut self, value: f64, incr: u64) {
+    ///
+    /// Returns `false` if a counter overflowed.
+    pub fn update_by_incr(&mut self, value: f64, incr: u64) -> bool {
         debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
         debug_assert!(value.is_finite(), "Histogram only accepts finite values");
+
+        let new_count = match self.count.checked_add(incr) {
+            Some(c) => c,
+            None => return false,
+        };
 
         // Update min/max
         if self.count == 0 {
@@ -439,42 +463,53 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             self.max = self.max.max(value);
         }
 
-        self.count += incr;
+        self.count = new_count;
 
         if value == 0.0 {
-            self.zero_count += incr;
-            return;
+            let new_zc = match self.zero_count.checked_add(incr) {
+                Some(c) => c,
+                None => return false,
+            };
+            self.zero_count = new_zc;
+            return true;
         }
 
         self.sum += value * incr as f64;
-        self.update_buckets(value, incr);
+        self.update_buckets(value, incr)
     }
 
     /// Updates buckets for a positive value.
-    fn update_buckets(&mut self, value: f64, incr: u64) {
+    ///
+    /// Returns `false` if a bucket counter overflowed.
+    fn update_buckets(&mut self, value: f64, incr: u64) -> bool {
         let index = self.mapping.map_to_index(value);
 
-        let (hl, success) = self.increment_index_by(index, incr);
-        if success {
-            return;
+        match self.increment_index_by(index, incr) {
+            IncrResult::Ok => return true,
+            IncrResult::CounterOverflow => return false,
+            IncrResult::NeedsDownscale(hl) => {
+                let change = change_scale(hl, SIZE as i32);
+                if !self.downscale(change) {
+                    return false;
+                }
+            }
         }
 
-        // Need to downscale
-        let change = change_scale(hl, SIZE as i32);
-        self.downscale(change);
-
         let index = self.mapping.map_to_index(value);
-        let (_, success) = self.increment_index_by(index, incr);
-        debug_assert!(success, "downscale logic error");
+        match self.increment_index_by(index, incr) {
+            IncrResult::Ok => true,
+            IncrResult::CounterOverflow => false,
+            IncrResult::NeedsDownscale(_) => {
+                debug_assert!(false, "downscale logic error");
+                false
+            }
+        }
     }
 
     /// Attempts to increment at the given index.
-    ///
-    /// Returns (HighLow, success). If success is false, HighLow contains
-    /// the required range for downscaling.
-    fn increment_index_by(&mut self, index: i32, incr: u64) -> (HighLow, bool) {
+    fn increment_index_by(&mut self, index: i32, incr: u64) -> IncrResult {
         if incr == 0 {
-            return (HighLow::empty(), true);
+            return IncrResult::Ok;
         }
 
         let max_size = SIZE as i32;
@@ -487,25 +522,19 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         } else if index < self.positive.index_start {
             let span = self.positive.index_end - index;
             if span >= max_size {
-                return (
-                    HighLow {
-                        low: index,
-                        high: self.positive.index_end,
-                    },
-                    false,
-                );
+                return IncrResult::NeedsDownscale(HighLow {
+                    low: index,
+                    high: self.positive.index_end,
+                });
             }
             self.positive.index_start = index;
         } else if index > self.positive.index_end {
             let span = index - self.positive.index_start;
             if span >= max_size {
-                return (
-                    HighLow {
-                        low: self.positive.index_start,
-                        high: index,
-                    },
-                    false,
-                );
+                return IncrResult::NeedsDownscale(HighLow {
+                    low: self.positive.index_start,
+                    high: index,
+                });
             }
             self.positive.index_end = index;
         }
@@ -516,37 +545,54 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         }
 
         if !self.positive.try_increment(bucket_index, incr) {
-            // Counter overflow - this is a limitation of fixed-width counters
-            // In production, you might want to handle this differently
-            panic!("bucket counter overflow");
+            return IncrResult::CounterOverflow;
         }
 
-        (HighLow::empty(), true)
+        IncrResult::Ok
     }
 
     /// Downscales the histogram by the given amount.
-    fn downscale(&mut self, change: i32) {
+    ///
+    /// Returns `false` if combining buckets would overflow the counter type.
+    fn downscale(&mut self, change: i32) -> bool {
         if change == 0 {
-            return;
+            return true;
         }
         debug_assert!(change > 0, "cannot upscale");
 
         let new_scale = self.mapping.scale() - change;
-        self.positive.downscale(change);
+        if !self.positive.downscale(change) {
+            return false;
+        }
         self.mapping = Mapping::new(new_scale).expect("invalid scale after downscale");
+        true
     }
 
     /// Merges another histogram into this one.
-    pub fn merge_from(&mut self, other: &Self) {
-        self.merge_from_histogram(other);
+    ///
+    /// Returns `false` if a bucket counter overflowed.
+    pub fn merge_from(&mut self, other: &Self) -> bool {
+        self.merge_from_histogram(other)
     }
 
     /// Merges a histogram with a potentially different counter type into this one.
-    pub fn merge_from_histogram<C2: Counter>(&mut self, other: &Histogram<C2, SIZE>) {
+    ///
+    /// Returns `false` if a bucket counter overflowed.
+    pub fn merge_from_histogram<C2: Counter>(&mut self, other: &Histogram<C2, SIZE>) -> bool {
         // Early return if other is empty
         if other.count == 0 {
-            return;
+            return true;
         }
+
+        // Check for u64 overflow before mutating.
+        let new_count = match self.count.checked_add(other.count) {
+            Some(c) => c,
+            None => return false,
+        };
+        let new_zero_count = match self.zero_count.checked_add(other.zero_count) {
+            Some(c) => c,
+            None => return false,
+        };
 
         // Update min/max
         if self.count == 0 {
@@ -558,12 +604,12 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         }
 
         self.sum += other.sum;
-        self.count += other.count;
-        self.zero_count += other.zero_count;
+        self.count = new_count;
+        self.zero_count = new_zero_count;
 
         // If other only has zeros, no bucket merging needed
         if other.positive.is_empty() {
-            return;
+            return true;
         }
 
         let min_scale = self.scale().min(other.scale());
@@ -573,8 +619,10 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
 
         let min_scale = min_scale - change_scale(hlp, SIZE as i32);
 
-        self.downscale(self.scale() - min_scale);
-        self.merge_buckets_from(&other.positive, other.scale(), min_scale);
+        if !self.downscale(self.scale() - min_scale) {
+            return false;
+        }
+        self.merge_buckets_from(&other.positive, other.scale(), min_scale)
     }
 
     fn high_low_at_scale(&self, buckets: &Buckets<C, SIZE>, scale: i32) -> HighLow {
@@ -592,7 +640,7 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         }
     }
 
-    fn merge_buckets_from<C2: Counter>(&mut self, other_buckets: &Buckets<C2, SIZE>, other_scale: i32, target_scale: i32) {
+    fn merge_buckets_from<C2: Counter>(&mut self, other_buckets: &Buckets<C2, SIZE>, other_scale: i32, target_scale: i32) -> bool {
         let their_offset = other_buckets.offset();
         let their_change = other_scale - target_scale;
 
@@ -602,9 +650,16 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
                 continue;
             }
             let index = (their_offset + i as i32) >> their_change;
-            let (_, success) = self.increment_index_by(index, count);
-            debug_assert!(success, "incorrect merge scale");
+            match self.increment_index_by(index, count) {
+                IncrResult::Ok => {}
+                IncrResult::CounterOverflow => return false,
+                IncrResult::NeedsDownscale(_) => {
+                    debug_assert!(false, "incorrect merge scale");
+                    return false;
+                }
+            }
         }
+        true
     }
 }
 
@@ -960,5 +1015,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_u8_update_overflow_returns_false() {
+        let mut h: Histogram<u8, 16> = Histogram::new();
+        // Fill one bucket to u8::MAX
+        for _ in 0..255 {
+            assert!(h.update(1.0));
+        }
+        // The 256th increment should overflow.
+        assert!(!h.update(1.0));
+    }
+
+    #[test]
+    fn test_u16_update_by_incr_overflow_returns_false() {
+        let mut h: Histogram<u16, 16> = Histogram::new();
+        // One large increment that fits
+        assert!(h.update_by_incr(1.0, u16::MAX as u64));
+        // Any additional increment to the same bucket overflows.
+        assert!(!h.update(1.0));
+    }
+
+    #[test]
+    fn test_u16_merge_overflow_returns_false() {
+        let mut a: Histogram<u16, 16> = Histogram::new();
+        assert!(a.update_by_incr(1.0, u16::MAX as u64));
+
+        let mut b: Histogram<u16, 16> = Histogram::new();
+        b.update(1.0);
+
+        // Merging should overflow.
+        assert!(!a.merge_from(&b));
+    }
+
+    #[test]
+    fn test_u8_downscale_overflow_returns_false() {
+        // Start at scale 0 so we know exact bucket indices:
+        //   2.0 → index 0, 4.0 → index 1 (adjacent positive indices).
+        // When a far-away value forces a downscale, indices 0 and 1
+        // both map to 0 (0>>1 == 1>>1 == 0), combining 200+200 = 400 > u8::MAX.
+        let mut h: Histogram<u8, 2> = Histogram::with_scale(0);
+        assert!(h.update_by_incr(2.0, 200));
+        assert!(h.update_by_incr(4.0, 200));
+        // 1024.0 at scale 0 maps to index 9, forcing a downscale.
+        assert!(!h.update(1024.0));
+    }
+
+    #[test]
+    fn test_cross_width_merge_overflow_returns_false() {
+        // A u32 source whose count exceeds u16::MAX, merged into u16 target.
+        let mut target: Histogram<u16, 16> = Histogram::new();
+        let mut source: Histogram<u32, 16> = Histogram::new();
+        source.update_by_incr(1.0, u16::MAX as u64 + 1);
+
+        assert!(!target.merge_from_histogram(&source));
     }
 }

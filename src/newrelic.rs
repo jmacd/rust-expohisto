@@ -99,17 +99,17 @@ mod tests {
     fn test_table_scale() {
         // TABLE_SCALE should be >= the feature selected (may be higher
         // when multiple table features are enabled)
-        #[cfg(feature = "newrelic-4")]
+        #[cfg(feature = "scale-4")]
         assert!(TABLE_SCALE >= 4);
-        #[cfg(feature = "newrelic-6")]
+        #[cfg(feature = "scale-6")]
         assert!(TABLE_SCALE >= 6);
-        #[cfg(feature = "newrelic-8")]
+        #[cfg(feature = "scale-8")]
         assert!(TABLE_SCALE >= 8);
-        #[cfg(feature = "newrelic-10")]
+        #[cfg(feature = "scale-10")]
         assert!(TABLE_SCALE >= 10);
-        #[cfg(feature = "newrelic-12")]
+        #[cfg(feature = "scale-12")]
         assert!(TABLE_SCALE >= 12);
-        #[cfg(feature = "newrelic-14")]
+        #[cfg(feature = "scale-14")]
         assert!(TABLE_SCALE >= 14);
     }
 

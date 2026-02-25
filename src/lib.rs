@@ -11,12 +11,17 @@
 //!
 //! This crate supports multiple mapping algorithms, selected at compile time:
 //!
-//! - **`logarithm`** (default): Pure logarithm-based mapping using `floor(ln(value) * scaleFactor)`.
+//! - **`logarithm`**: Pure logarithm-based mapping using `floor(ln(value) * scaleFactor)`.
 //!   Works for all scales, small binary size, but has floating-point precision errors near boundaries.
 //!
-//! - **`newrelic-*`**: Lookup table-based mapping from NewRelic. Exact (no FP errors),
-//!   uses integer-only computation. Choose table size based on your max scale needs:
-//!   `newrelic-4`, `newrelic-6`, `newrelic-8`, `newrelic-10`, `newrelic-12`, `newrelic-14`.
+//! - **`newrelic`**: NewRelic lookup table-based mapping. Exact (no FP errors),
+//!   uses integer-only computation with 2N linear buckets and 1 correction.
+//!
+//! - **`dynatrace`**: Dynatrace lookup table-based mapping. Exact (no FP errors),
+//!   ~50% smaller index table, uses N linear buckets and 2 corrections.
+//!
+//! Pair an algorithm feature with a scale feature (`scale-4` through `scale-14`)
+//! to set the lookup table size.
 //!
 //! # Features
 //!
@@ -95,39 +100,19 @@ pub mod mapping;
 pub mod logarithm;
 
 #[cfg(any(
-    feature = "newrelic-4",
-    feature = "newrelic-6",
-    feature = "newrelic-8",
-    feature = "newrelic-10",
-    feature = "newrelic-12",
-    feature = "newrelic-14",
-    feature = "dynatrace-4",
-    feature = "dynatrace-6",
-    feature = "dynatrace-8",
-    feature = "dynatrace-10",
-    feature = "dynatrace-12",
-    feature = "dynatrace-14"
+    feature = "scale-4",
+    feature = "scale-6",
+    feature = "scale-8",
+    feature = "scale-10",
+    feature = "scale-12",
+    feature = "scale-14"
 ))]
 pub mod lookup;
 
-#[cfg(any(
-    feature = "newrelic-4",
-    feature = "newrelic-6",
-    feature = "newrelic-8",
-    feature = "newrelic-10",
-    feature = "newrelic-12",
-    feature = "newrelic-14"
-))]
+#[cfg(feature = "newrelic")]
 pub mod newrelic;
 
-#[cfg(any(
-    feature = "dynatrace-4",
-    feature = "dynatrace-6",
-    feature = "dynatrace-8",
-    feature = "dynatrace-10",
-    feature = "dynatrace-12",
-    feature = "dynatrace-14"
-))]
+#[cfg(feature = "dynatrace")]
 pub mod dynatrace;
 
 pub use histogram::{Buckets, BucketsIter, Counter, Histogram, Histogram16, Histogram32, Histogram64};

@@ -6,10 +6,20 @@ description = "Allocation-free OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
 
 [features]
-default = ["newrelic-8"]
+default = ["newrelic", "scale-8"]
 
-# Mapping algorithms - choose one for production, enable multiple for benchmarks.
-# At least one must be enabled. If multiple are enabled, newrelic takes precedence.
+# Lookup table scale — choose the maximum accelerated scale.
+# Each table supports all scales from 1 up to its maximum.
+# Only one scale feature should be enabled; the highest wins.
+scale-4 = []      # 0.2KB table, scales 1-4
+scale-6 = []      # 0.8KB table, scales 1-6
+scale-8 = []      # 3KB table, scales 1-8
+scale-10 = []     # 12KB table, scales 1-10
+scale-12 = []     # 48KB table, scales 1-12
+scale-14 = []     # 192KB table, scales 1-14
+
+# Mapping algorithms — choose one.
+# Both produce identical results; they differ only in index table size and correction count.
 
 # Pure logarithm-based mapping.
 # Pros: No lookup tables, works for all scales, small binary size.
@@ -19,26 +29,15 @@ logarithm = []
 # NewRelic lookup table-based mapping.
 # Pros: Exact (no FP errors), fast integer-only computation.
 # Cons: Larger binary size, table scale limits useful range.
-# Choose a table size based on your max scale needs:
-newrelic-4 = []     # 0.2KB, scales 1-4
-newrelic-6 = []     # 0.8KB, scales 1-6
-newrelic-8 = []     # 3KB, scales 1-8
-newrelic-10 = []    # 12KB, scales 1-10
-newrelic-12 = []    # 48KB, scales 1-12
-newrelic-14 = []    # 192KB, scales 1-14
+newrelic = []
 
 # Dynatrace lookup table-based mapping.
 # Pros: Exact (no FP errors), ~50% smaller index table than NewRelic.
 # Cons: Two branch corrections vs one; table scale limits useful range.
-dynatrace-4 = []
-dynatrace-6 = []
-dynatrace-8 = []
-dynatrace-10 = []
-dynatrace-12 = []
-dynatrace-14 = []
+dynatrace = []
 
 # For benchmarking all algorithms together
-bench-all = ["logarithm", "newrelic-8", "dynatrace-8"]
+bench-all = ["logarithm", "newrelic", "dynatrace", "scale-8"]
 
 [dependencies]
 
