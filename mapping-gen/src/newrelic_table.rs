@@ -29,7 +29,17 @@ impl LookupTables {
     /// Generates lookup tables for a given number of index bits.
     pub fn generate(index_bits: u32) -> Self {
         let n = 1usize << index_bits;
-        let mut boundaries = compute_boundaries_exact(n, index_bits);
+        let boundaries = compute_boundaries_exact(n, index_bits);
+        Self::from_boundaries(index_bits, boundaries)
+    }
+
+    /// Creates lookup tables from pre-computed raw boundaries.
+    ///
+    /// `boundaries` must have `2^index_bits` entries with `boundaries[0] == 0`,
+    /// as returned by `compute_boundaries_exact`.
+    pub fn from_boundaries(index_bits: u32, mut boundaries: Vec<u64>) -> Self {
+        let n = 1usize << index_bits;
+        debug_assert_eq!(boundaries.len(), n);
 
         // Upper-inclusive adjustment: change boundary[0] from 0 to 1.
         // This makes the ">=" comparison naturally exclude significand=0
@@ -44,7 +54,7 @@ impl LookupTables {
 
         // LOG_BUCKET_END stores the adjusted boundaries plus a sentinel.
         // boundaries[0] = 1 (upper-inclusive), boundaries[k] = significand of 2^(k/N) for k>0.
-        let mut log_bucket_end = boundaries.clone();
+        let mut log_bucket_end = boundaries;
         log_bucket_end.push(1u64 << 52); // sentinel = 2^52
 
         let significand_shift = 52 - (index_bits + 1); // +1 for 2N linear buckets
@@ -634,6 +644,143 @@ mod tests {
         println!("Summary:");
         println!("  - Lookup is EXACT (0% error) - uses same precomputed boundaries");
         println!("  - lg has precision errors due to floating-point log()");
+    }
+
+    /// Computes bucket boundaries using high-precision float arithmetic,
+    /// without the slow integer-power verification in `compute_boundaries_exact`.
+    ///
+    /// At 256-bit precision with 20 sqrt iterations, the accumulated error is
+    /// bounded by ~20 × 2⁻²⁵⁶, far below the 1 ULP threshold at 52-bit
+    /// precision. The exact boundary value is irrational (Gelfond–Schneider),
+    /// so `floor(float) + 1 = ceil(exact)` is always correct.
+    fn compute_boundaries_float(n: usize, index_bits: u32) -> Vec<u64> {
+        use rug::float::Round;
+
+        const PRECISION: u32 = 256;
+        let mut boundaries = Vec::with_capacity(n);
+
+        for position in 0..n {
+            if position == 0 {
+                boundaries.push(0);
+                continue;
+            }
+
+            let mut x = Float::with_val(PRECISION, 1u32) << position as u32;
+            for _ in 0..index_bits {
+                x = x.sqrt();
+            }
+            x <<= 52;
+            let (truncated, _) = x.to_integer_round(Round::Down).unwrap();
+            let ieee_normalized = truncated.to_u64().unwrap() + 1;
+
+            boundaries.push(ieee_normalized & SIGNIFICAND_MASK);
+        }
+
+        boundaries
+    }
+
+    /// Exhaustive test of NewRelic and Dynatrace lookup algorithms at scale 20.
+    ///
+    /// Generates a scale-20 boundary table (N = 2²⁰ = 1 048 576 sub-buckets),
+    /// then tests every representable f64 from 1.0 through the first sub-bucket
+    /// boundary 2^(2⁻²⁰).  All ~3 billion values are verified.
+    ///
+    /// Run with: `cd mapping-gen && cargo test --release test_exhaustive -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn test_exhaustive_first_subbucket_scale_20() {
+        use crate::dynatrace_table::{DynatraceTables, map_to_index_dynatrace};
+
+        let scale: u32 = 20;
+        let n = 1usize << scale;
+
+        // Compute boundaries using fast float method (no integer-power verification).
+        eprintln!("Computing {} boundaries at scale {}...", n, scale);
+        let boundaries = compute_boundaries_float(n, scale);
+
+        // First boundary significand: the smallest f64 significand whose value
+        // is ≥ 2^(2⁻²⁰).  Because 2^(2⁻²⁰) is irrational, this f64 is strictly
+        // greater; it therefore falls in sub-bucket 1, not 0.
+        let boundary_sig = boundaries[1];
+        eprintln!("First boundary significand: {} ({:#X})", boundary_sig, boundary_sig);
+
+        // Build NR and DT tables from these boundaries.
+        eprintln!("Building NewRelic lookup tables...");
+        let nr = LookupTables::from_boundaries(scale, boundaries.clone());
+        eprintln!("Building Dynatrace lookup tables...");
+        let dt = DynatraceTables::from_boundaries(scale, boundaries);
+
+        // Verify both tables agree on the boundary value.
+        assert_eq!(nr.log_bucket_end[1], boundary_sig, "NR boundary mismatch");
+        assert_eq!(dt.boundaries[2], boundary_sig, "DT boundary mismatch");
+
+        let start_bits = 1.0_f64.to_bits();
+        let end_bits = start_bits + boundary_sig;
+        let total = boundary_sig + 1;
+        eprintln!("Testing {} values (significands 0..={})", total, boundary_sig);
+
+        let mut nr_errors = 0u64;
+        let mut dt_errors = 0u64;
+        let report_interval = 1u64 << 28; // ~268 M, progress reports ~11×
+
+        for bits in start_bits..=end_bits {
+            let significand = bits - start_bits;
+
+            // Expected bucket index:
+            //   significand 0           (exact 1.0)  → −1  (upper-inclusive rule)
+            //   significand 1..boundary_sig−1        →  0  (in (1.0, 2^(1/N)))
+            //   significand boundary_sig              →  1  (≥ 2^(1/N); irrational)
+            let expected = if significand == 0 {
+                -1
+            } else if significand < boundary_sig {
+                0
+            } else {
+                1
+            };
+
+            let value = f64::from_bits(bits);
+            let nr_idx = map_to_index_lookup_at_native_scale(value, &nr);
+            let dt_idx = map_to_index_dynatrace(value, &dt);
+
+            if nr_idx != expected {
+                if nr_errors < 10 {
+                    eprintln!(
+                        "NR error #{}: significand={} expected={} got={}",
+                        nr_errors + 1, significand, expected, nr_idx
+                    );
+                }
+                nr_errors += 1;
+            }
+            if dt_idx != expected {
+                if dt_errors < 10 {
+                    eprintln!(
+                        "DT error #{}: significand={} expected={} got={}",
+                        dt_errors + 1, significand, expected, dt_idx
+                    );
+                }
+                dt_errors += 1;
+            }
+
+            if significand > 0 && significand % report_interval == 0 {
+                eprintln!(
+                    "  progress: {}/{} ({:.1}%)",
+                    significand, total,
+                    significand as f64 / total as f64 * 100.0
+                );
+            }
+        }
+
+        eprintln!("Complete: {} values tested", total);
+        assert_eq!(
+            nr_errors, 0,
+            "NewRelic had {} errors out of {} tests",
+            nr_errors, total
+        );
+        assert_eq!(
+            dt_errors, 0,
+            "Dynatrace had {} errors out of {} tests",
+            dt_errors, total
+        );
     }
 
     /// Fast exact mapping using precomputed boundaries

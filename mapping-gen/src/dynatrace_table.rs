@@ -39,6 +39,17 @@ impl DynatraceTables {
     pub fn generate(index_bits: u32) -> Self {
         let n = 1usize << index_bits;
         let raw_boundaries = compute_boundaries_exact(n, index_bits);
+        Self::from_boundaries(index_bits, raw_boundaries)
+    }
+
+    /// Creates Dynatrace tables from pre-computed raw boundaries.
+    ///
+    /// `raw_boundaries` must have `2^index_bits` entries with `raw_boundaries[0] == 0`,
+    /// as returned by `compute_boundaries_exact`.
+    pub fn from_boundaries(index_bits: u32, raw_boundaries: Vec<u64>) -> Self {
+        let n = 1usize << index_bits;
+        debug_assert_eq!(raw_boundaries.len(), n);
+        debug_assert_eq!(raw_boundaries[0], 0);
 
         // Build boundaries with upper-inclusive sentinel at position 0:
         // [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
@@ -49,7 +60,6 @@ impl DynatraceTables {
         // - For significand>=1, the b[0]=1 check fires, bringing offset to 0+.
         let mut boundaries = Vec::with_capacity(n + 3);
         boundaries.push(0); // sentinel at position 0
-        debug_assert_eq!(raw_boundaries[0], 0);
         boundaries.push(1); // upper-inclusive: b[0] = 1 instead of 0
         boundaries.extend_from_slice(&raw_boundaries[1..]);
         boundaries.push(1u64 << 52); // sentinel

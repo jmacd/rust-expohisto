@@ -36,10 +36,10 @@ Benchmark results (100 test values, per-iteration timing):
 
 | Method | Scale | Time | Notes |
 |--------|-------|------|-------|
-| Exponent | ≤0 | ~110 ns | Bit extraction only |
-| NewRelic lookup | 1-8 | ~170 ns | Integer-only, 2N linear buckets, 1 correction |
-| Dynatrace lookup | 1-8 | ~170 ns | Integer-only, N linear buckets, 2 corrections |
-| Logarithm | 1-20 | ~600 ns | Fallback when lookup unavailable |
+| Exponent | ≤0 | ~1.1 ns | Bit extraction only |
+| NewRelic lookup | 1-8 | ~1.7 ns | Integer-only, 2N linear buckets, 1 correction |
+| Dynatrace lookup | 1-8 | ~1.7 ns | Integer-only, N linear buckets, 2 corrections |
+| Logarithm | 1-20 | ~6 ns | Fallback when lookup unavailable |
 
 The lookup table accelerates all scales from 1 up to the compiled maximum. Higher scales beyond the table fall back to logarithm computation.
 
@@ -55,17 +55,23 @@ rust-expohisto = { version = "0.1", features = ["newrelic-8"] }  # default
 | Feature | Table Size | Scales Accelerated | Use Case |
 |---------|------------|-------------------|----------|
 | `newrelic-4` / `dynatrace-4` | 0.2 KB | 1–4 | Minimal memory |
-| `newrelic-6` / `dynatrace-6` | 0.8 KB | 1–6 | Embedded systems |
-| `newrelic-8` / `dynatrace-8` | 3 KB | 1–8 | **Default** |
-| `newrelic-10` / `dynatrace-10` | 12 KB | 1–10 | Recommended |
-| `newrelic-12` / `dynatrace-12` | 48 KB | 1–12 | High resolution |
-| `newrelic-14` / `dynatrace-14` | 192 KB | 1–14 | Maximum coverage |
+| `newrelic-6` / `dynatrace-6` | 0.6–0.8 KB | 1–6 | Embedded systems |
+| `newrelic-8` / `dynatrace-8` | 2.5–3.0 KB | 1–8 | **Default** |
+| `newrelic-10` / `dynatrace-10` | 10–12 KB | 1–10 | Recommended |
+| `newrelic-12` / `dynatrace-12` | 40–48 KB | 1–12 | High resolution |
+| `newrelic-14` / `dynatrace-14` | 160–192 KB | 1–14 | Maximum coverage |
 
-Only one feature may be enabled—a compile-time check enforces this.
+Only one feature may be enabled—a compile-time check enforces this. The two algorithms produce identical results, are equally tested, and perform the same at runtime—choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](#lookup-table-design)).
 
 ## Exponential Scale
 
-The histogram divides the positive real line into buckets with boundaries at powers of `base = 2^(2^(-scale))`:
+The histogram divides the positive real line into buckets with boundaries at powers of the base:
+
+$$
+\text{base} = 2^{2^{-S}}
+$$
+
+where `S` is the scale. There are `N = 2^S` buckets per power of two, so the k-th sub-bucket boundary within an octave is `base^k = 2^(k/N)`. The relative width of each bucket is `base - 1`:
 
 | Scale | Base | Buckets per power of 2 | Relative error |
 |-------|------|------------------------|----------------|
@@ -79,11 +85,13 @@ Higher scales provide finer resolution at the cost of more buckets.
 
 ## Bucket Inclusivity
 
-Per the OpenTelemetry specification (for Prometheus compatibility), bucket boundaries are **upper-inclusive**:
+Per the OpenTelemetry specification, bucket boundaries are **upper-inclusive**:
 
 > The bucket identified by `index` represents values **greater than** `base^index` and **less than or equal to** `base^(index+1)`.
 
-This means exact powers of two fall into the bucket *below* what a naive logarithm would suggest (see [discussion](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261)).
+This convention was adopted for Prometheus compatibility in a [specification change](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261) that post-dates both the Dynatrace and NewRelic lookup table algorithms. Both algorithms were originally designed with **lower-inclusive** boundaries. This implementation re-engineers the boundary condition for upper-inclusive semantics, validated by an exhaustive test over all ~3 billion f64 values in the first sub-bucket at scale 20.
+
+The practical effect: exact powers of two must fall into the bucket *below* what a naive `floor(log(value))` would suggest.
 
 ### Why the lookup table can handle this without a branch
 
@@ -93,10 +101,7 @@ The crucial observation: **all sub-bucket boundaries except `k = 0` are irration
 
 The **only** boundary that's rational (and representable) is `2^(0/N) = 1.0`, which has significand `0`. This is the only case where upper- vs. lower-inclusive matters. By changing `boundary[0]` from `0` to `1` in the lookup table, the `>=` check naturally excludes `significand == 0` from sub-bucket 0, placing exact powers of two in the bucket below—exactly matching the upper-inclusive convention, without any branch.
 
-The lookup table algorithms implement this as follows:
-
-- **NewRelic**: `boundary[0] = 1` instead of `0` — the `>=` check naturally excludes `significand == 0`
-- **Dynatrace**: a sentinel `0` at position 0 with `boundary[1] = 1` shifts the offset arithmetic so `significand == 0` maps one bucket lower
+In this implementation both algorithms are re-engineered into a single skeleton parameterized by linear bucket count and correction count (see [Lookup Table Design](#lookup-table-design)). The upper-inclusive fix is the same for both: `BOUNDARIES[1] = 1` (instead of `0`) ensures that `significand == 0` never passes any correction check, so `bucket` stays at `approx = 0` and the `- 1` in the final formula places exact powers of two one bucket lower.
 
 For the **logarithm fallback** and **exponent mapping** (scale ≤ 0), an explicit correction is still needed since these don't use the boundary table:
 
@@ -127,42 +132,135 @@ For scales beyond the table's maximum, the implementation falls back to logarith
 When no lookup table is available (or for scales above the table's maximum), the standard formula is used:
 
 ```
-index = floor(ln(value) × 2^scale / ln(2))
+index = ceil(ln(value) × 2^scale / ln(2)) - 1
 ```
+
+This is the upper-inclusive form. For non-powers of two (the vast majority of f64 values), `ceil(x) - 1 = floor(x)`, so the implementation uses `floor()` for the general case and an explicit correction for exact powers of two (see [Bucket Inclusivity](#bucket-inclusivity)).
 
 ## Lookup Table Design
 
-Two lookup table algorithms are available, both sharing the same exact precomputed boundaries:
+The [Dynatrace](https://github.com/dynatrace-oss/dynahist) and [NewRelic](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java) algorithms were developed independently with similar designs. In this implementation they are re-engineered so that both share a single boundary table, a single index-table derivation function, and an identical mapping skeleton. The only differences are two compile-time constants:
 
-### NewRelic variant
+| Parameter | NewRelic | Dynatrace |
+|-----------|----------|-----------|
+| Linear buckets (`L`) | `2N` | `N` |
+| Max corrections | `1` | `2` |
+| Index table | `2N × u16` | `N × u16` |
+| Memory per sub-bucket | 12 bytes | 10 bytes |
+| Total at scale 8 (N=256) | 3.0 KB | 2.5 KB |
 
-1. **Linear bucket approximation**: Divide the significand range `[0, 2^52)` into `2N` equal-width linear buckets
-2. **Precomputed mapping**: Each linear bucket maps to a log-scale bucket (with at most 1 bucket of error)
-3. **Boundary refinement**: A single integer comparison against the exact boundary corrects the approximation
-4. **Upper-inclusive**: `boundary[0] = 1` instead of `0` ensures exact powers of two (significand 0) map one bucket lower without a branch
+Both algorithms share the same `BOUNDARIES` array (`N+3` × `u64` = 8 bytes per entry), which dominates the memory footprint. The index tables use `u16` entries, so the per-sub-bucket cost is 8 + 4 = 12 bytes (NewRelic) vs. 8 + 2 = 10 bytes (Dynatrace)—a ~20% difference, not the 2× that the `2N` vs. `N` entry counts might suggest. Fewer linear buckets means each one can span more log-scale buckets, requiring more boundary corrections at runtime. In practice both are equally fast (see [Performance](#performance)).
 
-### Dynatrace variant
+### Shared data structures
 
-1. **Linear bucket approximation**: Divide the significand range `[0, 2^52)` into `N` equal-width linear buckets (~50% smaller index table)
-2. **Precomputed mapping**: Each linear bucket maps to a log-scale bucket (with at most 2 buckets of error)
-3. **Boundary refinement**: Two integer comparisons correct the approximation
-4. **Upper-inclusive**: A sentinel at position 0 shifts the offset arithmetic so exact powers of two naturally map one bucket lower
+Both algorithms use the same two tables, generated once at the highest compiled scale `H` (where `N = 2^H`):
 
-Both produce identical results. A single table at scale N supports all scales 1 through N.
+**`BOUNDARIES[N+3]`** — Exact sub-bucket boundary significands, shared by both algorithms:
 
-These algorithms were developed independently by [Dynatrace](https://github.com/dynatrace-oss/dynahist) and [NewRelic](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java), with similar designs.
+```
+[sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
+```
 
-### Exact Boundary Computation
+- `b[k]` is the 52-bit significand of `ceil(2^(k/N))` for `k > 0`
+- `b[0] = 1` (not 0) implements upper-inclusive semantics (see [Bucket Inclusivity](#bucket-inclusivity))
+- Trailing sentinels allow unchecked `BOUNDARIES[approx + 2]` access in the Dynatrace variant
 
-Bucket boundaries are computed exactly at build time using the algorithm from [PR #3841](https://github.com/open-telemetry/opentelemetry-collector/pull/3841):
+**`INDEX_TABLE[L]`** — Linear-to-log bucket mapping, derived from `BOUNDARIES` by the same function for both algorithms (with `L = 2N` for NewRelic, `L = N` for Dynatrace):
 
-1. Compute `2^position` exactly (trivial for integer powers)
-2. Apply `sqrt()` `scale` times: `√(√(...√(2^position)...)) = 2^(position/2^scale)`
-3. Scale by `2^52` and truncate to get candidate significand
-4. Verify using exact BigUint arithmetic: `candidate^N ≥ 2^(52N + position)`
-5. Increment if needed to find the exact boundary
+```
+SHIFT = 52 - log2(L)
 
-This guarantees boundaries are correct to 1 ULP (unit in last place).
+for i in 0..L:
+    INDEX_TABLE[i] = largest j such that BOUNDARIES[j+1] <= (i << SHIFT)
+```
+
+Each entry gives the approximate log bucket for the significand range starting at `i << SHIFT`.
+
+### Unified mapping algorithm
+
+The runtime mapping is identical for both variants, parameterized only by `L` (linear bucket count) and `MAX_CORRECTIONS` (1 or 2):
+
+```
+fn map_to_index(value, scale) -> index:
+    significand = bits 0..51 of value         // IEEE 754 significand
+    exponent    = biased_exponent - 1023      // IEEE 754 exponent
+
+    // Step 1: Linear approximation
+    approx = INDEX_TABLE[significand >> SHIFT] // O(1) lookup
+
+    // Step 2: Boundary corrections (1 for NewRelic, 2 for Dynatrace)
+    bucket = approx
+    for i in 1..=MAX_CORRECTIONS:
+        if significand >= BOUNDARIES[approx + i]:
+            bucket += 1
+
+    // Step 3: Combine with exponent, downscale to requested scale
+    fine_index = (exponent << H) + bucket - 1
+    return fine_index >> (H - scale)
+```
+
+All operations are integer: bit extraction, array indexing, comparison, shift, and addition. No floating-point arithmetic is performed at runtime.
+
+The `- 1` in step 3, combined with `b[0] = 1` in the boundary table, is how upper-inclusive semantics emerge: when `significand == 0` (exact power of two), `approx` is 0 and no correction fires, so the result is `(exponent << H) - 1` — one bucket lower than the naive formula.
+
+### Why the correction count is bounded
+
+Each linear bucket spans a width `W = 2^52 / L` of significand space. The number of log-scale boundaries that can fall within one linear bucket is at most:
+
+$$
+\Delta = N \cdot \log_2\!\left(1 + \frac{W}{2^{52}}\right) = N \cdot \log_2\!\left(1 + \frac{1}{L}\right)
+$$
+
+Because `log` is concave, the worst case is always the **first** linear bucket (starting at significand 0), where the log function is steepest. Substituting `L`:
+
+- **NewRelic** (`L = 2N`): $\Delta = N \cdot \log_2(1 + 1/2N) \approx 1/(2\ln 2) \approx 0.72 < 1$ → **1 correction suffices**
+- **Dynatrace** (`L = N`): $\Delta = N \cdot \log_2(1 + 1/N) \approx 1/\ln 2 \approx 1.44 < 2$ → **2 corrections suffice**
+
+Since the worst case is the first linear bucket, and `significand == 0` lives at the start of that bucket, it is already covered by the bound — no extra correction is needed for exact powers of two.
+
+### Exact boundary computation
+
+The k-th sub-bucket boundary at scale `S` (where `N = 2^S`) is:
+
+$$
+\text{boundary}(k) = 2^{k/N} = 2^{k \cdot 2^{-S}}
+$$
+
+Note that `boundary(1) = 2^(1/N) = 2^(2^(-S))` is the exponential base (see [Exponential Scale](#exponential-scale)), and `boundary(k) = base^k`.
+
+These are computed exactly at build time using repeated square roots and bignum verification (following [PR #3841](https://github.com/open-telemetry/opentelemetry-collector/pull/3841)):
+
+```
+fn compute_boundary(k, S) -> u64:
+    // Start with 2^k as a high-precision float
+    x = 2^k                          // exact
+
+    // Take sqrt S times: 2^k → 2^(k/2) → 2^(k/4) → ... → 2^(k/2^S)
+    repeat S times:
+        x = sqrt(x)
+
+    // Convert to 52-bit significand
+    candidate = floor(x × 2^52)
+
+    // Verify and correct using exact bignum arithmetic:
+    // We need the smallest integer c such that c^N ≥ 2^(52N + k)
+    if candidate^N < 2^(52N + k):
+        candidate += 1
+
+    return candidate & SIGNIFICAND_MASK
+```
+
+The key identity is that applying `sqrt` `S` times divides the exponent by `2^S = N`:
+
+$$
+\underbrace{\sqrt{\sqrt{\cdots\sqrt{2^k}}}}_{S \text{ times}} = 2^{k/2^S} = 2^{k/N}
+$$
+
+The float computation uses 128-bit precision, which is far more than enough for the 52-bit significand. The bignum verification step guarantees the result is the exact ceiling — correct to 1 ULP (unit in last place) — regardless of any floating-point rounding in the sqrt chain.
+
+### Multi-scale support
+
+A table generated at scale `H` supports all scales `1..H` via arithmetic right shift. The index at scale `S` is simply `fine_index >> (H - S)`. This works because the exponential histogram has a nested structure: bucket `k` at scale `S` contains buckets `2k` and `2k+1` at scale `S+1`.
 
 ## Crate Structure
 
@@ -178,6 +276,7 @@ cd mapping-gen && cargo test
 ## References
 
 - [OpenTelemetry Exponential Histogram Specification](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
+- [Upper-inclusive boundary discussion](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261): The specification change (for Prometheus compatibility) that motivated the boundary condition re-engineering in this implementation
 - [Golang OpenTelemetry Exponential Histogram](https://github.com/lightstep/go-expohisto): Golang reference implementation by the same author
 - [Dynatrace DynaHist library by Otmar Ertl](https://github.com/dynatrace-oss/dynahist) (see [ExponentialHistogramLargeInclusiveLayout](https://github.com/dynatrace-oss/dynahist/blob/main/src/main/java/com/dynatrace/dynahist/layout/ExponentialHistogramLargeInclusiveLayout.java))
 - [NewRelic lookup table algorithm by Yuke Zhuge](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/Indexer.md)
