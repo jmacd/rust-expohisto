@@ -331,6 +331,9 @@ pub struct Histogram<C: Counter, const SIZE: usize> {
     // Mapping (scale-dependent index calculation)
     mapping: Mapping,
 
+    // Upper bound on scale, used as the initial/reset scale.
+    max_scale: i32,
+
     // Positive value buckets only (non-negative assumption)
     positive: Buckets<C, SIZE>,
 }
@@ -345,13 +348,37 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     /// Creates a new histogram at the maximum supported scale.
     #[inline]
     pub fn new() -> Self {
+        let scale = max_scale();
         Self {
             sum: 0.0,
             count: 0,
             zero_count: 0,
             min: 0.0,
             max: 0.0,
-            mapping: Mapping::new(max_scale()).unwrap(),
+            mapping: Mapping::new(scale).unwrap(),
+            max_scale: scale,
+            positive: Buckets::new(),
+        }
+    }
+
+    /// Creates a new histogram with an upper bound on scale.
+    ///
+    /// The histogram starts at this scale and will never exceed it after a
+    /// `clear()`. Setting this to the compile-time table scale (see
+    /// [`max_scale()`]) avoids logarithm-based mapping at runtime and
+    /// prevents autoscaling from choosing extremely high resolutions that
+    /// place many empty buckets between nearby measurements.
+    #[inline]
+    pub fn with_max_scale(scale: i32) -> Self {
+        let scale = scale.min(max_scale());
+        Self {
+            sum: 0.0,
+            count: 0,
+            zero_count: 0,
+            min: 0.0,
+            max: 0.0,
+            mapping: Mapping::new(scale).expect("invalid scale"),
+            max_scale: scale,
             positive: Buckets::new(),
         }
     }
@@ -366,6 +393,7 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             min: 0.0,
             max: 0.0,
             mapping: Mapping::new(scale).expect("invalid scale"),
+            max_scale: scale,
             positive: Buckets::new(),
         }
     }
@@ -411,6 +439,12 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         }
     }
 
+    /// Returns the maximum scale this histogram will use on reset.
+    #[inline]
+    pub fn max_scale(&self) -> i32 {
+        self.max_scale
+    }
+
     /// Returns a reference to the positive buckets.
     #[inline]
     pub fn positive(&self) -> &Buckets<C, SIZE> {
@@ -418,6 +452,8 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     }
 
     /// Clears the histogram, resetting to initial state.
+    ///
+    /// Scale resets to the max_scale ceiling configured at construction.
     pub fn clear(&mut self) {
         self.positive.clear();
         self.sum = 0.0;
@@ -425,7 +461,7 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         self.zero_count = 0;
         self.min = 0.0;
         self.max = 0.0;
-        self.mapping = Mapping::new(max_scale()).unwrap();
+        self.mapping = Mapping::new(self.max_scale).unwrap();
     }
 
     /// Swaps contents with another histogram.
@@ -1070,5 +1106,76 @@ mod tests {
         source.update_by_incr(1.0, u16::MAX as u64 + 1);
 
         assert!(!target.merge_from_histogram(&source));
+    }
+
+    #[test]
+    fn test_with_max_scale_limits_initial_scale() {
+        let h: Histogram<u16, 16> = Histogram::with_max_scale(3);
+        assert_eq!(h.max_scale(), 3);
+        // Empty histogram reports scale 0, but the mapping is at max_scale.
+        assert_eq!(h.scale(), 0);
+    }
+
+    #[test]
+    fn test_with_max_scale_clamps_to_algorithm_max() {
+        // Requesting a scale higher than the algorithm supports gets clamped.
+        let h: Histogram<u16, 16> = Histogram::with_max_scale(100);
+        assert_eq!(h.max_scale(), max_scale());
+    }
+
+    #[test]
+    fn test_with_max_scale_records_at_limited_scale() {
+        let mut limited: Histogram<u16, 16> = Histogram::with_max_scale(3);
+        let mut unlimited: Histogram<u16, 16> = Histogram::new();
+
+        // Two very close values: at high scale they'd be in different buckets,
+        // at low scale they share a bucket.
+        limited.update(1.0);
+        limited.update(1.001);
+        unlimited.update(1.0);
+        unlimited.update(1.001);
+
+        // Limited histogram starts coarser, so scale should be <= 3.
+        assert!(limited.scale() <= 3);
+        // Unlimited starts at algorithm max, should be higher (if max_scale > 3).
+        if max_scale() > 3 {
+            assert!(unlimited.scale() > limited.scale());
+        }
+    }
+
+    #[test]
+    fn test_clear_resets_to_max_scale() {
+        let mut h: Histogram<u16, 16> = Histogram::with_max_scale(3);
+        // Insert values that force downscale below 3.
+        h.update(0.001);
+        h.update(1000.0);
+        let scale_after_insert = h.scale();
+        assert!(scale_after_insert <= 3);
+
+        h.clear();
+        assert_eq!(h.count(), 0);
+        assert_eq!(h.max_scale(), 3);
+
+        // After clear+insert, scale should start at 3 again.
+        h.update(1.0);
+        assert_eq!(h.scale(), 3);
+    }
+
+    #[test]
+    fn test_with_scale_sets_max_scale() {
+        // with_scale also records its scale as the max_scale ceiling.
+        let mut h: Histogram<u16, 16> = Histogram::with_scale(2);
+        assert_eq!(h.max_scale(), 2);
+        h.update(1.0);
+        assert_eq!(h.scale(), 2);
+        h.clear();
+        h.update(1.0);
+        assert_eq!(h.scale(), 2);
+    }
+
+    #[test]
+    fn test_new_histogram_max_scale_equals_algorithm_max() {
+        let h: Histogram<u16, 16> = Histogram::new();
+        assert_eq!(h.max_scale(), max_scale());
     }
 }
