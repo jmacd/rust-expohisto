@@ -26,7 +26,8 @@
 //! # Features
 //!
 //! - **Allocation-free**: Uses fixed-size arrays via const generics
-//! - **Configurable counter type**: Choose between `u8`, `u16`, `u32`, or `u64`
+//! - **Auto-widening counters**: Buckets start at u8 and widen in-place
+//!   (u8 → u16 → u32 → u64) via combined downscale+widen when a counter saturates
 //! - **Automatic scaling**: Scale adjusts automatically to fit data in available buckets
 //! - **Merge support**: Histograms can be merged in-place without allocation
 //! - **Algorithm choice**: Select mapping algorithm at compile time
@@ -36,9 +37,9 @@
 //! ```
 //! use rust_expohisto::Histogram;
 //!
-//! // Create a compact histogram: 16 buckets with u16 counters
-//! // Total size: ~108 bytes
-//! let mut hist: Histogram<u16, 16> = Histogram::new();
+//! // Create a histogram with 2 u64 words (16 bytes) of bucket storage.
+//! // Starts with 16 u8 buckets, widens to 8×u16 → 4×u32 → 2×u64.
+//! let mut hist: Histogram<2> = Histogram::new();
 //!
 //! // Record observations
 //! hist.update(0.5);
@@ -64,33 +65,26 @@
 //!
 //! # Size Considerations
 //!
-//! | Configuration | Approximate Size |
-//! |---------------|------------------|
-//! | `Histogram<u8, 8>` | ~72 bytes |
-//! | `Histogram<u16, 16>` | ~108 bytes |
-//! | `Histogram<u32, 32>` | ~200 bytes |
-//! | `Histogram<u64, 64>` | ~580 bytes |
+//! `N` is the number of `u64` words of bucket storage (total bytes = N×8).
+//! Total struct size ≈ 80 bytes overhead + N×8.
 //!
-//! # Choosing Parameters
-//!
-//! - **Counter type (`C`)**: Determines max count per bucket
-//!   - `u8`: max 255 per bucket
-//!   - `u16`: max 65,535 per bucket
-//!   - `u32`: max ~4 billion per bucket
-//!
-//! - **Size (`SIZE`)**: Number of buckets, affects resolution
-//!   - Smaller size = more downscaling = coarser resolution
-//!   - Larger size = finer resolution = more memory
-//!   - Should be a power of 2 for efficiency
+//! | Configuration | Bytes | Bucket Capacity (u8 → u16 → u32 → u64) |
+//! |---------------|-------|------------------------------------------|
+//! | `Histogram<1>` | 8 | 8 → 4 → 2 → 1 |
+//! | `Histogram<2>` | 16 | 16 → 8 → 4 → 2 |
+//! | `Histogram<4>` | 32 | 32 → 16 → 8 → 4 |
+//! | `Histogram<8>` | 64 | 64 → 32 → 16 → 8 |
+//! | `Histogram<16>` | 128 | 128 → 64 → 32 → 16 |
+//! | `Histogram<27>` | 216 | 216 → 108 → 54 → 27 |
 //!
 //! # Scale and Resolution
 //!
-//! The histogram starts at scale 20 (finest resolution) and automatically
-//! downscales when the range of observed values exceeds the bucket capacity.
-//! At scale 20, each bucket represents a ~0.0001% change in value.
-//! At scale 0, each bucket represents a factor of 2 change.
+//! The histogram starts at the maximum supported scale (finest resolution) and
+//! automatically downscales when the range of observed values exceeds the bucket
+//! capacity. When a counter saturates, the histogram performs an in-place
+//! widen+downscale: bucket count halves, counter width doubles, and scale
+//! decreases by 1.
 
-pub mod aggregator;
 pub mod exponent;
 pub mod float64;
 pub mod histogram;
@@ -116,6 +110,5 @@ pub mod newrelic;
 #[cfg(feature = "dynatrace")]
 pub mod dynatrace;
 
-pub use aggregator::{CounterWidth, ExpoHistogram, MMSC, Resolution, LARGE_SIZE, SMALL_SIZE};
-pub use histogram::{Buckets, BucketsIter, Counter, Histogram, Histogram16, Histogram32, Histogram64};
+pub use histogram::{BucketWidth, Buckets, BucketsIter, Histogram};
 pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};

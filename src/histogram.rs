@@ -2,51 +2,51 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Allocation-free exponential histogram implementation.
+//!
+//! The histogram uses a fixed-size byte array for bucket storage, starting
+//! with u8 counters and widening in place (u8 → u16 → u32 → u64) via
+//! combined downscale+widen when a counter saturates.
 
 use crate::mapping::{Mapping, max_scale};
 
-/// Trait for counter types that can be used in the histogram.
-pub trait Counter: Copy + Default + Ord {
-    /// The maximum value this counter can hold.
-    const MAX: u64;
-
-    /// Attempt to add `incr` to self, returning None on overflow.
-    fn checked_add_u64(self, incr: u64) -> Option<Self>;
-
-    /// Convert to u64 for merging operations.
-    fn to_u64(self) -> u64;
-
-    /// Create from u64, saturating at MAX.
-    fn from_u64_saturating(v: u64) -> Self;
+/// The current width of bucket counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BucketWidth {
+    /// 1-byte counters (max 255 per bucket).
+    U8 = 1,
+    /// 2-byte counters (max 65,535 per bucket).
+    U16 = 2,
+    /// 4-byte counters (max ~4 billion per bucket).
+    U32 = 4,
+    /// 8-byte counters.
+    U64 = 8,
 }
 
-macro_rules! impl_counter {
-    ($($t:ty),+) => {$(
-        impl Counter for $t {
-            const MAX: u64 = <$t>::MAX as u64;
+impl BucketWidth {
+    /// Returns the byte size of one counter at this width.
+    #[inline]
+    const fn bytes(self) -> usize {
+        self as usize
+    }
 
-            #[inline]
-            fn checked_add_u64(self, incr: u64) -> Option<Self> {
-                if incr > <Self as Counter>::MAX {
-                    return None;
-                }
-                self.checked_add(incr as $t)
-            }
+    /// Returns the number of buckets that fit in `byte_count` bytes.
+    #[inline]
+    const fn capacity(self, byte_count: usize) -> usize {
+        byte_count / self.bytes()
+    }
 
-            #[inline]
-            fn to_u64(self) -> u64 {
-                self as u64
-            }
-
-            #[inline]
-            fn from_u64_saturating(v: u64) -> Self {
-                v.min(<Self as Counter>::MAX) as $t
-            }
+    /// Returns the next wider counter width, or `None` if already at u64.
+    #[inline]
+    const fn wider(self) -> Option<BucketWidth> {
+        match self {
+            Self::U8 => Some(Self::U16),
+            Self::U16 => Some(Self::U32),
+            Self::U32 => Some(Self::U64),
+            Self::U64 => None,
         }
-    )+};
+    }
 }
-
-impl_counter!(u8, u16, u32, u64);
 
 /// High-low range for scale change calculations.
 #[derive(Debug, Clone, Copy)]
@@ -101,44 +101,75 @@ fn change_scale(mut hl: HighLow, size: i32) -> i32 {
     change
 }
 
-/// Fixed-size bucket storage using a circular buffer.
+/// Fixed-size bucket storage using a byte array with runtime counter width.
 ///
-/// This stores counts in a fixed-size array, using modular arithmetic
-/// to handle the circular nature of the index space.
-#[derive(Debug, Clone, Copy)]
-pub struct Buckets<C: Counter, const SIZE: usize> {
-    /// The bucket counts, stored in a circular buffer.
-    counts: [C; SIZE],
+/// The backing `[u64; N]` array is reinterpreted as `[u8]`, `[u16]`,
+/// `[u32]`, or `[u64]` via `bytemuck` depending on the current [`BucketWidth`].
+/// When a counter saturates and the width is less than u64, the caller
+/// performs an in-place widen+downscale to double the counter width while
+/// halving the bucket count.
+///
+/// `N` is the number of `u64` words of bucket storage.
+#[derive(Clone)]
+#[repr(C)]
+pub struct Buckets<const N: usize> {
+    /// Raw bucket storage, naturally 8-byte aligned via `[u64]`.
+    data: [u64; N],
+
+    /// Current counter width.
+    width: BucketWidth,
+
     /// Index of the 0th position in the backing array.
     index_base: i32,
+
     /// Smallest index value represented.
     index_start: i32,
+
     /// Largest index value represented.
     index_end: i32,
 }
 
-impl<C: Counter, const SIZE: usize> Default for Buckets<C, SIZE> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
-    /// Creates empty buckets.
+impl<const N: usize> Buckets<N> {
+    /// Creates empty buckets with u8 counters.
     #[inline]
     pub fn new() -> Self {
         Self {
-            counts: [C::default(); SIZE],
+            data: [0u64; N],
+            width: BucketWidth::U8,
             index_base: 0,
             index_start: 0,
             index_end: 0,
         }
     }
 
+    /// Returns the byte slice of the backing storage.
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.data)
+    }
+
+    /// Returns the mutable byte slice of the backing storage.
+    #[inline]
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        bytemuck::cast_slice_mut(&mut self.data)
+    }
+
+    /// Returns the current counter width.
+    #[inline]
+    pub fn width(&self) -> BucketWidth {
+        self.width
+    }
+
     /// Returns the offset (smallest index).
     #[inline]
     pub fn offset(&self) -> i32 {
         self.index_start
+    }
+
+    /// Number of logical buckets available at the current width.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.width.capacity(N * 8)
     }
 
     /// Returns the number of buckets in use.
@@ -160,71 +191,128 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
     /// Checks if the bucket range represents no data.
     #[inline]
     fn is_effectively_empty(&self) -> bool {
-        self.index_end == self.index_start && self.at(0) == 0
+        self.index_end == self.index_start && self.get(0) == 0
     }
 
     /// Returns the count at position `pos` (0-indexed from offset).
     #[inline]
     pub fn at(&self, pos: u32) -> u64 {
         let bias = (self.index_base - self.index_start) as u32;
-        let size = SIZE as u32;
+        let cap = self.capacity() as u32;
 
         let mut idx = pos;
         if idx < bias {
-            idx += size;
+            idx += cap;
         }
         idx -= bias;
 
-        self.counts[idx as usize].to_u64()
+        self.get(idx as usize)
     }
 
-    /// Clears all bucket counts.
+    /// Gets the value at a physical slot index.
+    #[inline]
+    fn get(&self, slot: usize) -> u64 {
+        match self.width {
+            BucketWidth::U8 => self.as_bytes()[slot] as u64,
+            BucketWidth::U16 => {
+                let s: &[u16] = bytemuck::cast_slice(&self.data);
+                s[slot] as u64
+            }
+            BucketWidth::U32 => {
+                let s: &[u32] = bytemuck::cast_slice(&self.data);
+                s[slot] as u64
+            }
+            BucketWidth::U64 => self.data[slot],
+        }
+    }
+
+    /// Sets the value at a physical slot index.
+    #[inline]
+    fn set(&mut self, slot: usize, value: u64) {
+        match self.width {
+            BucketWidth::U8 => self.as_bytes_mut()[slot] = value as u8,
+            BucketWidth::U16 => {
+                let s: &mut [u16] = bytemuck::cast_slice_mut(&mut self.data);
+                s[slot] = value as u16;
+            }
+            BucketWidth::U32 => {
+                let s: &mut [u32] = bytemuck::cast_slice_mut(&mut self.data);
+                s[slot] = value as u32;
+            }
+            BucketWidth::U64 => self.data[slot] = value,
+        }
+    }
+
+    /// Returns the maximum value storable in one counter at the current width.
+    #[inline]
+    fn counter_max(&self) -> u64 {
+        match self.width {
+            BucketWidth::U8 => u8::MAX as u64,
+            BucketWidth::U16 => u16::MAX as u64,
+            BucketWidth::U32 => u32::MAX as u64,
+            BucketWidth::U64 => u64::MAX,
+        }
+    }
+
+    /// Attempts to add `incr` to a physical slot. Returns false on overflow.
+    #[inline]
+    fn try_increment(&mut self, slot: usize, incr: u64) -> bool {
+        let val = self.get(slot);
+        let new_val = match val.checked_add(incr) {
+            Some(v) if v <= self.counter_max() => v,
+            _ => return false,
+        };
+        self.set(slot, new_val);
+        true
+    }
+
+    /// Empties a slot and returns its count.
+    #[inline]
+    fn empty_slot(&mut self, slot: usize) -> u64 {
+        let v = self.get(slot);
+        self.set(slot, 0);
+        v
+    }
+
+    /// Clears all bucket counts and resets to u8 width.
     #[inline]
     pub fn clear(&mut self) {
         self.index_start = 0;
         self.index_end = 0;
         self.index_base = 0;
-        self.counts.fill(C::default());
+        self.width = BucketWidth::U8;
+        self.data.fill(0);
     }
 
-    /// Returns the size of the backing array.
-    #[inline]
-    const fn size(&self) -> i32 {
-        SIZE as i32
-    }
-
-    /// Increments the bucket at `bucket_index` by `incr`.
-    ///
-    /// Returns `false` if the increment would overflow the counter.
-    #[inline]
-    fn try_increment(&mut self, bucket_index: i32, incr: u64) -> bool {
-        let idx = bucket_index as usize % SIZE;
-        if let Some(new_val) = self.counts[idx].checked_add_u64(incr) {
-            self.counts[idx] = new_val;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Empties a bucket and returns its count.
-    #[inline]
-    fn empty_bucket(&mut self, src: i32) -> u64 {
-        let idx = src as usize % SIZE;
-        core::mem::take(&mut self.counts[idx]).to_u64()
-    }
-
-    /// Rotates the array so that index_start == index_base.
+    /// Rotates the circular buffer so that index_start == index_base.
     fn rotate(&mut self) {
         let bias = (self.index_base - self.index_start) as usize;
         if bias == 0 {
             return;
         }
-        self.counts.rotate_right(bias);
+        let cap = self.capacity();
+        match self.width {
+            BucketWidth::U8 => {
+                let s = self.as_bytes_mut();
+                s[..cap].rotate_right(bias);
+            }
+            BucketWidth::U16 => {
+                let s: &mut [u16] = bytemuck::cast_slice_mut(&mut self.data);
+                s[..cap].rotate_right(bias);
+            }
+            BucketWidth::U32 => {
+                let s: &mut [u32] = bytemuck::cast_slice_mut(&mut self.data);
+                s[..cap].rotate_right(bias);
+            }
+            BucketWidth::U64 => {
+                self.data[..cap].rotate_right(bias);
+            }
+        }
         self.index_base = self.index_start;
     }
 
-    /// Downscales by collapsing 2^by buckets into 1.
+    /// Downscales by collapsing 2^by adjacent buckets into 1.
+    ///
     /// Returns `false` if combining buckets would overflow the counter type.
     fn downscale(&mut self, by: i32) -> bool {
         self.rotate();
@@ -240,7 +328,7 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
 
             let mut i = mod_val;
             while i < each && inpos < size {
-                if !self.relocate_bucket(outpos, inpos) {
+                if !self.relocate(outpos as usize, inpos as usize) {
                     return false;
                 }
                 inpos += 1;
@@ -256,20 +344,111 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
         true
     }
 
-    /// Moves count from src bucket to dest bucket.
-    ///
-    /// Returns `false` if the combined count would overflow the counter type.
-    fn relocate_bucket(&mut self, dest: i32, src: i32) -> bool {
+    /// Moves count from src slot to dest slot. Returns false on overflow.
+    fn relocate(&mut self, dest: usize, src: usize) -> bool {
         if dest == src {
             return true;
         }
-        let count = self.empty_bucket(src);
+        let count = self.empty_slot(src);
         self.try_increment(dest, count)
+    }
+
+    /// In-place widen: linearize the circular buffer, group-sum adjacent
+    /// counters, then reinterpret the memory as the next wider counter type.
+    ///
+    /// This is a combined downscale + counter-widen operation that preserves
+    /// the total byte budget. Bucket count halves (or quarters), counter
+    /// width doubles.
+    ///
+    /// Usually downscales by 1 (pairwise grouping). When the span is at
+    /// maximum capacity with odd `index_start`, downscale-by-1 would produce
+    /// more output groups than new-width capacity allows, so we bump to
+    /// downscale-by-2 (groups of 4).
+    ///
+    /// Returns `None` if already at u64 width (no further widening possible).
+    /// Returns `Some(by)` with the actual downscale amount on success.
+    fn widen_in_place(&mut self) -> Option<i32> {
+        let new_width = match self.width.wider() {
+            Some(w) => w,
+            None => return None,
+        };
+
+        // Step 1: linearize the circular buffer.
+        self.rotate();
+
+        let used = if self.is_effectively_empty() {
+            0
+        } else {
+            (self.index_end - self.index_start + 1) as usize
+        };
+
+        let new_cap = new_width.capacity(N * 8);
+
+        // Step 2: determine downscale amount.
+        // Usually 1. When fully packed with odd index_start, the
+        // downscaled span can exceed new_cap, so bump to 2.
+        let by: i32 = if used == 0 {
+            1
+        } else {
+            let mut b = 1;
+            loop {
+                let ds_start = self.index_start >> b;
+                let ds_end = self.index_end >> b;
+                if (ds_end - ds_start + 1) as usize <= new_cap {
+                    break;
+                }
+                b += 1;
+            }
+            b
+        };
+
+        // Step 3: group-sum and write as wider type.
+        //
+        // We read old-width values left-to-right and write new-width values
+        // left-to-right. Output never overtakes input because each output
+        // element occupies at most the same byte span as its input group.
+        let old_width = self.width;
+        let mut out_slot = 0usize;
+        let mut i = 0usize;
+        while i < used {
+            let old_index = self.index_start + i as i32;
+            let new_index = old_index >> by;
+            let mut sum = self.get(i);
+            i += 1;
+            // Consume partners that map to the same new_index.
+            while i < used {
+                let next_old_index = self.index_start + i as i32;
+                if (next_old_index >> by) != new_index {
+                    break;
+                }
+                sum += self.get(i);
+                i += 1;
+            }
+            // Write the accumulated sum at the new width.
+            // Temporarily switch width for set(), then back for get().
+            self.width = new_width;
+            self.set(out_slot, sum);
+            self.width = old_width;
+            out_slot += 1;
+        }
+
+        // Zero remaining slots at the new width.
+        self.width = new_width;
+        for s in out_slot..new_cap {
+            self.set(s, 0);
+        }
+
+        // Step 4: update indices.
+        self.index_start >>= by;
+        self.index_end >>= by;
+        self.index_base = self.index_start;
+
+        Some(by)
     }
 
     /// Returns an iterator over the bucket counts.
     #[inline]
-    pub fn iter(&self) -> BucketsIter<'_, C, SIZE> {
+    pub fn iter(&self) -> BucketsIter<'_, N> {
         BucketsIter {
             buckets: self,
             pos: 0,
@@ -278,15 +457,32 @@ impl<C: Counter, const SIZE: usize> Buckets<C, SIZE> {
     }
 }
 
+impl<const N: usize> Default for Buckets<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> core::fmt::Debug for Buckets<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Buckets")
+            .field("width", &self.width)
+            .field("index_start", &self.index_start)
+            .field("index_end", &self.index_end)
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
 /// Iterator over bucket counts.
 #[derive(Debug)]
-pub struct BucketsIter<'a, C: Counter, const SIZE: usize> {
-    buckets: &'a Buckets<C, SIZE>,
+pub struct BucketsIter<'a, const N: usize> {
+    buckets: &'a Buckets<N>,
     pos: u32,
     len: u32,
 }
 
-impl<C: Counter, const SIZE: usize> Iterator for BucketsIter<'_, C, SIZE> {
+impl<const N: usize> Iterator for BucketsIter<'_, N> {
     type Item = u64;
 
     #[inline]
@@ -306,11 +502,11 @@ impl<C: Counter, const SIZE: usize> Iterator for BucketsIter<'_, C, SIZE> {
     }
 }
 
-impl<C: Counter, const SIZE: usize> ExactSizeIterator for BucketsIter<'_, C, SIZE> {}
+impl<const N: usize> ExactSizeIterator for BucketsIter<'_, N> {}
 
-impl<'a, C: Counter, const SIZE: usize> IntoIterator for &'a Buckets<C, SIZE> {
+impl<'a, const N: usize> IntoIterator for &'a Buckets<N> {
     type Item = u64;
-    type IntoIter = BucketsIter<'a, C, SIZE>;
+    type IntoIter = BucketsIter<'a, N>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -319,9 +515,14 @@ impl<'a, C: Counter, const SIZE: usize> IntoIterator for &'a Buckets<C, SIZE> {
 }
 
 /// An allocation-free exponential histogram for non-negative values.
+///
+/// `N` is the number of `u64` words of bucket storage (total bytes = N×8).
+/// Buckets start as u8 counters and automatically widen in place
+/// (u8 → u16 → u32 → u64) via combined downscale+widen when a counter
+/// saturates. At u64 width, counter overflow returns `false`.
 #[derive(Debug, Clone)]
-pub struct Histogram<C: Counter, const SIZE: usize> {
-    // Statistics
+pub struct Histogram<const N: usize> {
+    // Statistics (min, max, sum, zero_count, count)
     sum: f64,
     count: u64,
     zero_count: u64,
@@ -334,18 +535,19 @@ pub struct Histogram<C: Counter, const SIZE: usize> {
     // Upper bound on scale, used as the initial/reset scale.
     max_scale: i32,
 
-    // Positive value buckets only (non-negative assumption)
-    positive: Buckets<C, SIZE>,
+    // Positive value buckets
+    positive: Buckets<N>,
 }
 
-impl<C: Counter, const SIZE: usize> Default for Histogram<C, SIZE> {
+impl<const N: usize> Default for Histogram<N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
+impl<const N: usize> Histogram<N> {
     /// Creates a new histogram at the maximum supported scale.
+    /// Buckets start at u8 width.
     #[inline]
     pub fn new() -> Self {
         let scale = max_scale();
@@ -362,12 +564,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     }
 
     /// Creates a new histogram with an upper bound on scale.
-    ///
-    /// The histogram starts at this scale and will never exceed it after a
-    /// `clear()`. Setting this to the compile-time table scale (see
-    /// [`max_scale()`]) avoids logarithm-based mapping at runtime and
-    /// prevents autoscaling from choosing extremely high resolutions that
-    /// place many empty buckets between nearby measurements.
     #[inline]
     pub fn with_max_scale(scale: i32) -> Self {
         let scale = scale.min(max_scale());
@@ -396,32 +592,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             max_scale: scale,
             positive: Buckets::new(),
         }
-    }
-
-    /// Creates a wider-counter copy of this histogram.
-    ///
-    /// Every bucket count is losslessly promoted to the wider counter type.
-    /// The resulting histogram has the same scale, max_scale, and statistics.
-    pub fn widen_into<C2: Counter>(&self) -> Histogram<C2, SIZE> {
-        let mut wider = Histogram::<C2, SIZE> {
-            sum: self.sum,
-            count: self.count,
-            zero_count: self.zero_count,
-            min: self.min,
-            max: self.max,
-            mapping: self.mapping,
-            max_scale: self.max_scale,
-            positive: Buckets {
-                counts: [C2::default(); SIZE],
-                index_base: self.positive.index_base,
-                index_start: self.positive.index_start,
-                index_end: self.positive.index_end,
-            },
-        };
-        for i in 0..SIZE {
-            wider.positive.counts[i] = C2::from_u64_saturating(self.positive.counts[i].to_u64());
-        }
-        wider
     }
 
     /// Returns the sum of all recorded values.
@@ -458,7 +628,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     #[inline]
     pub fn scale(&self) -> i32 {
         if self.count == self.zero_count {
-            // All zeros - scale doesn't matter
             0
         } else {
             self.mapping.scale()
@@ -471,15 +640,21 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         self.max_scale
     }
 
+    /// Returns the current bucket counter width.
+    #[inline]
+    pub fn bucket_width(&self) -> BucketWidth {
+        self.positive.width()
+    }
+
     /// Returns a reference to the positive buckets.
     #[inline]
-    pub fn positive(&self) -> &Buckets<C, SIZE> {
+    pub fn positive(&self) -> &Buckets<N> {
         &self.positive
     }
 
     /// Clears the histogram, resetting to initial state.
     ///
-    /// Scale resets to the max_scale ceiling configured at construction.
+    /// Scale resets to max_scale, bucket width resets to u8.
     pub fn clear(&mut self) {
         self.positive.clear();
         self.sum = 0.0;
@@ -497,8 +672,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     }
 
     /// Records a single value.
-    ///
-    /// Returns `false` if a bucket counter overflowed.
     #[inline]
     pub fn update(&mut self, value: f64) -> bool {
         self.update_by_incr(value, 1)
@@ -506,7 +679,7 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
 
     /// Records a value with a specified increment.
     ///
-    /// Returns `false` if a counter overflowed.
+    /// Returns `false` only if u64 counters overflow.
     pub fn update_by_incr(&mut self, value: f64, incr: u64) -> bool {
         debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
 
@@ -515,7 +688,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             None => return false,
         };
 
-        // Update min/max
         if self.count == 0 {
             self.min = value;
             self.max = value;
@@ -541,28 +713,35 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
 
     /// Updates buckets for a positive value.
     ///
-    /// Returns `false` if a bucket counter overflowed.
-    pub(crate) fn update_buckets(&mut self, value: f64, incr: u64) -> bool {
-        let index = self.mapping.map_to_index(value);
+    /// On counter overflow at width < u64, performs in-place widen+downscale
+    /// and retries. Returns `false` only when u64 counters overflow.
+    fn update_buckets(&mut self, value: f64, incr: u64) -> bool {
+        loop {
+            let index = self.mapping.map_to_index(value);
 
-        match self.increment_index_by(index, incr) {
-            IncrResult::Ok => return true,
-            IncrResult::CounterOverflow => return false,
-            IncrResult::NeedsDownscale(hl) => {
-                let change = change_scale(hl, SIZE as i32);
-                if !self.downscale(change) {
-                    return false;
+            match self.increment_index_by(index, incr) {
+                IncrResult::Ok => return true,
+                IncrResult::NeedsDownscale(hl) => {
+                    let change = change_scale(hl, self.positive.capacity() as i32);
+                    if !self.downscale(change) {
+                        // Downscale failed due to counter overflow — try widening.
+                        if !self.widen_and_retry_downscale(change) {
+                            return false;
+                        }
+                    }
+                    // Loop: re-map at the new scale and try again.
                 }
-            }
-        }
-
-        let index = self.mapping.map_to_index(value);
-        match self.increment_index_by(index, incr) {
-            IncrResult::Ok => true,
-            IncrResult::CounterOverflow => false,
-            IncrResult::NeedsDownscale(_) => {
-                debug_assert!(false, "downscale logic error");
-                false
+                IncrResult::CounterOverflow => {
+                    // Counter overflow — try widening in place.
+                    let by = match self.positive.widen_in_place() {
+                        Some(by) => by,
+                        None => return false, // Already at u64, truly overflowed.
+                    };
+                    let new_scale = self.mapping.scale() - by;
+                    self.mapping = Mapping::new(new_scale)
+                        .expect("invalid scale after widen");
+                    // Loop: re-map at the new scale and try again.
+                }
             }
         }
     }
@@ -573,10 +752,9 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             return IncrResult::Ok;
         }
 
-        let max_size = SIZE as i32;
+        let max_size = self.positive.capacity() as i32;
 
         if self.positive.is_empty() {
-            // First value
             self.positive.index_start = index;
             self.positive.index_end = index;
             self.positive.index_base = index;
@@ -602,10 +780,10 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
 
         let mut bucket_index = index - self.positive.index_base;
         if bucket_index < 0 {
-            bucket_index += self.positive.size();
+            bucket_index += max_size;
         }
 
-        if !self.positive.try_increment(bucket_index, incr) {
+        if !self.positive.try_increment(bucket_index as usize, incr) {
             return IncrResult::CounterOverflow;
         }
 
@@ -629,23 +807,38 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         true
     }
 
-    /// Merges another histogram into this one.
-    ///
-    /// Returns `false` if a bucket counter overflowed.
-    pub fn merge_from(&mut self, other: &Self) -> bool {
-        self.merge_from_histogram(other)
+    /// Attempts to widen then downscale. Used when a regular downscale would
+    /// overflow at the current counter width.
+    fn widen_and_retry_downscale(&mut self, total_change: i32) -> bool {
+        // Widen in place (which itself downscales by at least 1).
+        let by = match self.positive.widen_in_place() {
+            Some(by) => by,
+            None => return false, // Already at u64.
+        };
+        let new_scale = self.mapping.scale() - by;
+        self.mapping = Mapping::new(new_scale).expect("invalid scale after widen");
+
+        // Apply remaining downscale if needed.
+        let remaining = total_change - by;
+        if remaining > 0 {
+            if !self.positive.downscale(remaining) {
+                // Still overflows — try widening again recursively.
+                return self.widen_and_retry_downscale(remaining);
+            }
+            let new_scale = self.mapping.scale() - remaining;
+            self.mapping = Mapping::new(new_scale).expect("invalid scale after downscale");
+        }
+        true
     }
 
-    /// Merges a histogram with a potentially different counter type into this one.
+    /// Merges another histogram (same N) into this one.
     ///
-    /// Returns `false` if a bucket counter overflowed.
-    pub fn merge_from_histogram<C2: Counter>(&mut self, other: &Histogram<C2, SIZE>) -> bool {
-        // Early return if other is empty
+    /// Returns `false` if counters overflow.
+    pub fn merge_from(&mut self, other: &Self) -> bool {
         if other.count == 0 {
             return true;
         }
 
-        // Check for u64 overflow before mutating.
         let new_count = match self.count.checked_add(other.count) {
             Some(c) => c,
             None => return false,
@@ -655,7 +848,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             None => return false,
         };
 
-        // Update min/max
         if self.count == 0 {
             self.min = other.min;
             self.max = other.max;
@@ -668,68 +860,26 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         self.count = new_count;
         self.zero_count = new_zero_count;
 
-        // If other only has zeros, no bucket merging needed
         if other.positive.is_empty() {
             return true;
         }
 
         let min_scale = self.scale().min(other.scale());
+        let cap = self.positive.capacity() as i32;
 
-        let hlp = self.high_low_at_scale(&self.positive, min_scale)
-            .merge(Self::high_low_at_scale_for(&other.positive, other.scale(), min_scale));
+        let hlp = self.high_low_at_scale(min_scale)
+            .merge(Self::high_low_at_scale_of(&other.positive, other.scale(), min_scale));
 
-        let min_scale = min_scale - change_scale(hlp, SIZE as i32);
+        let min_scale = min_scale - change_scale(hlp, cap);
 
-        if !self.downscale(self.scale() - min_scale) {
+        if !self.downscale_to(min_scale) {
             return false;
         }
         self.merge_buckets_from(&other.positive, other.scale(), min_scale)
     }
 
-    fn high_low_at_scale(&self, buckets: &Buckets<C, SIZE>, scale: i32) -> HighLow {
-        Self::high_low_at_scale_for(buckets, self.scale(), scale)
-    }
-
-    fn high_low_at_scale_for<C2: Counter>(buckets: &Buckets<C2, SIZE>, current_scale: i32, target_scale: i32) -> HighLow {
-        if buckets.is_empty() {
-            return HighLow::empty();
-        }
-        let shift = current_scale - target_scale;
-        HighLow {
-            low: buckets.index_start >> shift,
-            high: buckets.index_end >> shift,
-        }
-    }
-
-    fn merge_buckets_from<C2: Counter>(&mut self, other_buckets: &Buckets<C2, SIZE>, other_scale: i32, target_scale: i32) -> bool {
-        let their_offset = other_buckets.offset();
-        let their_change = other_scale - target_scale;
-
-        for i in 0..other_buckets.len() {
-            let count = other_buckets.at(i);
-            if count == 0 {
-                continue;
-            }
-            let index = (their_offset + i as i32) >> their_change;
-            match self.increment_index_by(index, count) {
-                IncrResult::Ok => {}
-                IncrResult::CounterOverflow => return false,
-                IncrResult::NeedsDownscale(_) => {
-                    debug_assert!(false, "incorrect merge scale");
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    /// Merges from raw histogram data, enabling cross-SIZE merging.
-    ///
-    /// This accepts the source's statistics and bucket data as scalars and a
-    /// closure, so the source histogram's SIZE need not match self's SIZE.
-    ///
-    /// Returns `false` if a counter overflowed.
-    pub(crate) fn merge_from_raw(
+    /// Merges from raw histogram data, enabling cross-size merging.
+    pub fn merge_from_raw(
         &mut self,
         other_count: u64,
         other_zero_count: u64,
@@ -771,6 +921,7 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         }
 
         let other_end = other_offset + other_len as i32 - 1;
+        let cap = self.positive.capacity() as i32;
         let min_scale = self.scale().min(other_scale);
 
         let self_hl = if self.positive.is_empty() {
@@ -790,9 +941,9 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
             }
         };
         let hlp = self_hl.merge(other_hl);
-        let min_scale = min_scale - change_scale(hlp, SIZE as i32);
+        let min_scale = min_scale - change_scale(hlp, cap);
 
-        if !self.downscale(self.scale() - min_scale) {
+        if !self.downscale_to(min_scale) {
             return false;
         }
 
@@ -814,16 +965,53 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         }
         true
     }
+
+    fn high_low_at_scale(&self, scale: i32) -> HighLow {
+        Self::high_low_at_scale_of(&self.positive, self.scale(), scale)
+    }
+
+    fn high_low_at_scale_of(buckets: &Buckets<N>, current_scale: i32, target_scale: i32) -> HighLow {
+        if buckets.is_empty() {
+            return HighLow::empty();
+        }
+        let shift = current_scale - target_scale;
+        HighLow {
+            low: buckets.index_start >> shift,
+            high: buckets.index_end >> shift,
+        }
+    }
+
+    fn merge_buckets_from(&mut self, other_buckets: &Buckets<N>, other_scale: i32, target_scale: i32) -> bool {
+        let their_offset = other_buckets.offset();
+        let their_change = other_scale - target_scale;
+
+        for i in 0..other_buckets.len() {
+            let count = other_buckets.at(i);
+            if count == 0 {
+                continue;
+            }
+            let index = (their_offset + i as i32) >> their_change;
+            match self.increment_index_by(index, count) {
+                IncrResult::Ok => {}
+                IncrResult::CounterOverflow => return false,
+                IncrResult::NeedsDownscale(_) => {
+                    debug_assert!(false, "incorrect merge scale");
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Downscales to the given target scale.
+    fn downscale_to(&mut self, target_scale: i32) -> bool {
+        let change = self.mapping.scale() - target_scale;
+        if change <= 0 {
+            return true;
+        }
+        self.downscale(change)
+    }
 }
-
-/// Type alias for a compact histogram with u16 counters.
-pub type Histogram16<const SIZE: usize> = Histogram<u16, SIZE>;
-
-/// Type alias for a histogram with u32 counters.
-pub type Histogram32<const SIZE: usize> = Histogram<u32, SIZE>;
-
-/// Type alias for a histogram with u64 counters (widest, for cumulative aggregation).
-pub type Histogram64<const SIZE: usize> = Histogram<u64, SIZE>;
 
 #[cfg(test)]
 mod tests {
@@ -831,7 +1019,7 @@ mod tests {
 
     #[test]
     fn test_histogram_basic() {
-        let mut h: Histogram<u16, 16> = Histogram::new();
+        let mut h: Histogram<2> = Histogram::new();
 
         h.update(1.0);
         assert_eq!(h.count(), 1);
@@ -839,11 +1027,12 @@ mod tests {
         assert_eq!(h.min(), 1.0);
         assert_eq!(h.max(), 1.0);
         assert_eq!(h.zero_count(), 0);
+        assert_eq!(h.bucket_width(), BucketWidth::U8);
     }
 
     #[test]
     fn test_histogram_zero() {
-        let mut h: Histogram<u16, 16> = Histogram::new();
+        let mut h: Histogram<2> = Histogram::new();
 
         h.update(0.0);
         assert_eq!(h.count(), 1);
@@ -853,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_histogram_multiple() {
-        let mut h: Histogram<u16, 16> = Histogram::new();
+        let mut h: Histogram<2> = Histogram::new();
 
         h.update(1.0);
         h.update(2.0);
@@ -867,9 +1056,9 @@ mod tests {
 
     #[test]
     fn test_histogram_downscale() {
-        let mut h: Histogram<u16, 4> = Histogram::new();
+        // 1 word (8 bytes) = 8 u8 buckets initially. Wide value range forces downscale.
+        let mut h: Histogram<1> = Histogram::new();
 
-        // With only 4 buckets, this should trigger downscaling
         h.update(1.0);
         h.update(1000.0);
 
@@ -879,8 +1068,8 @@ mod tests {
 
     #[test]
     fn test_histogram_merge() {
-        let mut h1: Histogram<u16, 16> = Histogram::new();
-        let mut h2: Histogram<u16, 16> = Histogram::new();
+        let mut h1: Histogram<2> = Histogram::new();
+        let mut h2: Histogram<2> = Histogram::new();
 
         h1.update(1.0);
         h1.update(2.0);
@@ -898,7 +1087,7 @@ mod tests {
 
     #[test]
     fn test_histogram_clear() {
-        let mut h: Histogram<u16, 16> = Histogram::new();
+        let mut h: Histogram<2> = Histogram::new();
 
         h.update(1.0);
         h.update(2.0);
@@ -906,159 +1095,165 @@ mod tests {
 
         assert_eq!(h.count(), 0);
         assert_eq!(h.sum(), 0.0);
-        assert_eq!(h.scale(), 0); // Returns 0 when empty
+        assert_eq!(h.scale(), 0);
+        assert_eq!(h.bucket_width(), BucketWidth::U8);
     }
 
     #[test]
     fn test_buckets_at() {
         // Scale 0: each power-of-2 is a bucket
-        let mut h = Histogram::<u16, 16>::with_scale(0);
-        h.update(1.5); // Should go into bucket for [1, 2)
+        let mut h: Histogram<2> = Histogram::with_scale(0);
+        h.update(1.5);
         h.update(1.7);
-        h.update(3.0); // Should go into bucket for [2, 4)
+        h.update(3.0);
 
         let buckets = h.positive();
         assert!(buckets.len() >= 2);
     }
 
     #[test]
-    fn test_size_of_histogram() {
-        // Verify the size is reasonable
-        let size = core::mem::size_of::<Histogram<u16, 16>>();
-        // Should be around 100-128 bytes (varies with feature flags)
-        assert!(size < 200, "Histogram should be compact, got {} bytes", size);
-        
-        // Verify u8/8 is even smaller
-        let size_small = core::mem::size_of::<Histogram<u8, 8>>();
-        assert!(size_small < 120, "Small histogram should be very compact, got {} bytes", size_small);
+    fn test_auto_widen_u8_to_u16() {
+        let mut h: Histogram<2> = Histogram::new();
+        assert_eq!(h.bucket_width(), BucketWidth::U8);
+
+        // Fill one bucket to u8::MAX.
+        assert!(h.update_by_incr(1.0, 255));
+        assert_eq!(h.bucket_width(), BucketWidth::U8);
+
+        // One more triggers in-place widen+downscale → u16.
+        assert!(h.update(1.0));
+        assert_eq!(h.bucket_width(), BucketWidth::U16);
+        assert_eq!(h.count(), 256);
     }
 
     #[test]
-    fn test_merge_u32_into_u64() {
-        // Simulate cumulative with U64, delta with U32
-        let mut cumulative: Histogram<u64, 16> = Histogram::new();
-        let mut delta: Histogram<u32, 16> = Histogram::new();
+    fn test_auto_widen_u16_to_u32() {
+        let mut h: Histogram<2> = Histogram::new();
 
-        delta.update(1.0);
-        delta.update(2.0);
-        delta.update(3.0);
+        // Force to u16 first.
+        assert!(h.update_by_incr(1.0, 255));
+        assert!(h.update(1.0));
+        assert_eq!(h.bucket_width(), BucketWidth::U16);
 
-        cumulative.merge_from_histogram(&delta);
+        // Fill to u16::MAX.
+        assert!(h.update_by_incr(1.0, u16::MAX as u64 - 256));
+        assert_eq!(h.bucket_width(), BucketWidth::U16);
 
-        assert_eq!(cumulative.count(), 3);
-        assert_eq!(cumulative.sum(), 6.0);
-        assert_eq!(cumulative.min(), 1.0);
-        assert_eq!(cumulative.max(), 3.0);
+        // One more triggers widen → u32.
+        assert!(h.update(1.0));
+        assert_eq!(h.bucket_width(), BucketWidth::U32);
+        assert_eq!(h.count(), u16::MAX as u64 + 1);
     }
 
     #[test]
-    fn test_merge_multiple_deltas_into_cumulative() {
-        // Simulates the common use case: cumulative U64, send deltas as U32
-        let mut cumulative: Histogram<u64, 16> = Histogram::new();
+    fn test_auto_widen_u32_to_u64() {
+        let mut h: Histogram<2> = Histogram::new();
 
-        // First delta batch
-        let mut delta1: Histogram<u32, 16> = Histogram::new();
-        delta1.update(1.0);
-        delta1.update(2.0);
-        cumulative.merge_from_histogram(&delta1);
+        // Force to u32.
+        h.update_by_incr(1.0, 255);
+        h.update(1.0);
+        h.update_by_incr(1.0, u16::MAX as u64 - 256);
+        h.update(1.0);
+        assert_eq!(h.bucket_width(), BucketWidth::U32);
 
-        assert_eq!(cumulative.count(), 2);
-        assert_eq!(cumulative.sum(), 3.0);
+        // Fill to u32::MAX.
+        h.update_by_incr(1.0, u32::MAX as u64 - (u16::MAX as u64 + 1));
+        assert_eq!(h.bucket_width(), BucketWidth::U32);
 
-        // Second delta batch
-        let mut delta2: Histogram<u32, 16> = Histogram::new();
-        delta2.update(3.0);
-        delta2.update(4.0);
-        delta2.update(5.0);
-        cumulative.merge_from_histogram(&delta2);
-
-        assert_eq!(cumulative.count(), 5);
-        assert_eq!(cumulative.sum(), 15.0);
-        assert_eq!(cumulative.min(), 1.0);
-        assert_eq!(cumulative.max(), 5.0);
+        // One more triggers widen → u64.
+        assert!(h.update(1.0));
+        assert_eq!(h.bucket_width(), BucketWidth::U64);
     }
 
     #[test]
-    fn test_merge_u16_into_u64() {
-        // Even narrower counter type
-        let mut cumulative: Histogram<u64, 16> = Histogram::new();
-        let mut delta: Histogram<u16, 16> = Histogram::new();
+    fn test_bucket_count_halves_on_widen() {
+        // 2 words (16 bytes): 16 u8 buckets → 8 u16 → 4 u32 → 2 u64
+        let mut h: Histogram<2> = Histogram::with_scale(0);
+        assert_eq!(h.positive.capacity(), 16);
 
-        delta.update(10.0);
-        delta.update(20.0);
-
-        cumulative.merge_from_histogram(&delta);
-
-        assert_eq!(cumulative.count(), 2);
-        assert_eq!(cumulative.sum(), 30.0);
+        // Fill a u8 bucket to overflow.
+        h.update_by_incr(1.0, 255);
+        h.update(1.0);
+        assert_eq!(h.bucket_width(), BucketWidth::U16);
+        assert_eq!(h.positive.capacity(), 8);
     }
 
     #[test]
-    fn test_merge_u8_into_u32() {
-        // Compact delta with u8 into u32 cumulative
-        let mut cumulative: Histogram<u32, 8> = Histogram::new();
-        let mut delta: Histogram<u8, 8> = Histogram::new();
+    fn test_clear_resets_to_u8() {
+        let mut h: Histogram<2> = Histogram::with_max_scale(3);
+        h.update_by_incr(1.0, 255);
+        h.update(1.0);
+        assert_eq!(h.bucket_width(), BucketWidth::U16);
 
-        delta.update(1.5);
-        delta.update(2.5);
-        delta.update(0.0); // zero value
-
-        cumulative.merge_from_histogram(&delta);
-
-        assert_eq!(cumulative.count(), 3);
-        assert_eq!(cumulative.zero_count(), 1);
-        assert_eq!(cumulative.sum(), 4.0);
+        h.clear();
+        assert_eq!(h.bucket_width(), BucketWidth::U8);
+        assert_eq!(h.count(), 0);
+        assert_eq!(h.max_scale(), 3);
     }
 
     #[test]
-    fn test_merge_cross_width_with_different_scales() {
-        // Create histograms that will have different scales
-        let mut cumulative: Histogram<u64, 4> = Histogram::new();
-        let mut delta: Histogram<u32, 4> = Histogram::new();
-
-        // Force downscaling by using wide value range
-        cumulative.update(1.0);
-        cumulative.update(1000.0);
-
-        delta.update(0.001);
-        delta.update(100.0);
-
-        let cumulative_scale_before = cumulative.scale();
-        cumulative.merge_from_histogram(&delta);
-
-        assert_eq!(cumulative.count(), 4);
-        // Scale may have changed due to merge
-        assert!(cumulative.scale() <= cumulative_scale_before);
+    fn test_with_max_scale() {
+        let h: Histogram<2> = Histogram::with_max_scale(3);
+        assert_eq!(h.max_scale(), 3);
     }
 
     #[test]
-    fn test_merge_empty_histogram_cross_width() {
-        let mut cumulative: Histogram<u64, 16> = Histogram::new();
-        cumulative.update(1.0);
-
-        // Merge an empty histogram
-        let empty: Histogram<u32, 16> = Histogram::new();
-        cumulative.merge_from_histogram(&empty);
-
-        assert_eq!(cumulative.count(), 1);
-        assert_eq!(cumulative.sum(), 1.0);
+    fn test_with_max_scale_clamps() {
+        let h: Histogram<2> = Histogram::with_max_scale(100);
+        assert_eq!(h.max_scale(), max_scale());
     }
 
     #[test]
-    fn test_merge_into_empty_histogram_cross_width() {
-        let mut cumulative: Histogram<u64, 16> = Histogram::new();
-        let mut delta: Histogram<u32, 16> = Histogram::new();
+    fn test_with_max_scale_records_at_limited_scale() {
+        let mut limited: Histogram<2> = Histogram::with_max_scale(3);
+        let mut unlimited: Histogram<2> = Histogram::new();
 
-        delta.update(5.0);
-        delta.update(10.0);
+        limited.update(1.0);
+        limited.update(1.001);
+        unlimited.update(1.0);
+        unlimited.update(1.001);
 
-        // Merge into empty
-        cumulative.merge_from_histogram(&delta);
+        assert!(limited.scale() <= 3);
+        if max_scale() > 3 {
+            assert!(unlimited.scale() > limited.scale());
+        }
+    }
 
-        assert_eq!(cumulative.count(), 2);
-        assert_eq!(cumulative.sum(), 15.0);
-        assert_eq!(cumulative.min(), 5.0);
-        assert_eq!(cumulative.max(), 10.0);
+    #[test]
+    fn test_clear_resets_to_max_scale() {
+        let mut h: Histogram<2> = Histogram::with_max_scale(3);
+        h.update(0.001);
+        h.update(1000.0);
+        assert!(h.scale() <= 3);
+
+        h.clear();
+        assert_eq!(h.count(), 0);
+        assert_eq!(h.max_scale(), 3);
+
+        h.update(1.0);
+        assert_eq!(h.scale(), 3);
+    }
+
+    #[test]
+    fn test_widen_preserves_data() {
+        let mut h: Histogram<2> = Histogram::with_scale(0);
+
+        // Insert into distinct buckets at scale 0.
+        h.update_by_incr(1.0, 100); // index -1
+        h.update_by_incr(2.0, 50);  // index 0
+        h.update_by_incr(4.0, 200); // index 1
+
+        let count_before = h.count();
+        let sum_before = h.sum();
+
+        // Force widen by overflowing the 4.0 bucket (at 200, add 55+1=56).
+        h.update_by_incr(4.0, 55);
+        assert_eq!(h.bucket_width(), BucketWidth::U8);
+        h.update(4.0);
+        assert_eq!(h.bucket_width(), BucketWidth::U16);
+
+        assert_eq!(h.count(), count_before + 56);
+        assert!((h.sum() - (sum_before + 56.0 * 4.0)).abs() < 1e-10);
     }
 
     #[test]
@@ -1066,13 +1261,11 @@ mod tests {
         use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
 
-        // Test inputs: diverse values in 0-20 range, various patterns
         let hardcoded_sets: &[&[f64]] = &[
             &[],
             &[0.0],
             &[1.0],
             &[0.0, 0.0],
-            &[0.0, 0.0, 0.0],
             &[1.0, 1.0],
             &[1.0, 2.0],
             &[0.5, 1.5, 2.5],
@@ -1095,42 +1288,36 @@ mod tests {
             &[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0],
         ];
 
-        // Convert to owned vectors for uniform handling
         let mut test_sets: Vec<Vec<f64>> = hardcoded_sets.iter().map(|s| s.to_vec()).collect();
 
-        // Generate 20 random sets with sizes in [0, 10]
-        let mut rng = StdRng::seed_from_u64(42); // Fixed seed for reproducibility
+        let mut rng = StdRng::seed_from_u64(42);
         for _ in 0..20 {
             let size = rng.gen_range(0..=10);
             let set: Vec<f64> = (0..size).map(|_| rng.gen_range(0.0..20.0)).collect();
             test_sets.push(set);
         }
 
-        // Test with multiple histogram sizes to stress downscaling
-        test_merge_equivalence_for_size_owned::<2>(&test_sets);
-        test_merge_equivalence_for_size_owned::<3>(&test_sets);
-        test_merge_equivalence_for_size_owned::<4>(&test_sets);
-        test_merge_equivalence_for_size_owned::<8>(&test_sets);
-        test_merge_equivalence_for_size_owned::<16>(&test_sets);
+        test_merge_equivalence_for_size::<1>(&test_sets);
+        test_merge_equivalence_for_size::<2>(&test_sets);
+        test_merge_equivalence_for_size::<3>(&test_sets);
+        test_merge_equivalence_for_size::<4>(&test_sets);
+        test_merge_equivalence_for_size::<1>(&test_sets);
     }
 
-    fn test_merge_equivalence_for_size_owned<const SIZE: usize>(test_sets: &[Vec<f64>]) {
-        // Cross-product: for every pair (A, B), verify merge equivalence
+    fn test_merge_equivalence_for_size<const N: usize>(test_sets: &[Vec<f64>]) {
         for (i, set_a) in test_sets.iter().enumerate() {
             for (j, set_b) in test_sets.iter().enumerate() {
-                // Build merged histogram: insert A, then merge B
-                let mut merged: Histogram<u64, SIZE> = Histogram::new();
+                let mut merged: Histogram<N> = Histogram::new();
                 for &v in set_a {
                     merged.update(v);
                 }
-                let mut other: Histogram<u32, SIZE> = Histogram::new();
+                let mut other: Histogram<N> = Histogram::new();
                 for &v in set_b {
                     other.update(v);
                 }
-                merged.merge_from_histogram(&other);
+                merged.merge_from(&other);
 
-                // Build single histogram: insert A then B directly
-                let mut single: Histogram<u64, SIZE> = Histogram::new();
+                let mut single: Histogram<N> = Histogram::new();
                 for &v in set_a {
                     single.update(v);
                 }
@@ -1138,350 +1325,95 @@ mod tests {
                     single.update(v);
                 }
 
-                // Compare all properties
-                assert_eq!(merged.count(), single.count(), 
-                    "count mismatch for size={SIZE} sets {i} x {j}");
-                // Sum comparison with floating-point tolerance (order of additions can differ)
+                assert_eq!(merged.count(), single.count(),
+                    "count mismatch for size={N} sets {i} x {j}");
                 let sum_diff = (merged.sum() - single.sum()).abs();
-                assert!(sum_diff < 1e-10, 
-                    "sum mismatch for size={SIZE} sets {i} x {j}: {} vs {}", 
+                assert!(sum_diff < 1e-10,
+                    "sum mismatch for size={N} sets {i} x {j}: {} vs {}",
                     merged.sum(), single.sum());
-                assert_eq!(merged.zero_count(), single.zero_count(), 
-                    "zero_count mismatch for size={SIZE} sets {i} x {j}");
-                assert_eq!(merged.min(), single.min(), 
-                    "min mismatch for size={SIZE} sets {i} x {j}");
-                assert_eq!(merged.max(), single.max(), 
-                    "max mismatch for size={SIZE} sets {i} x {j}");
-                assert_eq!(merged.scale(), single.scale(), 
-                    "scale mismatch for size={SIZE} sets {i} x {j}");
+                assert_eq!(merged.zero_count(), single.zero_count(),
+                    "zero_count mismatch for size={N} sets {i} x {j}");
+                assert_eq!(merged.min(), single.min(),
+                    "min mismatch for size={N} sets {i} x {j}");
+                assert_eq!(merged.max(), single.max(),
+                    "max mismatch for size={N} sets {i} x {j}");
+                assert_eq!(merged.scale(), single.scale(),
+                    "scale mismatch for size={N} sets {i} x {j}");
 
-                // Compare bucket data
                 let mb = merged.positive();
                 let sb = single.positive();
-                assert_eq!(mb.offset(), sb.offset(), 
-                    "offset mismatch for size={SIZE} sets {i} x {j}");
-                assert_eq!(mb.len(), sb.len(), 
-                    "bucket len mismatch for size={SIZE} sets {i} x {j}");
+                assert_eq!(mb.offset(), sb.offset(),
+                    "offset mismatch for size={N} sets {i} x {j}");
+                assert_eq!(mb.len(), sb.len(),
+                    "bucket len mismatch for size={N} sets {i} x {j}");
                 for k in 0..mb.len() {
-                    assert_eq!(mb.at(k), sb.at(k), 
-                        "bucket[{k}] mismatch for size={SIZE} sets {i} x {j}");
+                    assert_eq!(mb.at(k), sb.at(k),
+                        "bucket[{k}] mismatch for size={N} sets {i} x {j}");
                 }
             }
         }
     }
 
     #[test]
-    fn test_u8_update_overflow_returns_false() {
-        let mut h: Histogram<u8, 16> = Histogram::new();
-        // Fill one bucket to u8::MAX
-        for _ in 0..255 {
-            assert!(h.update(1.0));
-        }
-        // The 256th increment should overflow.
-        assert!(!h.update(1.0));
-    }
-
-    #[test]
-    fn test_u16_update_by_incr_overflow_returns_false() {
-        let mut h: Histogram<u16, 16> = Histogram::new();
-        // One large increment that fits
-        assert!(h.update_by_incr(1.0, u16::MAX as u64));
-        // Any additional increment to the same bucket overflows.
-        assert!(!h.update(1.0));
-    }
-
-    #[test]
-    fn test_u16_merge_overflow_returns_false() {
-        let mut a: Histogram<u16, 16> = Histogram::new();
-        assert!(a.update_by_incr(1.0, u16::MAX as u64));
-
-        let mut b: Histogram<u16, 16> = Histogram::new();
-        b.update(1.0);
-
-        // Merging should overflow.
-        assert!(!a.merge_from(&b));
-    }
-
-    #[test]
-    fn test_u8_downscale_overflow_returns_false() {
-        // Start at scale 0 so we know exact bucket indices:
-        //   2.0 → index 0, 4.0 → index 1 (adjacent positive indices).
-        // When a far-away value forces a downscale, indices 0 and 1
-        // both map to 0 (0>>1 == 1>>1 == 0), combining 200+200 = 400 > u8::MAX.
-        let mut h: Histogram<u8, 2> = Histogram::with_scale(0);
-        assert!(h.update_by_incr(2.0, 200));
-        assert!(h.update_by_incr(4.0, 200));
-        // 1024.0 at scale 0 maps to index 9, forcing a downscale.
-        assert!(!h.update(1024.0));
-    }
-
-    #[test]
-    fn test_cross_width_merge_overflow_returns_false() {
-        // A u32 source whose count exceeds u16::MAX, merged into u16 target.
-        let mut target: Histogram<u16, 16> = Histogram::new();
-        let mut source: Histogram<u32, 16> = Histogram::new();
-        source.update_by_incr(1.0, u16::MAX as u64 + 1);
-
-        assert!(!target.merge_from_histogram(&source));
-    }
-
-    #[test]
-    fn test_with_max_scale_limits_initial_scale() {
-        let h: Histogram<u16, 16> = Histogram::with_max_scale(3);
-        assert_eq!(h.max_scale(), 3);
-        // Empty histogram reports scale 0, but the mapping is at max_scale.
-        assert_eq!(h.scale(), 0);
-    }
-
-    #[test]
-    fn test_with_max_scale_clamps_to_algorithm_max() {
-        // Requesting a scale higher than the algorithm supports gets clamped.
-        let h: Histogram<u16, 16> = Histogram::with_max_scale(100);
-        assert_eq!(h.max_scale(), max_scale());
-    }
-
-    #[test]
-    fn test_with_max_scale_records_at_limited_scale() {
-        let mut limited: Histogram<u16, 16> = Histogram::with_max_scale(3);
-        let mut unlimited: Histogram<u16, 16> = Histogram::new();
-
-        // Two very close values: at high scale they'd be in different buckets,
-        // at low scale they share a bucket.
-        limited.update(1.0);
-        limited.update(1.001);
-        unlimited.update(1.0);
-        unlimited.update(1.001);
-
-        // Limited histogram starts coarser, so scale should be <= 3.
-        assert!(limited.scale() <= 3);
-        // Unlimited starts at algorithm max, should be higher (if max_scale > 3).
-        if max_scale() > 3 {
-            assert!(unlimited.scale() > limited.scale());
-        }
-    }
-
-    #[test]
-    fn test_clear_resets_to_max_scale() {
-        let mut h: Histogram<u16, 16> = Histogram::with_max_scale(3);
-        // Insert values that force downscale below 3.
-        h.update(0.001);
-        h.update(1000.0);
-        let scale_after_insert = h.scale();
-        assert!(scale_after_insert <= 3);
-
-        h.clear();
-        assert_eq!(h.count(), 0);
-        assert_eq!(h.max_scale(), 3);
-
-        // After clear+insert, scale should start at 3 again.
-        h.update(1.0);
-        assert_eq!(h.scale(), 3);
-    }
-
-    #[test]
-    fn test_with_scale_sets_max_scale() {
-        // with_scale also records its scale as the max_scale ceiling.
-        let mut h: Histogram<u16, 16> = Histogram::with_scale(2);
-        assert_eq!(h.max_scale(), 2);
-        h.update(1.0);
-        assert_eq!(h.scale(), 2);
-        h.clear();
-        h.update(1.0);
-        assert_eq!(h.scale(), 2);
-    }
-
-    #[test]
-    fn test_new_histogram_max_scale_equals_algorithm_max() {
-        let h: Histogram<u16, 16> = Histogram::new();
-        assert_eq!(h.max_scale(), max_scale());
-    }
-
-    /// Exploratory test: what happens with subnormals, MIN_VALUE, +Inf, and MAX.
-    ///
-    /// IEEE 754 edge values and their bit patterns:
-    ///   subnormal (5e-324):  biased_exp=0,   significand!=0
-    ///   MIN_VALUE (2^-1022): biased_exp=1,   significand=0  (smallest normal)
-    ///   f64::MAX:            biased_exp=2046, significand=all-ones
-    ///   +Inf:                biased_exp=2047, significand=0
-    ///
-    /// Questions this test answers:
-    ///   1. Where does get_normal_base2 place subnormals and +Inf?
-    ///   2. What index does each mapping assign to these values?
-    ///   3. Does the histogram accept them without panic in release mode?
-    ///   4. Does +Inf land in the same bucket as f64::MAX, or a new one?
-    ///   5. Does MIN_VALUE (0x1p-1022) share a bucket with subnormals?
-    #[test]
-    fn test_edge_values_subnormal_inf() {
-        use crate::float64::{get_normal_base2, get_significand};
+    fn test_edge_values_inf() {
         use crate::mapping::Mapping;
 
-        let subnormal: f64 = 5e-324; // smallest positive subnormal
-        let largest_subnormal: f64 = f64::from_bits(0x000F_FFFF_FFFF_FFFF);
-        let min_normal: f64 = crate::float64::MIN_VALUE; // 0x1p-1022
-        let next_after_min: f64 = f64::from_bits(min_normal.to_bits() + 1);
         let max_f64: f64 = f64::MAX;
         let inf: f64 = f64::INFINITY;
 
-        // ---- Part 1: Raw IEEE 754 bit extraction ----
-        // Subnormals have biased exponent 0, so get_normal_base2 returns -1023
-        assert_eq!(get_normal_base2(subnormal), -1023);
-        assert_ne!(get_significand(subnormal), 0);
-
-        assert_eq!(get_normal_base2(largest_subnormal), -1023);
-        assert_ne!(get_significand(largest_subnormal), 0);
-
-        // MIN_VALUE = 2^-1022: biased exponent 1, significand 0 (exact power of two)
-        assert_eq!(get_normal_base2(min_normal), -1022);
-        assert_eq!(get_significand(min_normal), 0);
-
-        // next value after min_normal: same exponent, significand = 1
-        assert_eq!(get_normal_base2(next_after_min), -1022);
-        assert_eq!(get_significand(next_after_min), 1);
-
-        // f64::MAX: biased exponent 2046, all significand bits set
-        assert_eq!(get_normal_base2(max_f64), 1023);
-        assert_eq!(get_significand(max_f64), (1u64 << 52) - 1);
-
-        // +Inf: biased exponent 2047, significand 0
-        // get_normal_base2 returns 1024 (not a valid normal exponent)
-        assert_eq!(get_normal_base2(inf), 1024);
-        assert_eq!(get_significand(inf), 0);
-
-        // ---- Part 2: Index mapping at scale 0 (exponent path) ----
-        // At scale 0, each bucket is one power-of-two wide.
+        // +Inf shares bucket with MAX at scale 0.
         let m0 = Mapping::new(0).unwrap();
-
-        // Subnormals clamp to min_normal_lower_boundary_index via the
-        // `value < MIN_VALUE` guard in exponent::map_to_index.
-        let idx_subnormal = m0.map_to_index(subnormal);
-        let idx_largest_sub = m0.map_to_index(largest_subnormal);
-
-        // MIN_VALUE is an exact power of two → gets upper-inclusive correction (-1)
-        // so it maps to one bucket below its exponent.
-        let idx_min_normal = m0.map_to_index(min_normal);
-        let idx_next_after = m0.map_to_index(next_after_min);
-
-        // By upper-inclusive semantics, min_normal should be the top of the
-        // bucket below, which is the subnormal clamping bucket.
-        // Verify: all of {subnormal, largest_subnormal, min_normal} share a bucket.
-        println!("scale 0: subnormal={idx_subnormal}, largest_sub={idx_largest_sub}, min_normal={idx_min_normal}, next_after={idx_next_after}");
-        assert_eq!(idx_subnormal, idx_largest_sub,
-            "all subnormals should map to the same index");
-        assert_eq!(idx_subnormal, idx_min_normal,
-            "min_normal (power of two) should share the subnormal bucket by upper-inclusivity");
-        assert_eq!(idx_next_after, idx_min_normal + 1,
-            "first value above min_normal should be in the next bucket");
-
-        // f64::MAX at scale 0
         let idx_max = m0.map_to_index(max_f64);
-        // MAX has exponent 1023, significand != 0, so index = 1023 >> 0 = 1023
-        // which is the bucket (2^1023, 2^1024] — where 2^1024 would be +Inf.
-        println!("scale 0: max_f64 index={idx_max}");
-
-        // +Inf: get_normal_base2(+Inf)=1024, significand=0,
-        // so correction=-1, index = (1024-1) >> 0 = 1023.
-        // That means +Inf lands in the SAME bucket as f64::MAX.
         let idx_inf = m0.map_to_index(inf);
-        println!("scale 0: +Inf index={idx_inf}");
-        assert_eq!(idx_inf, idx_max,
-            "+Inf should land in the same bucket as f64::MAX at scale 0");
+        assert_eq!(idx_max, idx_inf);
 
-        // ---- Part 3: Index mapping at positive scale (lookup table path) ----
-        let table_scale = max_scale();
-        if table_scale > 0 {
-            let ms = Mapping::new(table_scale).unwrap();
-
-            // Subnormals: the lookup table path has no < MIN_VALUE guard;
-            // it goes straight to get_significand / get_normal_base2.
-            // For a subnormal, exponent=-1023, significand is nonzero.
-            // This may produce a garbage index. Let's see what it does.
-            // (The exponent path guards this, but the lookup path doesn't.)
-
-            // min_normal at positive scale: exponent=-1022, sig=0 → exact power of two
-            // fine_index = (-1022 << table_scale) + 0 - 1
-            let idx_min_normal_ts = ms.map_to_index(min_normal);
-            let idx_next_ts = ms.map_to_index(next_after_min);
-            println!("scale {table_scale}: min_normal={idx_min_normal_ts}, next_after={idx_next_ts}");
-            assert!(idx_next_ts > idx_min_normal_ts,
-                "next_after should map to a higher index than min_normal");
-
-            // f64::MAX at positive scale: this should work fine
-            let idx_max_ts = ms.map_to_index(max_f64);
-            println!("scale {table_scale}: max_f64={idx_max_ts}");
-
-            // +Inf at positive scale: exponent=1024, sig=0, linear_idx=0,
-            // fine_index = (1024 << table_scale) + bucket - 1.
-            // At the native table scale this is 1 index above MAX, but at
-            // lower positive scales the right-shift merges them.
-            let idx_inf_ts = ms.map_to_index(inf);
-            println!("scale {table_scale}: +Inf={idx_inf_ts}");
-            // At the native table scale, +Inf may be 1 index above MAX.
-            // At lower scales they coincide. Either way, +Inf doesn't explode.
-            assert!(idx_inf_ts >= idx_max_ts,
-                "+Inf index should be >= MAX index");
-            assert!(idx_inf_ts <= idx_max_ts + 1,
-                "+Inf index should be at most 1 above MAX index");
-        }
-
-        // ---- Part 4: Histogram update acceptance ----
-        // +Inf should flow through naturally: sum becomes Inf,
-        // max becomes Inf, min/count are unaffected.
-        let mut h: Histogram<u32, 160> = Histogram::with_scale(0);
-
-        // Normal values first
-        assert!(h.update(1.0));
-        assert!(h.update(max_f64));
-        assert_eq!(h.count(), 2);
-        assert_eq!(h.max(), max_f64);
+        // Histogram accepts +Inf: sum/max become Inf.
+        let mut h: Histogram<2> = Histogram::with_scale(0);
+        h.update(1.0);
+        h.update(max_f64);
         assert!(h.sum().is_finite());
 
-        // +Inf: sum becomes Inf, max becomes Inf
-        assert!(h.update(inf));
+        h.update(inf);
         assert_eq!(h.count(), 3);
         assert_eq!(h.max(), f64::INFINITY);
-        assert_eq!(h.min(), 1.0);
         assert!(h.sum().is_infinite());
+        assert_eq!(h.min(), 1.0);
+    }
 
-        // +Inf should share a bucket with MAX at scale 0
-        let idx_max_h = h.mapping.map_to_index(max_f64);
-        let idx_inf_h = h.mapping.map_to_index(inf);
-        assert_eq!(idx_max_h, idx_inf_h,
-            "+Inf and MAX should share a bucket at scale 0");
+    #[test]
+    fn test_edge_values_subnormals() {
+        use crate::mapping::Mapping;
 
-        // Subnormals: currently handled by exponent path's MIN_VALUE guard
-        assert!(h.update(subnormal));
-        assert!(h.update(largest_subnormal));
-        assert_eq!(h.count(), 5);
+        let subnormal: f64 = 5e-324;
+        let min_normal: f64 = crate::float64::MIN_VALUE;
 
-        // Verify bucket structure: the histogram had to downscale heavily
-        // to fit the range from subnormal (-1023) to MAX (1023) into 160 buckets.
-        // At the downscaled scale, subnormal/min_normal/next_after may share a bucket.
-        let buckets: Vec<u64> = h.positive.iter().collect();
-        println!("scale {} with {} non-zero buckets, span {} to {}",
-            h.scale(), buckets.iter().filter(|&&c| c > 0).count(),
-            h.positive.index_start, h.positive.index_end);
-        // Total should be 5
-        assert_eq!(buckets.iter().sum::<u64>(), 5);
+        // At scale 0, subnormals and MIN_VALUE share a bucket.
+        let m0 = Mapping::new(0).unwrap();
+        assert_eq!(m0.map_to_index(subnormal), m0.map_to_index(min_normal));
 
-        // Now test with a narrow histogram that won't downscale.
-        // Use only nearby values: subnormal, min_normal, next_after.
-        let mut h2: Histogram<u32, 160> = Histogram::with_scale(0);
-        h2.update(subnormal);
-        h2.update(largest_subnormal);
-        h2.update(min_normal);
-        h2.update(next_after_min);
-        let b2: Vec<u64> = h2.positive.iter().collect();
-        println!("narrow scale {}: indexes {}..{}, buckets: {:?}",
-            h2.scale(), h2.positive.index_start, h2.positive.index_end, &b2);
-        // At scale 0: subnormal=-1023, min_normal=-1023, next_after=-1022
-        // So first bucket (index -1023) has count 3, second (index -1022) has count 1.
-        assert_eq!(b2[0], 3,
-            "first bucket should contain both subnormals and min_normal");
-        assert_eq!(b2[1], 1, "second bucket: next_after_min");
+        // Histogram accepts subnormals.
+        let mut h: Histogram<2> = Histogram::with_scale(0);
+        h.update(subnormal);
+        h.update(min_normal);
+        assert_eq!(h.count(), 2);
+        assert_eq!(h.positive().len(), 1);
+    }
 
-        println!("\n=== Summary ===");
-        println!("Subnormals: clamped to min_normal bucket at all scales");
-        println!("+Inf: shares bucket with MAX at scale 0; at most 1 index above MAX at positive scales");
-        println!("+Inf: sum becomes Inf, max becomes Inf — hardware/math semantics");
+    #[test]
+    fn test_exhaustive_u8_overflow() {
+        // At scale 0, every u8 overflow results in in-place widen+downscale.
+        let mut h: Histogram<1> = Histogram::with_scale(0);
+        // 1 word (8 bytes) = 8 u8 slots. Fill all to 255.
+        for i in 0..8 {
+            let val = 2.0_f64.powi(i);
+            h.update_by_incr(val, 255);
+        }
+        assert_eq!(h.bucket_width(), BucketWidth::U8);
+        assert_eq!(h.count(), 8 * 255);
+
+        // One more to any bucket triggers widen.
+        h.update(1.0);
+        assert_eq!(h.bucket_width(), BucketWidth::U16);
+        assert_eq!(h.count(), 8 * 255 + 1);
     }
 }
