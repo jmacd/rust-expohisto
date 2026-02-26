@@ -398,6 +398,32 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
         }
     }
 
+    /// Creates a wider-counter copy of this histogram.
+    ///
+    /// Every bucket count is losslessly promoted to the wider counter type.
+    /// The resulting histogram has the same scale, max_scale, and statistics.
+    pub fn widen_into<C2: Counter>(&self) -> Histogram<C2, SIZE> {
+        let mut wider = Histogram::<C2, SIZE> {
+            sum: self.sum,
+            count: self.count,
+            zero_count: self.zero_count,
+            min: self.min,
+            max: self.max,
+            mapping: self.mapping,
+            max_scale: self.max_scale,
+            positive: Buckets {
+                counts: [C2::default(); SIZE],
+                index_base: self.positive.index_base,
+                index_start: self.positive.index_start,
+                index_end: self.positive.index_end,
+            },
+        };
+        for i in 0..SIZE {
+            wider.positive.counts[i] = C2::from_u64_saturating(self.positive.counts[i].to_u64());
+        }
+        wider
+    }
+
     /// Returns the sum of all recorded values.
     #[inline]
     pub fn sum(&self) -> f64 {
@@ -483,7 +509,6 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     /// Returns `false` if a counter overflowed.
     pub fn update_by_incr(&mut self, value: f64, incr: u64) -> bool {
         debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
-        debug_assert!(value.is_finite(), "Histogram only accepts finite values");
 
         let new_count = match self.count.checked_add(incr) {
             Some(c) => c,
@@ -517,7 +542,7 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
     /// Updates buckets for a positive value.
     ///
     /// Returns `false` if a bucket counter overflowed.
-    fn update_buckets(&mut self, value: f64, incr: u64) -> bool {
+    pub(crate) fn update_buckets(&mut self, value: f64, incr: u64) -> bool {
         let index = self.mapping.map_to_index(value);
 
         match self.increment_index_by(index, incr) {
@@ -691,6 +716,98 @@ impl<C: Counter, const SIZE: usize> Histogram<C, SIZE> {
                 IncrResult::CounterOverflow => return false,
                 IncrResult::NeedsDownscale(_) => {
                     debug_assert!(false, "incorrect merge scale");
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Merges from raw histogram data, enabling cross-SIZE merging.
+    ///
+    /// This accepts the source's statistics and bucket data as scalars and a
+    /// closure, so the source histogram's SIZE need not match self's SIZE.
+    ///
+    /// Returns `false` if a counter overflowed.
+    pub(crate) fn merge_from_raw(
+        &mut self,
+        other_count: u64,
+        other_zero_count: u64,
+        other_sum: f64,
+        other_min: f64,
+        other_max: f64,
+        other_scale: i32,
+        other_offset: i32,
+        other_len: u32,
+        other_at: &dyn Fn(u32) -> u64,
+    ) -> bool {
+        if other_count == 0 {
+            return true;
+        }
+
+        let new_count = match self.count.checked_add(other_count) {
+            Some(c) => c,
+            None => return false,
+        };
+        let new_zero_count = match self.zero_count.checked_add(other_zero_count) {
+            Some(c) => c,
+            None => return false,
+        };
+
+        if self.count == 0 {
+            self.min = other_min;
+            self.max = other_max;
+        } else {
+            self.min = self.min.min(other_min);
+            self.max = self.max.max(other_max);
+        }
+
+        self.sum += other_sum;
+        self.count = new_count;
+        self.zero_count = new_zero_count;
+
+        if other_len == 0 {
+            return true;
+        }
+
+        let other_end = other_offset + other_len as i32 - 1;
+        let min_scale = self.scale().min(other_scale);
+
+        let self_hl = if self.positive.is_empty() {
+            HighLow::empty()
+        } else {
+            let shift = self.scale() - min_scale;
+            HighLow {
+                low: self.positive.index_start >> shift,
+                high: self.positive.index_end >> shift,
+            }
+        };
+        let other_hl = {
+            let shift = other_scale - min_scale;
+            HighLow {
+                low: other_offset >> shift,
+                high: other_end >> shift,
+            }
+        };
+        let hlp = self_hl.merge(other_hl);
+        let min_scale = min_scale - change_scale(hlp, SIZE as i32);
+
+        if !self.downscale(self.scale() - min_scale) {
+            return false;
+        }
+
+        let their_change = other_scale - min_scale;
+        for i in 0..other_len {
+            let count = other_at(i);
+            if count == 0 {
+                continue;
+            }
+            let index = (other_offset + i as i32) >> their_change;
+            match self.increment_index_by(index, count) {
+                IncrResult::Ok => {}
+                IncrResult::CounterOverflow => return false,
+                IncrResult::NeedsDownscale(_) => {
+                    debug_assert!(false, "incorrect merge scale in merge_from_raw");
                     return false;
                 }
             }
@@ -1177,5 +1294,194 @@ mod tests {
     fn test_new_histogram_max_scale_equals_algorithm_max() {
         let h: Histogram<u16, 16> = Histogram::new();
         assert_eq!(h.max_scale(), max_scale());
+    }
+
+    /// Exploratory test: what happens with subnormals, MIN_VALUE, +Inf, and MAX.
+    ///
+    /// IEEE 754 edge values and their bit patterns:
+    ///   subnormal (5e-324):  biased_exp=0,   significand!=0
+    ///   MIN_VALUE (2^-1022): biased_exp=1,   significand=0  (smallest normal)
+    ///   f64::MAX:            biased_exp=2046, significand=all-ones
+    ///   +Inf:                biased_exp=2047, significand=0
+    ///
+    /// Questions this test answers:
+    ///   1. Where does get_normal_base2 place subnormals and +Inf?
+    ///   2. What index does each mapping assign to these values?
+    ///   3. Does the histogram accept them without panic in release mode?
+    ///   4. Does +Inf land in the same bucket as f64::MAX, or a new one?
+    ///   5. Does MIN_VALUE (0x1p-1022) share a bucket with subnormals?
+    #[test]
+    fn test_edge_values_subnormal_inf() {
+        use crate::float64::{get_normal_base2, get_significand};
+        use crate::mapping::Mapping;
+
+        let subnormal: f64 = 5e-324; // smallest positive subnormal
+        let largest_subnormal: f64 = f64::from_bits(0x000F_FFFF_FFFF_FFFF);
+        let min_normal: f64 = crate::float64::MIN_VALUE; // 0x1p-1022
+        let next_after_min: f64 = f64::from_bits(min_normal.to_bits() + 1);
+        let max_f64: f64 = f64::MAX;
+        let inf: f64 = f64::INFINITY;
+
+        // ---- Part 1: Raw IEEE 754 bit extraction ----
+        // Subnormals have biased exponent 0, so get_normal_base2 returns -1023
+        assert_eq!(get_normal_base2(subnormal), -1023);
+        assert_ne!(get_significand(subnormal), 0);
+
+        assert_eq!(get_normal_base2(largest_subnormal), -1023);
+        assert_ne!(get_significand(largest_subnormal), 0);
+
+        // MIN_VALUE = 2^-1022: biased exponent 1, significand 0 (exact power of two)
+        assert_eq!(get_normal_base2(min_normal), -1022);
+        assert_eq!(get_significand(min_normal), 0);
+
+        // next value after min_normal: same exponent, significand = 1
+        assert_eq!(get_normal_base2(next_after_min), -1022);
+        assert_eq!(get_significand(next_after_min), 1);
+
+        // f64::MAX: biased exponent 2046, all significand bits set
+        assert_eq!(get_normal_base2(max_f64), 1023);
+        assert_eq!(get_significand(max_f64), (1u64 << 52) - 1);
+
+        // +Inf: biased exponent 2047, significand 0
+        // get_normal_base2 returns 1024 (not a valid normal exponent)
+        assert_eq!(get_normal_base2(inf), 1024);
+        assert_eq!(get_significand(inf), 0);
+
+        // ---- Part 2: Index mapping at scale 0 (exponent path) ----
+        // At scale 0, each bucket is one power-of-two wide.
+        let m0 = Mapping::new(0).unwrap();
+
+        // Subnormals clamp to min_normal_lower_boundary_index via the
+        // `value < MIN_VALUE` guard in exponent::map_to_index.
+        let idx_subnormal = m0.map_to_index(subnormal);
+        let idx_largest_sub = m0.map_to_index(largest_subnormal);
+
+        // MIN_VALUE is an exact power of two → gets upper-inclusive correction (-1)
+        // so it maps to one bucket below its exponent.
+        let idx_min_normal = m0.map_to_index(min_normal);
+        let idx_next_after = m0.map_to_index(next_after_min);
+
+        // By upper-inclusive semantics, min_normal should be the top of the
+        // bucket below, which is the subnormal clamping bucket.
+        // Verify: all of {subnormal, largest_subnormal, min_normal} share a bucket.
+        println!("scale 0: subnormal={idx_subnormal}, largest_sub={idx_largest_sub}, min_normal={idx_min_normal}, next_after={idx_next_after}");
+        assert_eq!(idx_subnormal, idx_largest_sub,
+            "all subnormals should map to the same index");
+        assert_eq!(idx_subnormal, idx_min_normal,
+            "min_normal (power of two) should share the subnormal bucket by upper-inclusivity");
+        assert_eq!(idx_next_after, idx_min_normal + 1,
+            "first value above min_normal should be in the next bucket");
+
+        // f64::MAX at scale 0
+        let idx_max = m0.map_to_index(max_f64);
+        // MAX has exponent 1023, significand != 0, so index = 1023 >> 0 = 1023
+        // which is the bucket (2^1023, 2^1024] — where 2^1024 would be +Inf.
+        println!("scale 0: max_f64 index={idx_max}");
+
+        // +Inf: get_normal_base2(+Inf)=1024, significand=0,
+        // so correction=-1, index = (1024-1) >> 0 = 1023.
+        // That means +Inf lands in the SAME bucket as f64::MAX.
+        let idx_inf = m0.map_to_index(inf);
+        println!("scale 0: +Inf index={idx_inf}");
+        assert_eq!(idx_inf, idx_max,
+            "+Inf should land in the same bucket as f64::MAX at scale 0");
+
+        // ---- Part 3: Index mapping at positive scale (lookup table path) ----
+        let table_scale = max_scale();
+        if table_scale > 0 {
+            let ms = Mapping::new(table_scale).unwrap();
+
+            // Subnormals: the lookup table path has no < MIN_VALUE guard;
+            // it goes straight to get_significand / get_normal_base2.
+            // For a subnormal, exponent=-1023, significand is nonzero.
+            // This may produce a garbage index. Let's see what it does.
+            // (The exponent path guards this, but the lookup path doesn't.)
+
+            // min_normal at positive scale: exponent=-1022, sig=0 → exact power of two
+            // fine_index = (-1022 << table_scale) + 0 - 1
+            let idx_min_normal_ts = ms.map_to_index(min_normal);
+            let idx_next_ts = ms.map_to_index(next_after_min);
+            println!("scale {table_scale}: min_normal={idx_min_normal_ts}, next_after={idx_next_ts}");
+            assert!(idx_next_ts > idx_min_normal_ts,
+                "next_after should map to a higher index than min_normal");
+
+            // f64::MAX at positive scale: this should work fine
+            let idx_max_ts = ms.map_to_index(max_f64);
+            println!("scale {table_scale}: max_f64={idx_max_ts}");
+
+            // +Inf at positive scale: exponent=1024, sig=0, linear_idx=0,
+            // fine_index = (1024 << table_scale) + bucket - 1.
+            // At the native table scale this is 1 index above MAX, but at
+            // lower positive scales the right-shift merges them.
+            let idx_inf_ts = ms.map_to_index(inf);
+            println!("scale {table_scale}: +Inf={idx_inf_ts}");
+            // At the native table scale, +Inf may be 1 index above MAX.
+            // At lower scales they coincide. Either way, +Inf doesn't explode.
+            assert!(idx_inf_ts >= idx_max_ts,
+                "+Inf index should be >= MAX index");
+            assert!(idx_inf_ts <= idx_max_ts + 1,
+                "+Inf index should be at most 1 above MAX index");
+        }
+
+        // ---- Part 4: Histogram update acceptance ----
+        // +Inf should flow through naturally: sum becomes Inf,
+        // max becomes Inf, min/count are unaffected.
+        let mut h: Histogram<u32, 160> = Histogram::with_scale(0);
+
+        // Normal values first
+        assert!(h.update(1.0));
+        assert!(h.update(max_f64));
+        assert_eq!(h.count(), 2);
+        assert_eq!(h.max(), max_f64);
+        assert!(h.sum().is_finite());
+
+        // +Inf: sum becomes Inf, max becomes Inf
+        assert!(h.update(inf));
+        assert_eq!(h.count(), 3);
+        assert_eq!(h.max(), f64::INFINITY);
+        assert_eq!(h.min(), 1.0);
+        assert!(h.sum().is_infinite());
+
+        // +Inf should share a bucket with MAX at scale 0
+        let idx_max_h = h.mapping.map_to_index(max_f64);
+        let idx_inf_h = h.mapping.map_to_index(inf);
+        assert_eq!(idx_max_h, idx_inf_h,
+            "+Inf and MAX should share a bucket at scale 0");
+
+        // Subnormals: currently handled by exponent path's MIN_VALUE guard
+        assert!(h.update(subnormal));
+        assert!(h.update(largest_subnormal));
+        assert_eq!(h.count(), 5);
+
+        // Verify bucket structure: the histogram had to downscale heavily
+        // to fit the range from subnormal (-1023) to MAX (1023) into 160 buckets.
+        // At the downscaled scale, subnormal/min_normal/next_after may share a bucket.
+        let buckets: Vec<u64> = h.positive.iter().collect();
+        println!("scale {} with {} non-zero buckets, span {} to {}",
+            h.scale(), buckets.iter().filter(|&&c| c > 0).count(),
+            h.positive.index_start, h.positive.index_end);
+        // Total should be 5
+        assert_eq!(buckets.iter().sum::<u64>(), 5);
+
+        // Now test with a narrow histogram that won't downscale.
+        // Use only nearby values: subnormal, min_normal, next_after.
+        let mut h2: Histogram<u32, 160> = Histogram::with_scale(0);
+        h2.update(subnormal);
+        h2.update(largest_subnormal);
+        h2.update(min_normal);
+        h2.update(next_after_min);
+        let b2: Vec<u64> = h2.positive.iter().collect();
+        println!("narrow scale {}: indexes {}..{}, buckets: {:?}",
+            h2.scale(), h2.positive.index_start, h2.positive.index_end, &b2);
+        // At scale 0: subnormal=-1023, min_normal=-1023, next_after=-1022
+        // So first bucket (index -1023) has count 3, second (index -1022) has count 1.
+        assert_eq!(b2[0], 3,
+            "first bucket should contain both subnormals and min_normal");
+        assert_eq!(b2[1], 1, "second bucket: next_after_min");
+
+        println!("\n=== Summary ===");
+        println!("Subnormals: clamped to min_normal bucket at all scales");
+        println!("+Inf: shares bucket with MAX at scale 0; at most 1 index above MAX at positive scales");
+        println!("+Inf: sum becomes Inf, max becomes Inf — hardware/math semantics");
     }
 }

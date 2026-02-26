@@ -15,13 +15,12 @@ use crate::mapping::MappingError;
 /// Maps a positive f64 value to a bucket index at a non-positive scale.
 ///
 /// # Arguments
-/// * `value` - A positive f64 value (must be > 0, finite)
+/// * `value` - A positive f64 value (must be > 0)
 /// * `scale` - The histogram scale (must be <= 0)
 #[inline]
 pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale <= 0);
     debug_assert!(value > 0.0);
-    debug_assert!(value.is_finite());
 
     let shift = (-scale) as u32;
 

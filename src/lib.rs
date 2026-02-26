@@ -90,6 +90,7 @@
 //! At scale 20, each bucket represents a ~0.0001% change in value.
 //! At scale 0, each bucket represents a factor of 2 change.
 
+pub mod aggregator;
 pub mod exponent;
 pub mod float64;
 pub mod histogram;
@@ -115,5 +116,6 @@ pub mod newrelic;
 #[cfg(feature = "dynatrace")]
 pub mod dynatrace;
 
+pub use aggregator::{CounterWidth, ExpoHistogram, MMSC, Resolution, LARGE_SIZE, SMALL_SIZE};
 pub use histogram::{Buckets, BucketsIter, Counter, Histogram, Histogram16, Histogram32, Histogram64};
 pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};

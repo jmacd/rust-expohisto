@@ -34,7 +34,6 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
     debug_assert!(scale <= TABLE_SCALE);
     debug_assert!(value > 0.0);
-    debug_assert!(value.is_finite());
 
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);

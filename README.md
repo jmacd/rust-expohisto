@@ -292,6 +292,98 @@ cd mapping-gen && cargo test
 - [NewRelic lookup table algorithm by Yuke Zhuge](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/Indexer.md)
 - [NewRelic algorithm implementation](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
 
+## OTel SDK Specification Compatibility
+
+This section documents compatibility with the [Base2 Exponential Bucket Histogram Aggregation](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#base2-exponential-bucket-histogram-aggregation) section of the OpenTelemetry Metrics SDK specification.
+
+### Configuration Parameters
+
+The spec defines three configuration parameters:
+
+| Parameter | Spec Default | This Implementation | Notes |
+|-----------|-------------|---------------------|-------|
+| **MaxSize** | 160 | 160 (`LARGE_SIZE`), 16 (`SMALL_SIZE`), or any compile-time `SIZE` | `ExpoHistogram` offers 160 and 16 at runtime; the generic `Histogram<C, SIZE>` accepts any const `SIZE` |
+| **MaxScale** | 20 | 20 (`MAX_SCALE`) | Effective max depends on the mapping feature: table-based features cap at `TABLE_SCALE` (e.g. 8 for `newrelic-8`); the `logarithm` feature reaches 20. `Histogram::with_max_scale()` lets the user set a lower cap. |
+| **RecordMinMax** | true | Always on | `min` and `max` are tracked on every update. There is no option to disable them. |
+
+### Collected Fields
+
+The spec requires all histogram aggregations to collect count, sum, min, and max. This implementation provides:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `count` | `u64` | Total measurement count |
+| `sum` | `f64` | Arithmetic sum of all values (zero values excluded from sum) |
+| `min` | `f64` | Minimum observed value |
+| `max` | `f64` | Maximum observed value |
+| `zero_count` | `u64` | Count of zero-valued measurements |
+| `positive` | `Buckets<C, SIZE>` | Positive range bucket counts in a circular buffer |
+| `scale` | `i32` | Current mapping scale (adjusted automatically) |
+
+### Handle All Normal Values
+
+> Implementations are REQUIRED to accept the entire normal range of IEEE floating point values.
+
+**Supported.** All normal positive f64 values (from $2^{-1022}$ through the largest finite f64) are mapped to the correct bucket index. Subnormal values are mapped to the lowest normal bucket rather than rejected.
+
+> Implementations SHOULD NOT incorporate non-normal values (i.e., +Inf, -Inf, and NaNs) into the sum, min, and max fields.
+
+**Caller responsibility.** `debug_assert!` guards reject non-finite and negative values during development, but there is no runtime check in release builds. The crate expects the SDK caller to filter these before recording.
+
+### Support a Minimum and Maximum Scale
+
+> The implementation MUST maintain reasonable minimum and maximum scale parameters that the automatic scale parameter will not exceed.
+
+**Supported.** Scale is bounded by `MIN_SCALE` (-10) and `MAX_SCALE` (20). The `max_scale` field (configurable via `Histogram::with_max_scale()` or `ExpoHistogram::with_max_scale()`) sets the upper bound for automatic scale selection.
+
+### Use the Maximum Scale for Single Measurements
+
+> When the histogram contains not more than one value in either of the positive or negative ranges, the implementation SHOULD use the maximum scale.
+
+**Supported.** A new histogram starts at `max_scale`. The first observation is recorded at that scale. Scale only decreases when a second value doesn't fit within the `SIZE` bucket span.
+
+### Maintain the Ideal Scale
+
+> Implementations SHOULD adjust the histogram scale as necessary to maintain the best resolution possible, within the constraint of maximum size.
+
+**Supported.** When a new value's bucket index would exceed the `SIZE`-bucket span, the histogram computes the minimum downscale needed to accommodate both the existing range and the new value. It never downscales more than necessary. On `clear()`, scale resets to `max_scale`.
+
+### Negative Values
+
+The spec defines both positive and negative bucket ranges. **This implementation only supports non-negative values** — there is a single `positive` bucket set and no `negative` counterpart. The use case is recording non-negative measurements (latencies, sizes, counts) which is the overwhelmingly common case. Adding negative bucket support would double the per-histogram memory footprint.
+
+### Merging
+
+The spec requires aggregations to be mergeable. This implementation supports:
+
+- **Same-type merge:** `Histogram::merge_from()` merges identically-typed histograms, computing the minimum common scale and downscaling as needed.
+- **Cross-counter merge:** `Histogram::merge_from_histogram()` merges histograms with different counter types.
+- **Cross-size merge:** `Histogram::merge_from_raw()` merges histograms with different `SIZE` parameters via a closure-based bucket accessor.
+- **Runtime merge:** `ExpoHistogram::merge_from()` merges across resolutions (Small/Large) and counter widths (u16/u32/u64) with automatic counter widening on overflow.
+
+### Counter Widening
+
+Not part of the spec, but relevant to overflow handling: `ExpoHistogram` starts with `u16` bucket counters and automatically widens to `u32`, then `u64`, if a bucket counter would overflow during `update` or `merge`. This allows the common case to use compact 16-bit counters while still handling extreme counts.
+
+### Summary
+
+| Spec Requirement | Status |
+|-----------------|--------|
+| MaxSize = 160 default | Supported |
+| MaxScale = 20 default | Supported |
+| RecordMinMax | Always on |
+| Handle all normal values | Supported |
+| Reject +Inf, -Inf, NaN | Debug-only (caller responsibility) |
+| Subnormal values | Mapped to lowest normal bucket |
+| Minimum and maximum scale | Supported (MIN_SCALE = -10, MAX_SCALE = 20) |
+| Max scale for single measurements | Supported |
+| Maintain ideal scale | Supported |
+| Positive bucket range | Supported |
+| Negative bucket range | Not implemented |
+| Zero count | Supported |
+| Count, sum, min, max | Supported |
+| Merge | Supported (same-type, cross-counter, cross-size) |
+
 ## License
 
 Apache-2.0

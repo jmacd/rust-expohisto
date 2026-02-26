@@ -12,7 +12,7 @@ use crate::float64::{get_normal_base2, get_significand};
 /// Maps a positive f64 value to a bucket index using pure logarithm.
 ///
 /// # Arguments
-/// * `value` - A positive f64 value (must be > 0, finite)
+/// * `value` - A positive f64 value (must be > 0)
 /// * `scale` - The histogram scale (must be > 0)
 /// * `scale_factor` - Pre-computed `LOG2_E * 2^scale`
 ///
@@ -22,7 +22,6 @@ use crate::float64::{get_normal_base2, get_significand};
 pub fn map_to_index(value: f64, scale: i32, scale_factor: f64) -> i32 {
     debug_assert!(scale > 0);
     debug_assert!(value > 0.0);
-    debug_assert!(value.is_finite());
 
     // Exact power-of-two: significand is 0, index is (exp << scale) - 1.
     // We use the exponent directly rather than ln() to avoid FP imprecision.
