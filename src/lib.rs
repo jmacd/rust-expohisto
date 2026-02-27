@@ -26,8 +26,9 @@
 //! # Features
 //!
 //! - **Allocation-free**: Uses fixed-size arrays via const generics
-//! - **Auto-widening counters**: Buckets start at u8 and widen in-place
-//!   (u8 → u16 → u32 → u64) via combined downscale+widen when a counter saturates
+//! - **Auto-widening counters**: Buckets start at 1-bit and widen in-place
+//!   (1→2→4 bits → u8 → u16 → u32 → u64) via combined downscale+widen when a
+//!   counter saturates. Sub-byte transitions use parallel bit-sum (SWAR).
 //! - **Automatic scaling**: Scale adjusts automatically to fit data in available buckets
 //! - **Merge support**: Histograms can be merged in-place without allocation
 //! - **Algorithm choice**: Select mapping algorithm at compile time
@@ -38,7 +39,7 @@
 //! use rust_expohisto::{Histogram, P64};
 //!
 //! // Create a histogram with full 64-bit precision and 2 u64 words (16 bytes) of bucket storage.
-//! // Starts with 16 u8 buckets, widens to 8×u16 → 4×u32 → 2×u64.
+//! // Starts with 128 1-bit buckets, widening through 2-bit → 4-bit → u8 → u16 → u32 → u64.
 //! let mut hist: Histogram<P64, 2> = Histogram::new();
 //!
 //! // Record observations
@@ -78,14 +79,14 @@
 //!
 //! `N` is the number of `u64` words of bucket storage (total bytes = N×8).
 //!
-//! | Buckets (`N`) | Bytes | Bucket Capacity (u8 → u16 → u32 → u64) |
-//! |---------------|-------|------------------------------------------|
-//! | `Histogram<P, 1>` | 8 | 8 → 4 → 2 → 1 |
-//! | `Histogram<P, 2>` | 16 | 16 → 8 → 4 → 2 |
-//! | `Histogram<P, 4>` | 32 | 32 → 16 → 8 → 4 |
-//! | `Histogram<P, 8>` | 64 | 64 → 32 → 16 → 8 |
-//! | `Histogram<P, 16>` | 128 | 128 → 64 → 32 → 16 |
-//! | `Histogram<P, 27>` | 216 | 216 → 108 → 54 → 27 |
+//! | Buckets (`N`) | Bytes | Bucket Capacity (1b → 2b → 4b → u8 → u16 → u32 → u64) |
+//! |---------------|-------|---------------------------------------------------------|
+//! | `Histogram<P, 1>` | 8 | 64 → 32 → 16 → 8 → 4 → 2 → 1 |
+//! | `Histogram<P, 2>` | 16 | 128 → 64 → 32 → 16 → 8 → 4 → 2 |
+//! | `Histogram<P, 4>` | 32 | 256 → 128 → 64 → 32 → 16 → 8 → 4 |
+//! | `Histogram<P, 8>` | 64 | 512 → 256 → 128 → 64 → 32 → 16 → 8 |
+//! | `Histogram<P, 16>` | 128 | 1024 → 512 → 256 → 128 → 64 → 32 → 16 |
+//! | `Histogram<P, 27>` | 216 | 1728 → 864 → 432 → 216 → 108 → 54 → 27 |
 //!
 //! # Scale and Resolution
 //!
