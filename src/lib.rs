@@ -35,23 +35,23 @@
 //! # Example
 //!
 //! ```
-//! use rust_expohisto::Histogram;
+//! use rust_expohisto::{Histogram, P64};
 //!
-//! // Create a histogram with 2 u64 words (16 bytes) of bucket storage.
+//! // Create a histogram with full 64-bit precision and 2 u64 words (16 bytes) of bucket storage.
 //! // Starts with 16 u8 buckets, widens to 8×u16 → 4×u32 → 2×u64.
-//! let mut hist: Histogram<2> = Histogram::new();
+//! let mut hist: Histogram<P64, 2> = Histogram::new();
 //!
 //! // Record observations
-//! hist.update(0.5);
-//! hist.update(1.0);
-//! hist.update(2.0);
-//! hist.update(100.0);
+//! hist.update(0.5).unwrap();
+//! hist.update(1.0).unwrap();
+//! hist.update(2.0).unwrap();
+//! hist.update(100.0).unwrap();
 //!
 //! // Access statistics
 //! println!("count: {}", hist.count());
-//! println!("sum: {}", hist.sum());
-//! println!("min: {}", hist.min());
-//! println!("max: {}", hist.max());
+//! println!("sum: {:?}", hist.sum());
+//! println!("min: {:?}", hist.min());
+//! println!("max: {:?}", hist.max());
 //! println!("scale: {}", hist.scale());
 //!
 //! // Access bucket data
@@ -65,17 +65,27 @@
 //!
 //! # Size Considerations
 //!
-//! `N` is the number of `u64` words of bucket storage (total bytes = N×8).
-//! Total struct size ≈ 80 bytes overhead + N×8.
+//! The first type parameter `P` selects the precision tier for statistics
+//! (sum/min/max as float, count/zero_count as unsigned int):
 //!
-//! | Configuration | Bytes | Bucket Capacity (u8 → u16 → u32 → u64) |
+//! | Tier | Float | Count | Stats overhead |
+//! |------|-------|-------|----------------|
+//! | `P64` | `f64` | `u64` | 40 bytes |
+//! | `P32` | `f32` | `u32` | 20 bytes |
+//! | `P16`* | `f16` | `u16` | 10 bytes |
+//!
+//! \* `P16` requires the `half` feature.
+//!
+//! `N` is the number of `u64` words of bucket storage (total bytes = N×8).
+//!
+//! | Buckets (`N`) | Bytes | Bucket Capacity (u8 → u16 → u32 → u64) |
 //! |---------------|-------|------------------------------------------|
-//! | `Histogram<1>` | 8 | 8 → 4 → 2 → 1 |
-//! | `Histogram<2>` | 16 | 16 → 8 → 4 → 2 |
-//! | `Histogram<4>` | 32 | 32 → 16 → 8 → 4 |
-//! | `Histogram<8>` | 64 | 64 → 32 → 16 → 8 |
-//! | `Histogram<16>` | 128 | 128 → 64 → 32 → 16 |
-//! | `Histogram<27>` | 216 | 216 → 108 → 54 → 27 |
+//! | `Histogram<P, 1>` | 8 | 8 → 4 → 2 → 1 |
+//! | `Histogram<P, 2>` | 16 | 16 → 8 → 4 → 2 |
+//! | `Histogram<P, 4>` | 32 | 32 → 16 → 8 → 4 |
+//! | `Histogram<P, 8>` | 64 | 64 → 32 → 16 → 8 |
+//! | `Histogram<P, 16>` | 128 | 128 → 64 → 32 → 16 |
+//! | `Histogram<P, 27>` | 216 | 216 → 108 → 54 → 27 |
 //!
 //! # Scale and Resolution
 //!
@@ -89,6 +99,7 @@ pub mod exponent;
 pub mod float64;
 pub mod histogram;
 pub mod mapping;
+pub mod precision;
 
 // Algorithm modules - conditionally compiled
 #[cfg(feature = "logarithm")]
@@ -110,5 +121,6 @@ pub mod newrelic;
 #[cfg(feature = "dynatrace")]
 pub mod dynatrace;
 
-pub use histogram::{BucketWidth, Buckets, BucketsIter, Histogram};
+pub use histogram::{BucketWidth, Buckets, BucketsIter, Histogram, Overflow};
 pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
+pub use precision::{HistCount, HistFloat, P32, P64, Precision};
