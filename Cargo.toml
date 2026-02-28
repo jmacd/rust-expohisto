@@ -53,3 +53,7 @@ expohisto-mapping-gen = { path = "mapping-gen" }
 [[bench]]
 name = "mapping"
 harness = false
+
+[[bench]]
+name = "sub_byte"
+harness = false

@@ -7,30 +7,60 @@
 //! corrections instead of NewRelic's 2N linear buckets with one branch correction.
 //! Trade-off: ~50% smaller index table at the cost of one extra comparison.
 //!
-//! A single table is compiled at the highest requested scale (TABLE_SCALE).
-//! Lower scales are derived by right-shifting: `map_at_S(v) = map_at_H(v) >> (H - S)`.
+//! Per-scale boundary and index tables are derived at runtime from the
+//! full-scale BOUNDARIES array, packed in single allocations.
+
+use std::sync::OnceLock;
 
 use crate::float64::{get_normal_base2, get_significand};
-use crate::lookup::{BOUNDARIES, TABLE_SCALE, derive_index_table};
+use crate::lookup::{TABLE_SCALE, boundaries, derive_index_table};
 
-/// Number of log buckets at TABLE_SCALE.
-const N: usize = 1 << (TABLE_SCALE as usize);
+/// Per-scale DT index tables, packed contiguously.
+struct DtScaleTables {
+    data: Box<[u16]>,
+    /// `offsets[s]` = start index of scale-s table in `data`.
+    offsets: [u32; 16],
+}
 
-/// Significand shift for N linear buckets: one less bit of resolution than NR.
-const SIGNIFICAND_SHIFT: u32 = 52 - TABLE_SCALE as u32;
+static DT_TABLES: OnceLock<DtScaleTables> = OnceLock::new();
 
-/// Returns the linear-to-log index table (N entries), derived from
-/// BOUNDARIES on first use.
+fn dt_tables() -> &'static DtScaleTables {
+    DT_TABLES.get_or_init(|| {
+        let h = TABLE_SCALE as usize;
+        // DT: 2^s entries per scale, total ≈ 2N
+        let total: usize = (1..=h).map(|s| 1usize << s).sum();
+        let mut data = Vec::with_capacity(total);
+        let mut offsets = [0u32; 16];
+
+        for s in 1..=h {
+            offsets[s] = data.len() as u32;
+            let count = 1usize << s;
+            let shift = 52 - s as u32;
+            let b = boundaries(s as i32);
+            let table = derive_index_table(b, count, shift);
+            data.extend_from_slice(&table);
+        }
+
+        DtScaleTables {
+            data: data.into_boxed_slice(),
+            offsets,
+        }
+    })
+}
+
+/// Returns the DT index table for the given scale.
 #[inline]
-fn index_table() -> &'static [u16] {
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<Vec<u16>> = OnceLock::new();
-    TABLE.get_or_init(|| derive_index_table(N, SIGNIFICAND_SHIFT))
+fn index_table(scale: i32) -> &'static [u16] {
+    let dtt = dt_tables();
+    let s = scale as usize;
+    let start = dtt.offsets[s] as usize;
+    let len = 1usize << s;
+    &dtt.data[start..start + len]
 }
 
 /// Maps a positive f64 value to a bucket index.
 ///
-/// Uses N linear buckets and two branch corrections.
+/// Uses per-scale boundaries and N linear buckets with two branch corrections.
 #[inline]
 pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
@@ -40,16 +70,17 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);
 
-    let index = index_table();
-    let linear_idx = (significand >> SIGNIFICAND_SHIFT) as usize;
+    let b = boundaries(scale);
+    let index = index_table(scale);
+    let shift = 52 - scale as u32;
+    let linear_idx = (significand >> shift) as usize;
     let approx = index[linear_idx] as usize;
 
     let mut bucket = approx as i32;
-    if significand >= BOUNDARIES[approx + 1] { bucket += 1; }
-    if significand >= BOUNDARIES[approx + 2] { bucket += 1; }
+    if significand >= b[approx + 1] { bucket += 1; }
+    if significand >= b[approx + 2] { bucket += 1; }
 
-    let fine_index = (exponent << TABLE_SCALE) + bucket - 1;
-    fine_index >> (TABLE_SCALE - scale)
+    (exponent << scale) + bucket - 1
 }
 
 /// Returns the native scale (resolution) of the lookup table.

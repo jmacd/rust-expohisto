@@ -70,10 +70,6 @@ pub const fn max_scale() -> i32 {
 #[derive(Debug, Clone, Copy)]
 pub struct Mapping {
     scale: i8,
-    // Pre-computed scale factor for logarithm mapping (scale > 0)
-    #[cfg(feature = "logarithm")]
-    #[allow(dead_code)] // unused when a lookup table takes precedence
-    scale_factor: f64,
     // Pre-computed inverse factor for boundary computation
     inverse_factor: f64,
 }
@@ -94,13 +90,6 @@ impl Mapping {
             return Err(MappingError::ScaleNotSupported);
         }
 
-        #[cfg(feature = "logarithm")]
-        let scale_factor = if scale > 0 {
-            crate::logarithm::scale_factor(scale)
-        } else {
-            0.0
-        };
-
         let inverse_factor = if scale > 0 {
             // math.Ldexp(math.Ln2, -scale) = Ln2 * 2^(-scale)
             core::f64::consts::LN_2 / (1u64 << scale) as f64
@@ -110,8 +99,6 @@ impl Mapping {
 
         Ok(Self {
             scale: scale as i8,
-            #[cfg(feature = "logarithm")]
-            scale_factor,
             inverse_factor,
         })
     }
@@ -154,7 +141,7 @@ impl Mapping {
             not(feature = "dynatrace")
         ))]
         {
-            crate::logarithm::map_to_index(value, self.scale as i32, self.scale_factor)
+            crate::logarithm::map_to_index(value, self.scale as i32)
         }
 
         // No algorithm selected

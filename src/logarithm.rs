@@ -9,17 +9,29 @@
 
 use crate::float64::{get_normal_base2, get_significand};
 
+/// Pre-computed `LOG2_E * 2^scale` for scales 0..=20.
+///
+/// Index 0 is unused (exponent mapping handles scale <= 0).
+const SCALE_FACTORS: [f64; 21] = {
+    let mut arr = [0.0; 21];
+    let mut i = 1;
+    while i <= 20 {
+        arr[i] = core::f64::consts::LOG2_E * (1u64 << i) as f64;
+        i += 1;
+    }
+    arr
+};
+
 /// Maps a positive f64 value to a bucket index using pure logarithm.
 ///
 /// # Arguments
 /// * `value` - A positive f64 value (must be > 0)
 /// * `scale` - The histogram scale (must be > 0)
-/// * `scale_factor` - Pre-computed `LOG2_E * 2^scale`
 ///
 /// # Returns
 /// The bucket index for this value at the given scale.
 #[inline]
-pub fn map_to_index(value: f64, scale: i32, scale_factor: f64) -> i32 {
+pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
     debug_assert!(value > 0.0);
 
@@ -33,16 +45,7 @@ pub fn map_to_index(value: f64, scale: i32, scale_factor: f64) -> i32 {
     }
 
     // General case: use floor(log(value) * scaleFactor)
-    (value.ln() * scale_factor).floor() as i32
-}
-
-/// Computes the scale factor for a given scale.
-///
-/// This is `LOG2_E * 2^scale`, used to convert natural log to bucket index.
-#[inline]
-pub const fn scale_factor(scale: i32) -> f64 {
-    // LOG2_E * 2^scale
-    core::f64::consts::LOG2_E * (1u64 << scale) as f64
+    (value.ln() * SCALE_FACTORS[scale as usize]).floor() as i32
 }
 
 #[cfg(test)]
@@ -53,12 +56,10 @@ mod tests {
     fn test_powers_of_two() {
         // Powers of two should map to (exp << scale) - 1
         for scale in 1..=20 {
-            let sf = scale_factor(scale);
-
             for exp in -10..=10 {
                 let value = 2.0_f64.powi(exp);
                 let expected = (exp << scale) - 1;
-                let actual = map_to_index(value, scale, sf);
+                let actual = map_to_index(value, scale);
                 assert_eq!(
                     actual, expected,
                     "power of two mismatch at scale={}, exp={}: got {}, expected {}",
@@ -71,23 +72,22 @@ mod tests {
     #[test]
     fn test_basic_values() {
         let scale = 4;
-        let sf = scale_factor(scale);
 
         // 1.0 is 2^0, should map to -1
-        assert_eq!(map_to_index(1.0, scale, sf), -1);
+        assert_eq!(map_to_index(1.0, scale), -1);
 
         // 2.0 is 2^1, should map to (1 << 4) - 1 = 15
-        assert_eq!(map_to_index(2.0, scale, sf), 15);
+        assert_eq!(map_to_index(2.0, scale), 15);
 
         // Values between 1 and 2 should be in buckets 0..15
-        let idx = map_to_index(1.5, scale, sf);
+        let idx = map_to_index(1.5, scale);
         assert!(idx >= 0 && idx < 15, "1.5 should be in [0, 15), got {}", idx);
     }
 
     #[test]
-    fn test_scale_factor() {
-        assert_eq!(scale_factor(1), core::f64::consts::LOG2_E * 2.0);
-        assert_eq!(scale_factor(4), core::f64::consts::LOG2_E * 16.0);
-        assert_eq!(scale_factor(8), core::f64::consts::LOG2_E * 256.0);
+    fn test_scale_factors() {
+        assert_eq!(SCALE_FACTORS[1], core::f64::consts::LOG2_E * 2.0);
+        assert_eq!(SCALE_FACTORS[4], core::f64::consts::LOG2_E * 16.0);
+        assert_eq!(SCALE_FACTORS[8], core::f64::consts::LOG2_E * 256.0);
     }
 }

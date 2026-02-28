@@ -4,31 +4,62 @@
 //! NewRelic lookup table-based mapping for exponential histograms.
 //!
 //! This algorithm uses pre-computed lookup tables for exact bucket mapping
-//! without floating-point precision errors. A single table is compiled at
-//! the highest requested scale (TABLE_SCALE). Lower scales are derived by
-//! right-shifting the result: `map_at_S(v) = map_at_H(v) >> (H - S)`.
+//! without floating-point precision errors. Per-scale boundary and index
+//! tables are derived at runtime from the full-scale BOUNDARIES array,
+//! packed in single allocations. Each scale's working set fits tightly
+//! in cache lines.
+
+use std::sync::OnceLock;
 
 use crate::float64::{get_normal_base2, get_significand};
-use crate::lookup::{BOUNDARIES, TABLE_SCALE, derive_index_table};
+use crate::lookup::{TABLE_SCALE, boundaries, derive_index_table};
 
-/// Number of log buckets at TABLE_SCALE.
-const N: usize = 1 << (TABLE_SCALE as usize);
+/// Per-scale NR index tables, packed contiguously.
+struct NrScaleTables {
+    data: Box<[u16]>,
+    /// `offsets[s]` = start index of scale-s table in `data`.
+    offsets: [u32; 16],
+}
 
-/// Significand shift for 2N linear buckets: one more bit of resolution than DT.
-const SIGNIFICAND_SHIFT: u32 = 52 - TABLE_SCALE as u32 - 1;
+static NR_TABLES: OnceLock<NrScaleTables> = OnceLock::new();
 
-/// Returns the linear-to-log index table (2N entries), derived from
-/// BOUNDARIES on first use.
+fn nr_tables() -> &'static NrScaleTables {
+    NR_TABLES.get_or_init(|| {
+        let h = TABLE_SCALE as usize;
+        // NR: 2^(s+1) entries per scale, total ≈ 4N
+        let total: usize = (1..=h).map(|s| 1usize << (s + 1)).sum();
+        let mut data = Vec::with_capacity(total);
+        let mut offsets = [0u32; 16];
+
+        for s in 1..=h {
+            offsets[s] = data.len() as u32;
+            let count = 1usize << (s + 1);
+            let shift = 52 - s as u32 - 1;
+            let b = boundaries(s as i32);
+            let table = derive_index_table(b, count, shift);
+            data.extend_from_slice(&table);
+        }
+
+        NrScaleTables {
+            data: data.into_boxed_slice(),
+            offsets,
+        }
+    })
+}
+
+/// Returns the NR index table for the given scale.
 #[inline]
-fn index_table() -> &'static [u16] {
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<Vec<u16>> = OnceLock::new();
-    TABLE.get_or_init(|| derive_index_table(2 * N, SIGNIFICAND_SHIFT))
+fn index_table(scale: i32) -> &'static [u16] {
+    let nrt = nr_tables();
+    let s = scale as usize;
+    let start = nrt.offsets[s] as usize;
+    let len = 1usize << (s + 1);
+    &nrt.data[start..start + len]
 }
 
 /// Maps a positive f64 value to a bucket index.
 ///
-/// Uses 2N linear buckets and one branch correction.
+/// Uses per-scale boundaries and 2N linear buckets with one branch correction.
 #[inline]
 pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
@@ -38,15 +69,16 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);
 
-    let index = index_table();
-    let linear_idx = (significand >> SIGNIFICAND_SHIFT) as usize;
+    let b = boundaries(scale);
+    let index = index_table(scale);
+    let shift = 52 - scale as u32 - 1;
+    let linear_idx = (significand >> shift) as usize;
     let approx = index[linear_idx] as usize;
 
     let mut bucket = approx as i32;
-    if significand >= BOUNDARIES[approx + 1] { bucket += 1; }
+    if significand >= b[approx + 1] { bucket += 1; }
 
-    let fine_index = (exponent << TABLE_SCALE) + bucket - 1;
-    fine_index >> (TABLE_SCALE - scale)
+    (exponent << scale) + bucket - 1
 }
 
 /// Returns the native scale (resolution) of the lookup table.

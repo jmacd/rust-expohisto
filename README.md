@@ -283,6 +283,142 @@ The `mapping-gen` crate can be tested independently:
 cd mapping-gen && cargo test
 ```
 
+## Sub-Byte Bucket Widths and Bit-Level Arithmetic
+
+Bucket counters start at 1 bit per counter, maximizing the initial bucket count for a given memory budget. As counters saturate, they widen in place through the chain **B1→B2→B4→U8→U16→U32→U64**, each transition halving the bucket count and doubling counter capacity. The sub-byte widths (B1, B2, B4) are the novel part — once you reach U8, it's just `bytemuck::cast_slice` for free reinterpretation. This section describes the bit-level machinery that makes sub-byte widths work.
+
+### Memory layout
+
+All bucket data lives in a flat `[u64; N]` array. Each counter occupies a fixed number of bits, densely packed with **no padding**: the k-th counter is at bits `k*W..(k+1)*W` across the array, where `W` is the bit width. For N=4 (32 bytes), the capacity per width is:
+
+| Width | Bits per counter | Buckets |
+|-------|-----------------|---------|
+| B1 | 1 | 256 |
+| B2 | 2 | 128 |
+| B4 | 4 | 64 |
+| U8 | 8 | 32 |
+| U16 | 16 | 16 |
+| U32 | 32 | 8 |
+| U64 | 64 | 4 |
+
+All widths use the same physical `[u64; N]` backing array. This means a `Histogram<P64, 4>` always occupies the same number of bytes regardless of the current counter width — it just interprets the same bits differently.
+
+### Sub-byte get/set
+
+Slot access extracts or replaces a bitfield within a u64 word:
+
+```
+fn get(slot) -> u64:
+    match width:
+        B1:  data[slot / 64] >> (slot % 64)         & 1
+        B2:  data[slot / 32] >> ((slot % 32) * 2)   & 3
+        B4:  data[slot / 16] >> ((slot % 16) * 4)   & 0xF
+
+fn set(slot, value):
+    match width:
+        B1:  word = &data[slot / 64]; bit = slot % 64
+             *word = (*word & !(1 << bit)) | ((value & 1) << bit)
+        B2:  word = &data[slot / 32]; shift = (slot % 32) * 2
+             *word = (*word & !(3 << shift)) | ((value & 3) << shift)
+        B4:  word = &data[slot / 16]; shift = (slot % 16) * 4
+             *word = (*word & !(0xF << shift)) | ((value & 0xF) << shift)
+```
+
+The pattern is: divide by slots-per-word, multiply the intra-word index by the bit width, mask with `(1 << W) - 1`. The `set` path clears the target field with an AND-NOT and writes the new value with an OR.
+
+### Pairwise sum via SWAR
+
+When a B1 counter saturates (value goes from 1 to 2), the histogram needs to widen all counters from 1-bit to 2-bit. Naively this requires reading each pair of adjacent 1-bit counters, summing them, and writing a 2-bit result — a serial loop over potentially hundreds of slots.
+
+Instead, the widening uses **SWAR** (SIMD Within A Register): each stage is one step of the textbook popcount algorithm. The key insight is that pairwise-summing N-bit fields into 2N-bit fields is exactly what popcount does at each stage, and the bitmask constants are the same.
+
+```
+B1 → B2:   w = ((x >> 1) & 0x5555...) + (x & 0x5555...)
+B2 → B4:   w = ((x >> 2) & 0x3333...) + (x & 0x3333...)
+B4 → U8:   w = ((x >> 4) & 0x0F0F...) + (x & 0x0F0F...)
+```
+
+Each formula processes all counters in one u64 word simultaneously:
+
+- **B1→B2**: The mask `0x5555...5555` selects the odd-indexed bits. Shifting right by 1 aligns even-indexed bits with them. Adding gives a 2-bit sum of each adjacent pair. All 32 pairs in a u64 are processed in 3 operations.
+
+- **B2→B4**: The mask `0x3333...3333` selects alternating 2-bit fields. Shifting right by 2 aligns adjacent 2-bit fields. Adding gives a 4-bit sum. All 16 pairs in 3 operations.
+
+- **B4→U8**: The mask `0x0F0F...0F0F` selects alternating nibbles. Shifting right by 4 aligns them. Adding gives an 8-bit (byte) sum. Beyond this point, the value fits in a byte and the transition to U8 needs no further reinterpretation — `bytemuck::cast_slice` views the same `[u64]` as `[u8]`.
+
+The inner loop is:
+```
+for w in data.iter_mut() {
+    let x = *w;
+    *w = ((x >> FIELD_WIDTH) & MASK) + (x & MASK);
+}
+```
+
+No branches, no cross-word dependencies. With `-C target-cpu=native`, LLVM auto-vectorizes this into AVX2 or NEON instructions.
+
+#### Overflow safety
+
+In each stage, the maximum possible sum equals twice the maximum value of the source field: B1 max 1+1=2 (fits in 2 bits), B2 max 3+3=6 (fits in 4 bits), B4 max 15+15=30 (fits in 8 bits). The destination field is always wide enough.
+
+#### Stale data zeroing
+
+Because SWAR processes every word (not just the used range), stale bits outside the active bucket range are transformed rather than cleared. After the SWAR pass, slots beyond the new used count are explicitly zeroed to prevent stale data from becoming visible if the range is later extended.
+
+### Bit-level circular buffer rotation
+
+Buckets use a circular buffer: `index_base` marks which histogram index corresponds to physical slot 0. When the histogram needs to linearize the buffer (for widening or downscaling), it rotates the entire bit array so that `index_base == index_start`.
+
+For byte-aligned widths, this delegates to Rust's `[T]::rotate_right(n)`. For sub-byte widths, the rotation operates at bit granularity on the raw `[u64; N]` array:
+
+```
+bit_rotate_right(data, shift):
+    total_bits = N * 64
+    shift = shift % total_bits
+
+    // Step 1: whole-word rotate
+    word_shift = shift / 64
+    bit_shift  = shift % 64
+    data.rotate_right(word_shift)
+
+    // Step 2: sub-word carry shift (LEFT across the array)
+    saved = data[N-1] >> (64 - bit_shift)
+    for i in (1..N).rev():
+        data[i] = (data[i] << bit_shift) | (data[i-1] >> (64 - bit_shift))
+    data[0] = (data[0] << bit_shift) | saved
+```
+
+This matches `[T]::rotate_right` semantics: the bit at flat position `p` moves to `(p + shift) % total_bits`.
+
+**Decomposition**: The shift is split into a whole-word component (handled by `[u64]::rotate_right`) and a sub-word residual. The sub-word step shifts each word LEFT by `bit_shift` bits, carrying the overflow into the next higher word. The top bits of `data[N-1]` wrap around to the bottom of `data[0]`.
+
+**Carry direction**: The loop iterates in reverse (`N-1` down to `1`) so that each word reads from `data[i-1]` before that word is overwritten. The carry propagates from lower words to higher words, matching the left-shift direction. `saved` captures the wrap-around bits from the last word before the loop begins.
+
+### Downscale: transactional group-sum
+
+Downscaling by `k` merges groups of `2^k` adjacent buckets by summing their counters. At sub-byte widths, a group sum can exceed the counter maximum (e.g., four 1-bit counters summing to 4 doesn't fit in a 1-bit counter). When this happens, the downscale is aborted and the caller widens the counters first.
+
+To avoid partial corruption, the implementation uses a **two-phase approach**:
+
+1. **Pre-check** (read-only): Iterate over the circular buffer using `at()` (which handles wrap-around without mutation) and compute each group sum. If any sum exceeds `counter_max()`, return `false` immediately — no state has been modified.
+
+2. **Mutate**: Only after the pre-check passes, linearize the buffer with `rotate()` and perform the actual in-place relocations. Each slot's count is added to its group's destination slot and the source is zeroed. After all relocations, unused trailing slots are zeroed.
+
+The `relocate(dest, src)` helper reads the source, adds to the destination via `try_increment`, and only zeros the source on success. This avoids the destructive-read-before-write pitfall where zeroing the source before confirming the destination increment would lose data on overflow.
+
+### Widen-in-place: combined counter-widen + downscale
+
+When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to record another observation), the histogram performs `widen_in_place()`:
+
+1. **Linearize**: `rotate()` aligns the circular buffer so `index_base == index_start`.
+
+2. **Compute downscale amount**: Usually `by = 1` (pairwise grouping, halving bucket count). In rare cases where the span at `by = 1` exceeds the new capacity (due to odd `index_start`), bumps to `by = 2`.
+
+3. **Group-sum and widen**: For sub-byte `by = 1`, uses the SWAR pairwise sum (fast path). Otherwise, uses the sequential group-sum (general path) which reads at the old width and writes at the new width by temporarily switching the width field during the loop.
+
+4. **Update metadata**: Shift `index_start` and `index_end` right by `by`, set `index_base = index_start`, update `width`.
+
+The transition preserves the total count across all buckets: the sum of all counters before and after widening is identical. Resolution is lost (adjacent buckets are merged), but no data is destroyed.
+
 ## References
 
 - [OpenTelemetry Exponential Histogram Specification](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)

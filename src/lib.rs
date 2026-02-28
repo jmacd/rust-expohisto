@@ -36,11 +36,12 @@
 //! # Example
 //!
 //! ```
-//! use rust_expohisto::{Histogram, P64};
+//! use rust_expohisto::Histogram;
 //!
-//! // Create a histogram with full 64-bit precision and 2 u64 words (16 bytes) of bucket storage.
-//! // Starts with 128 1-bit buckets, widening through 2-bit → 4-bit → u8 → u16 → u32 → u64.
-//! let mut hist: Histogram<P64, 2> = Histogram::new();
+//! // Create a histogram with 16 u64 words (128 bytes) of data pool.
+//! // MMZSC fields start at 4-byte width (3 words), leaving 13 words
+//! // for bucket data: 832 1-bit buckets, widening to 13 u64 counters.
+//! let mut hist: Histogram<16> = Histogram::new();
 //!
 //! // Record observations
 //! hist.update(0.5).unwrap();
@@ -50,9 +51,9 @@
 //!
 //! // Access statistics
 //! println!("count: {}", hist.count());
-//! println!("sum: {:?}", hist.sum());
-//! println!("min: {:?}", hist.min());
-//! println!("max: {:?}", hist.max());
+//! println!("sum: {}", hist.sum());
+//! println!("min: {}", hist.min());
+//! println!("max: {}", hist.max());
 //! println!("scale: {}", hist.scale());
 //!
 //! // Access bucket data
@@ -66,27 +67,19 @@
 //!
 //! # Size Considerations
 //!
-//! The first type parameter `P` selects the precision tier for statistics
-//! (sum/min/max as float, count/zero_count as unsigned int):
+//! `Histogram<N>` has a single const generic: the number of `u64` words
+//! in the data pool. The pool holds auto-widening MMZSC statistics
+//! (min/max/sum/count/zero_count) at the front and bucket counters
+//! after them. MMZSC starts at 4-byte / 3-word (S32) and auto-widens
+//! to 8-byte / 5-word (S64) when count or zero_count exceeds `u32::MAX`.
 //!
-//! | Tier | Float | Count | Stats overhead |
-//! |------|-------|-------|----------------|
-//! | `P64` | `f64` | `u64` | 40 bytes |
-//! | `P32` | `f32` | `u32` | 20 bytes |
-//! | `P16`* | `f16` | `u16` | 10 bytes |
-//!
-//! \* `P16` requires the `half` feature.
-//!
-//! `N` is the number of `u64` words of bucket storage (total bytes = N×8).
-//!
-//! | Buckets (`N`) | Bytes | Bucket Capacity (1b → 2b → 4b → u8 → u16 → u32 → u64) |
-//! |---------------|-------|---------------------------------------------------------|
-//! | `Histogram<P, 1>` | 8 | 64 → 32 → 16 → 8 → 4 → 2 → 1 |
-//! | `Histogram<P, 2>` | 16 | 128 → 64 → 32 → 16 → 8 → 4 → 2 |
-//! | `Histogram<P, 4>` | 32 | 256 → 128 → 64 → 32 → 16 → 8 → 4 |
-//! | `Histogram<P, 8>` | 64 | 512 → 256 → 128 → 64 → 32 → 16 → 8 |
-//! | `Histogram<P, 16>` | 128 | 1024 → 512 → 256 → 128 → 64 → 32 → 16 |
-//! | `Histogram<P, 27>` | 216 | 1728 → 864 → 432 → 216 → 108 → 54 → 27 |
+//! | `Histogram<N>` | Pool bytes | S32 bucket words | S32 B1 capacity |
+//! |----------------|-----------|-------------------|-----------------|
+//! | `Histogram<8>` | 64 | 5 | 320 |
+//! | `Histogram<12>` | 96 | 9 | 576 |
+//! | `Histogram<16>` | 128 | 13 | 832 |
+//! | `Histogram<20>` | 160 | 17 | 1088 |
+//! | `Histogram<32>` | 256 | 29 | 1856 |
 //!
 //! # Scale and Resolution
 //!
@@ -122,6 +115,6 @@ pub mod newrelic;
 #[cfg(feature = "dynatrace")]
 pub mod dynatrace;
 
-pub use histogram::{BucketWidth, Buckets, BucketsIter, Histogram, Overflow};
+pub use histogram::{BucketView, BucketWidth, BucketsIter, Histogram, Overflow, StatWidth};
 pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
 pub use precision::{HistCount, HistFloat, P32, P64, Precision};
