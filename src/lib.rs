@@ -39,8 +39,8 @@
 //! use rust_expohisto::Histogram;
 //!
 //! // Create a histogram with 16 u64 words (128 bytes) of data pool.
-//! // MMZSC fields start at 4-byte width (3 words), leaving 13 words
-//! // for bucket data: 832 1-bit buckets, widening to 13 u64 counters.
+//! // MMSC fields start at 4-byte width (2 words), leaving 14 words
+//! // for bucket data: 896 1-bit buckets, widening to 14 u64 counters.
 //! let mut hist: Histogram<16> = Histogram::new();
 //!
 //! // Record observations
@@ -68,18 +68,18 @@
 //! # Size Considerations
 //!
 //! `Histogram<N>` has a single const generic: the number of `u64` words
-//! in the data pool. The pool holds auto-widening MMZSC statistics
-//! (min/max/sum/count/zero_count) at the front and bucket counters
-//! after them. MMZSC starts at 4-byte / 3-word (S32) and auto-widens
-//! to 8-byte / 5-word (S64) when count or zero_count exceeds `u32::MAX`.
+//! in the data pool. The pool holds auto-widening MMSC statistics
+//! (min/max/sum/count) at the front and bucket counters after them.
+//! MMSC starts at 4-byte / 2-word (S32) and auto-widens to 8-byte / 4-word
+//! (S64) when count exceeds `u32::MAX`.
 //!
 //! | `Histogram<N>` | Pool bytes | S32 bucket words | S32 B1 capacity |
 //! |----------------|-----------|-------------------|-----------------|
-//! | `Histogram<8>` | 64 | 5 | 320 |
-//! | `Histogram<12>` | 96 | 9 | 576 |
-//! | `Histogram<16>` | 128 | 13 | 832 |
-//! | `Histogram<20>` | 160 | 17 | 1088 |
-//! | `Histogram<32>` | 256 | 29 | 1856 |
+//! | `Histogram<8>` | 64 | 6 | 384 |
+//! | `Histogram<12>` | 96 | 10 | 640 |
+//! | `Histogram<16>` | 128 | 14 | 896 |
+//! | `Histogram<20>` | 160 | 18 | 1152 |
+//! | `Histogram<32>` | 256 | 30 | 1920 |
 //!
 //! # Scale and Resolution
 //!

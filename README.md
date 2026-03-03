@@ -17,13 +17,15 @@ Exponential histograms provide a compact, high-resolution representation of valu
 ```rust
 use rust_expohisto::Histogram;
 
-// Create a histogram with 64 buckets and u32 counters
-let mut hist: Histogram<u32, 64> = Histogram::new();
+// Create a histogram with 16 u64 words (128 bytes) of data pool.
+// MMSC stats use 2 words (S32), leaving 14 words for bucket data:
+// 896 one-bit buckets at the default B1 width.
+let mut hist: Histogram<16> = Histogram::new();
 
 // Record observations
-hist.update(1.5);
-hist.update(2.7);
-hist.update(100.0);
+hist.update(1.5).unwrap();
+hist.update(2.7).unwrap();
+hist.update(100.0).unwrap();
 
 // Access statistics
 println!("count: {}, sum: {}", hist.count(), hist.sum());
@@ -301,7 +303,7 @@ All bucket data lives in a flat `[u64; N]` array. Each counter occupies a fixed 
 | U32 | 32 | 8 |
 | U64 | 64 | 4 |
 
-All widths use the same physical `[u64; N]` backing array. This means a `Histogram<P64, 4>` always occupies the same number of bytes regardless of the current counter width — it just interprets the same bits differently.
+All widths use the same physical `[u64; N]` backing array. This means a `Histogram<16>` always occupies the same number of bytes regardless of the current counter width — it just interprets the same bits differently.
 
 ### Sub-byte get/set
 
@@ -364,58 +366,54 @@ In each stage, the maximum possible sum equals twice the maximum value of the so
 
 Because SWAR processes every word (not just the used range), stale bits outside the active bucket range are transformed rather than cleared. After the SWAR pass, slots beyond the new used count are explicitly zeroed to prevent stale data from becoming visible if the range is later extended.
 
-### Bit-level circular buffer rotation
+### Downscale: SWAR merge (even and odd base)
 
-Buckets use a circular buffer: `index_base` marks which histogram index corresponds to physical slot 0. When the histogram needs to linearize the buffer (for widening or downscaling), it rotates the entire bit array so that `index_base == index_start`.
+Downscaling by 1 step merges pairs of adjacent buckets by summing their counters. At sub-byte widths, a pair sum can exceed the counter maximum (e.g., two 1-bit counters both set to 1 sum to 2, which doesn't fit in 1 bit). When this happens, the counters are widened to the next width.
 
-For byte-aligned widths, this delegates to Rust's `[T]::rotate_right(n)`. For sub-byte widths, the rotation operates at bit granularity on the raw `[u64; N]` array:
+The histogram tracks `index_base`, the logical index that corresponds to physical slot 0. Because SWAR operates on fixed positions within each word, it can only correctly pair adjacent counters when `index_base` is even. The downscale loop dispatches to one of two algorithms based on `index_base & 1`:
+
+#### Even base: direct SWAR merge
+
+When `index_base` is even, the k-th counter and its neighbor at k+1 are already adjacent within the same word. The SWAR pairwise sum processes all words in one pass:
+
+1. **SWAR step**: Sum adjacent counter pairs into wider counters (same masks as the popcount stages described above).
+2. **Overflow check**: Scan the widened data for any value that exceeds the original width's maximum. This uses a single bit-mask AND per word.
+3. **If no overflow**: Narrow the widened sums back to the original width and compact pairs of words into one (`swar_narrow_compact`). Width is preserved, capacity stays the same.
+4. **If overflow**: Keep the widened result, widen the counter width by one step.
+
+Either way, one downscale step is consumed: indices are halved by right-shifting `index_start`, `index_end`, and `index_base`.
+
+#### Odd base: SWAR shift + merge
+
+When `index_base` is odd, the physical slot layout is misaligned for SWAR pairing. The solution is to shift all slots up by one position first, inserting a zero at slot 0. This makes the effective base even, after which the normal SWAR merge proceeds exactly as above.
+
+The shift operates on the raw `[u64]` array in a single high-to-low pass:
 
 ```
-bit_rotate_right(data, shift):
-    total_bits = N * 64
-    shift = shift % total_bits
-
-    // Step 1: whole-word rotate
-    word_shift = shift / 64
-    bit_shift  = shift % 64
-    data.rotate_right(word_shift)
-
-    // Step 2: sub-word carry shift (LEFT across the array)
-    saved = data[N-1] >> (64 - bit_shift)
-    for i in (1..N).rev():
-        data[i] = (data[i] << bit_shift) | (data[i-1] >> (64 - bit_shift))
-    data[0] = (data[0] << bit_shift) | saved
+swar_shift_up_one(data, width):
+    bits = width.bits()
+    for i in (N-1 down to 1):
+        data[i] = (data[i] << bits) | (data[i-1] >> (64 - bits))
+    data[0] <<= bits
 ```
 
-This matches `[T]::rotate_right` semantics: the bit at flat position `p` moves to `(p + shift) % total_bits`.
+Each word shifts left by `bits`, carrying the overflow from the word below. The result is a one-slot shift of the entire packed array, with no per-slot extraction needed.
 
-**Decomposition**: The shift is split into a whole-word component (handled by `[u64]::rotate_right`) and a sub-word residual. The sub-word step shifts each word LEFT by `bit_shift` bits, carrying the overflow into the next higher word. The top bits of `data[N-1]` wrap around to the bottom of `data[0]`.
+**Edge case**: When the live range fills the entire capacity (the top slot of the last word is nonzero), the shift would push data off the end. This rare case falls back to scalar gather-scatter, which reads all values into a temporary buffer, clears the data, and writes them back at their new modular positions.
 
-**Carry direction**: The loop iterates in reverse (`N-1` down to `1`) so that each word reads from `data[i-1]` before that word is overwritten. The carry propagates from lower words to higher words, matching the left-shift direction. `saved` captures the wrap-around bits from the last word before the loop begins.
+#### At U64 width
 
-### Downscale: transactional group-sum
+Once counters have reached U64, further downscale steps use a different path (`bucket_downscale_u64`) that processes multiple steps at once by reading each slot, shifting its index right by `change`, and accumulating sums at the destination.
 
-Downscaling by `k` merges groups of `2^k` adjacent buckets by summing their counters. At sub-byte widths, a group sum can exceed the counter maximum (e.g., four 1-bit counters summing to 4 doesn't fit in a 1-bit counter). When this happens, the downscale is aborted and the caller widens the counters first.
+### Counter widening
 
-To avoid partial corruption, the implementation uses a **two-phase approach**:
+When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to record another observation), the histogram must widen all counters. This is done via `bucket_widen(steps)`:
 
-1. **Pre-check** (read-only): Iterate over the circular buffer using `at()` (which handles wrap-around without mutation) and compute each group sum. If any sum exceeds `counter_max()`, return `false` immediately — no state has been modified.
+1. **If base is even**: Use multi-step SWAR widening (`swar_widen`), which chains SWAR steps from the current width to the target width. Each step sums adjacent pairs, doubling the counter width and halving the bucket count.
 
-2. **Mutate**: Only after the pre-check passes, linearize the buffer with `rotate()` and perform the actual in-place relocations. Each slot's count is added to its group's destination slot and the source is zeroed. After all relocations, unused trailing slots are zeroed.
+2. **If base is odd**: Fall back to scalar gather-scatter for each step, since the SWAR pairing would be incorrect.
 
-The `relocate(dest, src)` helper reads the source, adds to the destination via `try_increment`, and only zeros the source on success. This avoids the destructive-read-before-write pitfall where zeroing the source before confirming the destination increment would lose data on overflow.
-
-### Widen-in-place: combined counter-widen + downscale
-
-When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to record another observation), the histogram performs `widen_in_place()`:
-
-1. **Linearize**: `rotate()` aligns the circular buffer so `index_base == index_start`.
-
-2. **Compute downscale amount**: Usually `by = 1` (pairwise grouping, halving bucket count). In rare cases where the span at `by = 1` exceeds the new capacity (due to odd `index_start`), bumps to `by = 2`.
-
-3. **Group-sum and widen**: For sub-byte `by = 1`, uses the SWAR pairwise sum (fast path). Otherwise, uses the sequential group-sum (general path) which reads at the old width and writes at the new width by temporarily switching the width field during the loop.
-
-4. **Update metadata**: Shift `index_start` and `index_end` right by `by`, set `index_base = index_start`, update `width`.
+3. **Update metadata**: Shift `index_start`, `index_end`, and `index_base` right by `steps`, set the new `bucket_width`.
 
 The transition preserves the total count across all buckets: the sum of all counters before and after widening is identical. Resolution is lost (adjacent buckets are merged), but no data is destroyed.
 
@@ -438,8 +436,8 @@ The spec defines three configuration parameters:
 
 | Parameter | Spec Default | This Implementation | Notes |
 |-----------|-------------|---------------------|-------|
-| **MaxSize** | 160 | 160 (`LARGE_SIZE`), 16 (`SMALL_SIZE`), or any compile-time `SIZE` | `ExpoHistogram` offers 160 and 16 at runtime; the generic `Histogram<C, SIZE>` accepts any const `SIZE` |
-| **MaxScale** | 20 | 20 (`MAX_SCALE`) | Effective max depends on the mapping feature: table-based features cap at `TABLE_SCALE` (e.g. 8 for `newrelic-8`); the `logarithm` feature reaches 20. `Histogram::with_max_scale()` lets the user set a lower cap. |
+| **MaxSize** | 160 | Any compile-time `N` via `Histogram<N>` | `N` is the total pool size in u64 words. Bucket capacity depends on the current counter width and stat layout. |
+| **MaxScale** | 20 | 20 (`MAX_SCALE`) | Effective max depends on the mapping feature: table-based features cap at `TABLE_SCALE` (e.g. 8 for `scale-8`); the `logarithm` feature reaches 20. `Histogram::with_max_scale()` lets the user set a lower cap. |
 | **RecordMinMax** | true | Always on | `min` and `max` are tracked on every update. There is no option to disable them. |
 
 ### Collected Fields
@@ -452,8 +450,8 @@ The spec requires all histogram aggregations to collect count, sum, min, and max
 | `sum` | `f64` | Arithmetic sum of all values (zero values excluded from sum) |
 | `min` | `f64` | Minimum observed value |
 | `max` | `f64` | Maximum observed value |
-| `zero_count` | `u64` | Count of zero-valued measurements |
-| `positive` | `Buckets<C, SIZE>` | Positive range bucket counts in a circular buffer |
+| `zero_count` | `u64` (derived) | Compute as `count - sum(positive buckets)` while encoding/exporting |
+| `positive` | `BucketView` | Positive range bucket counts |
 | `scale` | `i32` | Current mapping scale (adjusted automatically) |
 
 ### Handle All Normal Values
@@ -470,19 +468,19 @@ The spec requires all histogram aggregations to collect count, sum, min, and max
 
 > The implementation MUST maintain reasonable minimum and maximum scale parameters that the automatic scale parameter will not exceed.
 
-**Supported.** Scale is bounded by `MIN_SCALE` (-10) and `MAX_SCALE` (20). The `max_scale` field (configurable via `Histogram::with_max_scale()` or `ExpoHistogram::with_max_scale()`) sets the upper bound for automatic scale selection.
+**Supported.** Scale is bounded by `MIN_SCALE` (-10) and `MAX_SCALE` (20). The `max_scale` field (configurable via `Histogram::with_max_scale()`) sets the upper bound for automatic scale selection.
 
 ### Use the Maximum Scale for Single Measurements
 
 > When the histogram contains not more than one value in either of the positive or negative ranges, the implementation SHOULD use the maximum scale.
 
-**Supported.** A new histogram starts at `max_scale`. The first observation is recorded at that scale. Scale only decreases when a second value doesn't fit within the `SIZE` bucket span.
+**Supported.** A new histogram starts at `max_scale`. The first observation is recorded at that scale. Scale only decreases when a second value doesn't fit within the current bucket capacity.
 
 ### Maintain the Ideal Scale
 
 > Implementations SHOULD adjust the histogram scale as necessary to maintain the best resolution possible, within the constraint of maximum size.
 
-**Supported.** When a new value's bucket index would exceed the `SIZE`-bucket span, the histogram computes the minimum downscale needed to accommodate both the existing range and the new value. It never downscales more than necessary. On `clear()`, scale resets to `max_scale`.
+**Supported.** When a new value's bucket index would exceed the current bucket capacity, the histogram computes the minimum downscale needed to accommodate both the existing range and the new value. It never downscales more than necessary. On `clear()`, scale resets to `max_scale`.
 
 ### Negative Values
 
@@ -493,13 +491,12 @@ The spec defines both positive and negative bucket ranges. **This implementation
 The spec requires aggregations to be mergeable. This implementation supports:
 
 - **Same-type merge:** `Histogram::merge_from()` merges identically-typed histograms, computing the minimum common scale and downscaling as needed.
-- **Cross-counter merge:** `Histogram::merge_from_histogram()` merges histograms with different counter types.
-- **Cross-size merge:** `Histogram::merge_from_raw()` merges histograms with different `SIZE` parameters via a closure-based bucket accessor.
-- **Runtime merge:** `ExpoHistogram::merge_from()` merges across resolutions (Small/Large) and counter widths (u16/u32/u64) with automatic counter widening on overflow.
+- **Cross-size merge:** `Histogram::merge_from_other()` merges histograms with different `N` parameters.
+- **Raw merge:** `Histogram::merge_from_raw()` merges from raw histogram data via a closure-based bucket accessor, enabling cross-library interop.
 
 ### Counter Widening
 
-Not part of the spec, but relevant to overflow handling: `ExpoHistogram` starts with `u16` bucket counters and automatically widens to `u32`, then `u64`, if a bucket counter would overflow during `update` or `merge`. This allows the common case to use compact 16-bit counters while still handling extreme counts.
+Not part of the spec, but relevant to overflow handling: bucket counters start at 1-bit (B1) and automatically widen through the chain B1→B2→B4→U8→U16→U32→U64 when a counter would overflow during `update` or `merge`. Each widening step halves the bucket count and doubles counter capacity. This allows the common case to use extremely compact 1-bit counters (one bucket per bit) while still handling extreme counts.
 
 ### Summary
 
@@ -516,9 +513,9 @@ Not part of the spec, but relevant to overflow handling: `ExpoHistogram` starts 
 | Maintain ideal scale | Supported |
 | Positive bucket range | Supported |
 | Negative bucket range | Not implemented |
-| Zero count | Supported |
+| Zero count | Derived from bucket iteration |
 | Count, sum, min, max | Supported |
-| Merge | Supported (same-type, cross-counter, cross-size) |
+| Merge | Supported (same-type, cross-size, raw) |
 
 ## License
 

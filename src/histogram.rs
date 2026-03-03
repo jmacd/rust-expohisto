@@ -108,26 +108,6 @@ impl BucketWidth {
         Some(w)
     }
 
-    /// Returns the number of widen steps from `self` to `target`,
-    /// or `None` if target is not reachable.
-    #[inline]
-    const fn steps_to(self, target: BucketWidth) -> Option<i32> {
-        let mut w = self;
-        let mut steps = 0;
-        while (w as u8) < (target as u8) {
-            match w.wider() {
-                Some(next) => w = next,
-                None => return None,
-            }
-            steps += 1;
-        }
-        if (w as u8) == (target as u8) {
-            Some(steps)
-        } else {
-            None
-        }
-    }
-
     /// Returns the maximum value storable in one counter at this width.
     #[inline]
     const fn counter_max(self) -> u64 {
@@ -754,116 +734,88 @@ impl<const N: usize> Iterator for BucketsIter<'_, N> {
 impl<const N: usize> ExactSizeIterator for BucketsIter<'_, N> {}
 
 // ---------------------------------------------------------------------------
-// Bucket operations — widen (SWAR) and downscale (U64 only)
+// Bucket operations — widen (SWAR) and downscale
 // ---------------------------------------------------------------------------
 
 impl<const N: usize> Histogram<N> {
     /// Widens bucket counters from the current width by `steps` scale-steps,
-    /// using pure per-word SWAR. Each step doubles the counter width and
-    /// halves the index range (equivalent to a 1-step downscale).
+    /// using SWAR pairwise summation. Each step doubles the counter width
+    /// and halves the index range (equivalent to a 1-step downscale).
     ///
     /// At sub-U64, data never wraps (indices are always in
     /// `[index_base, index_base + cap)`), so SWAR operates on a
-    /// contiguous linear layout — no rotation needed.
+    /// contiguous linear layout.
+    ///
+    /// If `index_base` is odd, shifts data up by one slot to restore
+    /// even alignment before the SWAR step. When the top slot is
+    /// occupied (live range fills capacity), falls back to a scalar
+    /// gather-scatter for that one step.
     ///
     /// Returns `None` if already at U64 or `steps` would exceed U64.
-    /// Returns `Some(steps)` on success (= the downscale amount applied).
+    /// Returns `Some(steps)` on success (= the scale decrease applied).
     fn bucket_widen(&mut self, steps: i32) -> Option<i32> {
         debug_assert!(steps >= 1);
+
+        if self.is_effectively_empty() {
+            let target = self.bucket_width.widen_by(steps)?;
+            self.bucket_width = target;
+            self.index_start >>= steps;
+            self.index_end >>= steps;
+            self.index_base >>= steps;
+            return Some(steps);
+        }
+
         debug_assert!(
-            self.bucket_width == BucketWidth::U64
-                || self.is_effectively_empty()
-                || self.index_start >= self.index_base,
+            self.bucket_width != BucketWidth::U64,
+            "cannot widen past U64",
+        );
+        debug_assert!(
+            self.index_start >= self.index_base,
             "sub-U64 data must not wrap: start={} base={}",
             self.index_start,
             self.index_base,
         );
 
-        // SWAR requires even base alignment. If the base is odd,
-        // fall back to scalar gather-scatter for each step.
-        if self.index_base & 1 != 0 && !self.is_effectively_empty() {
-            let mut done = 0;
-            for _ in 0..steps {
-                // scalar always widens (ignores overflow check — we WANT wider)
-                self.bucket_downscale_scalar_force_widen()?;
-                done += 1;
+        let mut done = 0;
+        while done < steps {
+            let width = self.bucket_width;
+            if width == BucketWidth::U64 {
+                return None; // would exceed U64
             }
-            return Some(done);
-        }
 
-        let target = self.bucket_width.widen_by(steps)?;
+            // Ensure even base for SWAR.
+            if self.index_base & 1 != 0 {
+                let bits = width.bits();
+                let n = self.bucket_word_count();
+                if n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0 {
+                    // Top slot occupied — scalar force-widen.
+                    self.scalar_merge_step(true)?;
+                    done += 1;
+                    continue;
+                }
+                swar_shift_up_one(self.bucket_data_mut(), width);
+            }
 
-        let from = self.bucket_width;
-        let data = self.bucket_data_mut();
-        swar_widen(data, from, target);
-
-        self.bucket_width = target;
-
-        self.index_start >>= steps;
-        self.index_end >>= steps;
-        self.index_base >>= steps;
-
-        Some(steps)
-    }
-
-    /// Tries a same-width merge (downscale by 1 without widening).
-    ///
-    /// Performs a SWAR pairwise sum, checks for overflow, and if all
-    /// sums fit in the original width, narrows and compacts in place.
-    /// Returns `true` if the merge succeeded (width unchanged, capacity
-    /// preserved). Returns `false` if any pair overflowed — in that case
-    /// the data has already been widened by one step (caller should
-    /// update `bucket_width`).
-    ///
-    /// Precondition: `index_base` must be even, and width must be < U64.
-    fn bucket_try_merge_step(&mut self) -> bool {
-        debug_assert_ne!(self.bucket_width, BucketWidth::U64);
-        debug_assert!(
-            self.index_base & 1 == 0,
-            "SWAR needs even base, got {}",
-            self.index_base,
-        );
-
-        let width = self.bucket_width;
-        let data = self.bucket_data_mut();
-
-        // Step 1: SWAR pairwise sum → data is now in wider format.
-        swar_step(data, width);
-
-        // Step 2: Check for overflow.
-        if swar_has_overflow(data, width) {
-            // Overflow — keep the widened result.
+            swar_step(self.bucket_data_mut(), width);
             self.bucket_width = width.wider().unwrap();
             self.index_start >>= 1;
             self.index_end >>= 1;
             self.index_base >>= 1;
-            return false;
+            done += 1;
         }
 
-        // Step 3: No overflow — narrow back to original width and compact.
-        swar_narrow_compact(data, width);
-        self.index_start >>= 1;
-        self.index_end >>= 1;
-        self.index_base >>= 1;
-        true
+        Some(done)
     }
 
-    /// Scalar downscale by 1 step — works at any base alignment.
+    /// Scalar gather-scatter merge by 1 step. Used when SWAR cannot
+    /// operate (odd base with top slot occupied).
     ///
-    /// Used when `index_base` is odd and SWAR pairing would be incorrect.
-    /// Reads all live values, clears data, and scatter-writes at new
-    /// positions. If any pair sum overflows the current width, widens
-    /// to the next width.
+    /// If `force_widen` is true, always widens by one level (for the
+    /// `CounterOverflow` path). Otherwise, only widens if any pair sum
+    /// exceeds the current width's maximum.
     ///
-    /// Returns `true` if width was preserved, `false` if it widened.
-    fn bucket_downscale_scalar(&mut self) -> Option<bool> {
-        if self.is_effectively_empty() {
-            self.index_start >>= 1;
-            self.index_end >>= 1;
-            self.index_base >>= 1;
-            return Some(true);
-        }
-
+    /// Returns `true` if the width was preserved, `false` if it widened.
+    fn scalar_merge_step(&mut self, force_widen: bool) -> Option<bool> {
         let cap = self.bucket_capacity() as i32;
         let width = self.bucket_width;
         let max_val = width.counter_max();
@@ -872,40 +824,34 @@ impl<const N: usize> Histogram<N> {
         let new_end = self.index_end >> 1;
         let new_len = (new_end - new_start + 1) as usize;
 
-        // Gather sums, tracking whether any exceed the current width's max.
         let mut sums = [0u64; 256];
         debug_assert!(new_len <= sums.len());
-        let mut overflows = false;
+        let mut overflows = force_widen;
 
         for old_idx in self.index_start..=self.index_end {
             let slot = (old_idx - self.index_base).rem_euclid(cap) as usize;
             let val = self.bucket_get(slot);
-            let new_idx = old_idx >> 1;
-            let out = (new_idx - new_start) as usize;
+            let out = ((old_idx >> 1) - new_start) as usize;
             sums[out] = sums[out].saturating_add(val);
             if sums[out] > max_val {
                 overflows = true;
             }
         }
 
-        // If any sum overflows, widen one step.
         if overflows {
             let new_width = width.wider()?;
             self.bucket_width = new_width;
         }
 
-        // Clear bucket data.
         let data = self.bucket_data_mut();
         for w in data.iter_mut() {
             *w = 0;
         }
 
-        // Recompute base: align to even at new scale's slot count.
         self.index_start = new_start;
         self.index_end = new_end;
         self.index_base = new_start & !1; // ensure even for future SWAR
 
-        // Scatter-write at new positions.
         let new_cap = self.bucket_capacity() as i32;
         for i in 0..new_len {
             let idx = new_start + i as i32;
@@ -916,67 +862,10 @@ impl<const N: usize> Histogram<N> {
         Some(!overflows)
     }
 
-    /// Scalar downscale by 1 that always widens (for CounterOverflow path).
-    ///
-    /// Same gather-scatter as `bucket_downscale_scalar` but unconditionally
-    /// widens the counter width by one step.
-    fn bucket_downscale_scalar_force_widen(&mut self) -> Option<i32> {
-        if self.is_effectively_empty() {
-            let new_width = self.bucket_width.wider()?;
-            self.bucket_width = new_width;
-            self.index_start >>= 1;
-            self.index_end >>= 1;
-            self.index_base >>= 1;
-            return Some(1);
-        }
-
-        let cap = self.bucket_capacity() as i32;
-
-        let new_start = self.index_start >> 1;
-        let new_end = self.index_end >> 1;
-        let new_len = (new_end - new_start + 1) as usize;
-
-        let mut sums = [0u64; 256];
-        debug_assert!(new_len <= sums.len());
-
-        for old_idx in self.index_start..=self.index_end {
-            let slot = (old_idx - self.index_base).rem_euclid(cap) as usize;
-            let val = self.bucket_get(slot);
-            let new_idx = old_idx >> 1;
-            let out = (new_idx - new_start) as usize;
-            sums[out] = sums[out].saturating_add(val);
-        }
-
-        // Always widen.
-        let new_width = self.bucket_width.wider()?;
-        self.bucket_width = new_width;
-
-        // Clear and scatter-write.
-        let data = self.bucket_data_mut();
-        for w in data.iter_mut() {
-            *w = 0;
-        }
-
-        self.index_start = new_start;
-        self.index_end = new_end;
-        self.index_base = new_start & !1;
-
-        let new_cap = self.bucket_capacity() as i32;
-        for i in 0..new_len {
-            let idx = new_start + i as i32;
-            let slot = (idx - self.index_base).rem_euclid(new_cap) as usize;
-            self.bucket_set(slot, sums[i]);
-        }
-
-        Some(1)
-    }
-
     /// Downscales at U64 width by collapsing 2^by adjacent buckets.
     ///
-    /// At U64 width, sums of u64 counters use saturating arithmetic and
-    /// cannot meaningfully overflow (the histogram would need to have
-    /// recorded more than 2^64 events). This is unconditional — no
-    /// dry-run pass, no clone, no rotation.
+    /// At U64 width, sums use saturating arithmetic and cannot
+    /// meaningfully overflow.
     fn bucket_downscale_u64(&mut self, by: i32) {
         debug_assert_eq!(self.bucket_width, BucketWidth::U64);
         debug_assert!(by >= 1);
@@ -990,26 +879,20 @@ impl<const N: usize> Histogram<N> {
 
         let cap = self.bucket_capacity() as i32;
 
-        // Walk the old index range, summing groups into their new positions.
-        // Because the new index space is smaller, we collect into a temp
-        // array of used slots, then scatter back.
         let new_start = self.index_start >> by;
         let new_end = self.index_end >> by;
         let new_len = (new_end - new_start + 1) as usize;
 
-        // Collect group sums.
-        let mut sums = [0u64; 256]; // more than enough for any realistic cap
+        let mut sums = [0u64; 256];
         debug_assert!(new_len <= sums.len());
 
         for old_idx in self.index_start..=self.index_end {
             let slot = (old_idx - self.index_base).rem_euclid(cap) as usize;
             let val = self.bucket_get(slot);
-            let new_idx = old_idx >> by;
-            let out = (new_idx - new_start) as usize;
+            let out = ((old_idx >> by) - new_start) as usize;
             sums[out] = sums[out].saturating_add(val);
         }
 
-        // Clear all bucket data, then write sums at new modular positions.
         let data = self.bucket_data_mut();
         for w in data.iter_mut() {
             *w = 0;
@@ -1017,10 +900,6 @@ impl<const N: usize> Histogram<N> {
 
         self.index_start = new_start;
         self.index_end = new_end;
-        self.index_base = new_start & !0; // keep base, just shift
-
-        // Recompute base alignment (at U64, 1 counter per word, so alignment is trivial).
-        self.index_base >>= 0; // no-op, base = new_start is fine at U64
         self.index_base = new_start;
 
         for i in 0..new_len {
@@ -1032,25 +911,8 @@ impl<const N: usize> Histogram<N> {
 }
 
 // ---------------------------------------------------------------------------
-// SWAR widen — per-word parallel pairwise summation
+// SWAR — per-word parallel pairwise summation
 // ---------------------------------------------------------------------------
-
-/// Widens all counters in `data` from `from` width to `to` width using
-/// SWAR (SIMD-Within-A-Register). Each step sums adjacent counter pairs
-/// into twice-as-wide counters. Multi-step widens chain the reductions.
-///
-/// Precondition: `to` must be reachable from `from` via the widen chain
-/// (B4→U8→U16→U32→U64). The caller must ensure `index_base` alignment
-/// so that counter pairs within each word correspond to adjacent bucket
-/// indices.
-#[inline]
-fn swar_widen(data: &mut [u64], from: BucketWidth, to: BucketWidth) {
-    let mut cur = from;
-    while cur != to {
-        swar_step(data, cur);
-        cur = cur.wider().unwrap();
-    }
-}
 
 /// Single SWAR step: sum adjacent counters at the current width into
 /// the next wider width, in place.
@@ -1226,6 +1088,33 @@ fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
         }
         BucketWidth::U64 => unreachable!("cannot narrow past U64"),
     }
+}
+
+/// Shifts all slot values up by one position, inserting a zero at slot 0.
+///
+/// This effectively decrements the logical `index_base` by one, turning
+/// an odd base into an even one so that a normal SWAR step pairs the
+/// correct indices.
+///
+/// Precondition: the top slot of the last word must be zero (the live
+/// range must not fill the entire capacity).
+#[inline]
+fn swar_shift_up_one(data: &mut [u64], width: BucketWidth) {
+    debug_assert_ne!(width, BucketWidth::U64);
+    let bits = width.bits();
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+    debug_assert!(
+        data[n - 1] >> (64 - bits) == 0,
+        "top slot must be zero before shift",
+    );
+    // Process high-to-low so each word reads from the (unmodified) word below.
+    for i in (1..n).rev() {
+        data[i] = (data[i] << bits) | (data[i - 1] >> (64 - bits));
+    }
+    data[0] <<= bits;
 }
 
 /// Compress 32 crumbs (each ≤ 1) into 32 bits in the low 32 bits.
@@ -1550,9 +1439,8 @@ impl<const N: usize> Histogram<N> {
                         self.do_downscale(change)?;
                     } else {
                         // Span fits but index is outside [base, base+cap)
-                        // at sub-U64. Force unconditional widen (not
-                        // speculative merge) so the width actually
-                        // increases toward U64 where wrapping is allowed.
+                        // at sub-U64. Force widen so width increases
+                        // toward U64 where wrapping is allowed.
                         if self.bucket_width != BucketWidth::U64 {
                             let by = self.bucket_widen(1).ok_or(Overflow)?;
                             let new_scale = self.mapping.scale() - by;
@@ -1572,47 +1460,77 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    /// Downscales by `change` scale-steps, trying to preserve the
-    /// current counter width when possible.
+    /// Downscales by `change` scale-steps using adaptive SWAR merge.
     ///
-    /// For each step (at sub-U64 widths):
-    /// 1. If `index_base` is even, try a same-width merge — SWAR pairwise
-    ///    sum + overflow check + narrow/compact. If no pair overflows,
-    ///    the width stays and capacity is preserved.
-    /// 2. If the merge overflows, or the base is odd (alignment exhausted),
-    ///    widen by one step instead.
+    /// Processes one merge step at a time. Each step does a SWAR
+    /// pairwise sum and checks for overflow:
     ///
-    /// At U64, further steps use `bucket_downscale_u64` (scatter-write).
-    fn do_downscale(&mut self, change: i32) -> Result<(), Overflow> {
+    /// - **No overflow**: narrows back to the original width (preserving
+    ///   bucket capacity) and continues to the next step.
+    /// - **Overflow**: accepts the wider format and continues at the new
+    ///   width. This simultaneously merges AND widens in one SWAR pass.
+    ///
+    /// If `index_base` is odd (possible after several no-overflow
+    /// merges), shifts data up by one slot to restore even alignment
+    /// before the SWAR step. Falls back to scalar gather-scatter for
+    /// the rare case where the top slot is occupied.
+    ///
+    /// At U64 width, remaining steps use `bucket_downscale_u64`
+    /// (scatter-write collapse).
+    pub fn do_downscale(&mut self, change: i32) -> Result<(), Overflow> {
         if change <= 0 {
+            return Ok(());
+        }
+
+        if self.is_effectively_empty() {
+            self.index_start >>= change;
+            self.index_end >>= change;
+            self.index_base >>= change;
+            let new_scale = self.mapping.scale() - change;
+            self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
             return Ok(());
         }
 
         let mut remaining = change;
 
+        // Phase 1: Adaptive SWAR merge at sub-U64 widths.
         while remaining > 0 && self.bucket_width != BucketWidth::U64 {
-            if self.index_base & 1 == 0 {
-                // Alignment OK — try same-width merge.
-                let stayed = self.bucket_try_merge_step();
-                // Either way, one downscale step was consumed.
-                let new_scale = self.mapping.scale() - 1;
-                self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
-                remaining -= 1;
-
-                if !stayed {
-                    // Overflowed — already widened. If we're now at U64
-                    // and have remaining steps, fall through to the U64
-                    // merge below.
+            // Ensure even base for correct SWAR pairing.
+            if self.index_base & 1 != 0 {
+                let width = self.bucket_width;
+                let bits = width.bits();
+                let n = self.bucket_word_count();
+                if n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0 {
+                    // Top slot occupied — can't shift. Scalar merge.
+                    self.scalar_merge_step(false).ok_or(Overflow)?;
+                    let new_scale = self.mapping.scale() - 1;
+                    self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
+                    remaining -= 1;
+                    continue;
                 }
-            } else {
-                // Alignment exhausted — use scalar gather-scatter.
-                self.bucket_downscale_scalar().ok_or(Overflow)?;
-                let new_scale = self.mapping.scale() - 1;
-                self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
-                remaining -= 1;
+                swar_shift_up_one(self.bucket_data_mut(), width);
             }
+
+            let width = self.bucket_width;
+            swar_step(self.bucket_data_mut(), width);
+
+            if swar_has_overflow(self.bucket_data(), width) {
+                // Overflow — accept the wider format.
+                self.bucket_width = width.wider().unwrap();
+            } else {
+                // No overflow — narrow back to preserve capacity.
+                swar_narrow_compact(self.bucket_data_mut(), width);
+            }
+
+            self.index_start >>= 1;
+            self.index_end >>= 1;
+            self.index_base >>= 1;
+            let new_scale = self.mapping.scale() - 1;
+            self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
+            remaining -= 1;
         }
 
+        // Phase 2: At U64, scatter-write for remaining steps.
         if remaining > 0 {
             debug_assert_eq!(self.bucket_width, BucketWidth::U64);
             self.bucket_downscale_u64(remaining);
@@ -2501,6 +2419,90 @@ mod tests {
             "S64 cap {} should be < S32 cap {}", cap_s64, cap_s32);
     }
 
+    #[test]
+    fn test_stat_widen_no_downscale_when_span_fits() {
+        // Histogram<8>: S32 uses 2 words for MMSC (6 bucket words),
+        //               S64 uses 4 words for MMSC (4 bucket words).
+        // Two values close enough that, after the widen chain caused by
+        // the large increment (B1→U32, 5 steps), the post-widen span
+        // fits in the smaller S64 capacity. stat_widen skips downscale.
+        let mut h: Histogram<8> = Histogram::with_scale(4);
+        h.update(1.5).unwrap();
+        h.update(50.0).unwrap();
+        assert_eq!(h.count(), 2);
+
+        // Push count to u32::MAX. Counter overflows widen B1→U32 (5 steps).
+        h.update_by_incr(1.5, u32::MAX as u64 - 2).unwrap();
+        assert_eq!(h.count(), u32::MAX as u64);
+        assert_eq!(h.stat_width(), StatWidth::S32);
+
+        // Pre-condition: span fits in S64 capacity — no downscale needed.
+        let span = h.bucket_len() as usize;
+        let s64_cap = h.bucket_width.capacity(8 - StatWidth::S64.words());
+        assert!(span <= s64_cap,
+            "pre-condition: span {} should fit in S64 cap {}", span, s64_cap);
+
+        let scale_before = h.scale();
+        let bucket_total_before: u64 = (0..h.bucket_len())
+            .map(|i| h.bucket_at(i)).sum();
+
+        // Trigger stat_widen: one more update overflows S32 count.
+        h.update(1.5).unwrap();
+
+        assert_eq!(h.stat_width(), StatWidth::S64);
+        assert_eq!(h.count(), u32::MAX as u64 + 1);
+        // Scale unchanged — stat_widen did not downscale internally.
+        assert_eq!(h.scale(), scale_before,
+            "scale unchanged: no downscale inside stat_widen");
+
+        let bucket_total_after: u64 = (0..h.bucket_len())
+            .map(|i| h.bucket_at(i)).sum();
+        assert_eq!(bucket_total_after, bucket_total_before + 1);
+    }
+
+    #[test]
+    fn test_stat_widen_forces_downscale_when_span_exceeds_s64_cap() {
+        // Histogram<8>: S32 uses 2 words for MMSC (6 bucket words),
+        //               S64 uses 4 words for MMSC (4 bucket words).
+        // Two values very far apart at scale 4: after the widen chain
+        // (B1→U32, 5 steps), the span exceeds S64's capacity, so
+        // stat_widen must downscale before switching layouts.
+        let mut h: Histogram<8> = Histogram::with_scale(4);
+        h.update(1.5).unwrap();
+        h.update(200_000.0).unwrap();
+        assert_eq!(h.count(), 2);
+
+        // Push count to u32::MAX. Counter overflows widen B1→U32 (5 steps).
+        h.update_by_incr(1.5, u32::MAX as u64 - 2).unwrap();
+        assert_eq!(h.count(), u32::MAX as u64);
+        assert_eq!(h.stat_width(), StatWidth::S32);
+
+        // Pre-condition: span exceeds S64 capacity — downscale required.
+        let span = h.bucket_len() as usize;
+        let s64_cap = h.bucket_width.capacity(8 - StatWidth::S64.words());
+        assert!(span > s64_cap,
+            "pre-condition: span {} must exceed S64 cap {} to trigger downscale",
+            span, s64_cap);
+
+        let scale_before = h.scale();
+        let bucket_total_before: u64 = (0..h.bucket_len())
+            .map(|i| h.bucket_at(i)).sum();
+
+        // Trigger stat_widen: one more update overflows S32 count.
+        h.update(1.5).unwrap();
+
+        assert_eq!(h.stat_width(), StatWidth::S64);
+        assert_eq!(h.count(), u32::MAX as u64 + 1);
+        // Scale decreased — stat_widen had to downscale internally.
+        assert!(h.scale() < scale_before,
+            "scale decreased: stat_widen downscaled (was {}, now {})",
+            scale_before, h.scale());
+
+        let bucket_total_after: u64 = (0..h.bucket_len())
+            .map(|i| h.bucket_at(i)).sum();
+        assert_eq!(bucket_total_after, bucket_total_before + 1);
+    }
+
     // -----------------------------------------------------------------------
     // Cross-size merge tests
     // -----------------------------------------------------------------------
@@ -3003,11 +3005,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // bucket_try_merge_step integration tests
+    // Adaptive merge (do_downscale) integration tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_bucket_try_merge_step_stays_b4() {
+    fn test_do_downscale_merge_stays_b4() {
         // Insert small values at adjacent indices so pair sums ≤ 15.
         let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
         // At scale 0, map_to_index(2.0) = 0, map_to_index(4.0) = 1.
@@ -3016,24 +3018,24 @@ mod tests {
         h.update_by_incr(4.0, 7).unwrap();  // index 1, count 7
         assert_eq!(h.bucket_width(), BucketWidth::B4);
 
-        // Speculative merge: 5+7=12 ≤ 15, should stay at B4.
-        let stayed = h.bucket_try_merge_step();
-        assert!(stayed, "merge should succeed (no overflow)");
-        assert_eq!(h.bucket_width(), BucketWidth::B4);
+        // Merge: 5+7=12 ≤ 15, should stay at B4.
+        h.do_downscale(1).unwrap();
+        assert_eq!(h.bucket_width(), BucketWidth::B4,
+            "width should be preserved when pair sums fit");
     }
 
     #[test]
-    fn test_bucket_try_merge_step_widens_b4() {
+    fn test_do_downscale_merge_widens_b4() {
         // Insert values that sum to > 15 at B4.
         let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
         h.update_by_incr(2.0, 10).unwrap();  // index 0, count 10
         h.update_by_incr(4.0, 10).unwrap();  // index 1, count 10
         assert_eq!(h.bucket_width(), BucketWidth::B4);
 
-        // Speculative merge: 10+10=20 > 15, should widen to U8.
-        let stayed = h.bucket_try_merge_step();
-        assert!(!stayed, "merge should fail (overflow)");
-        assert_eq!(h.bucket_width(), BucketWidth::U8);
+        // Merge: 10+10=20 > 15, should widen to U8.
+        h.do_downscale(1).unwrap();
+        assert_eq!(h.bucket_width(), BucketWidth::U8,
+            "width should widen when pair sums overflow");
     }
 
     #[test]
@@ -3244,30 +3246,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // bucket_downscale_scalar direct tests
+    // Adaptive merge (scalar fallback) tests
     // -----------------------------------------------------------------------
-
-    /// Helper: builds a histogram with specific values at specific indices.
-    fn histogram_with_values<const N: usize>(
-        scale: i32,
-        entries: &[(f64, u64)],
-    ) -> Histogram<N> {
-        let mut h = Histogram::with_scale(scale);
-        for &(val, count) in entries {
-            h.update_by_incr(val, count).unwrap();
-        }
-        h
-    }
-
-    /// Helper: extract bucket counts as a map from index to count.
-    fn bucket_index_map<const N: usize>(h: &Histogram<N>) -> Vec<(i32, u64)> {
-        let b = h.positive();
-        let offset = b.offset();
-        (0..b.len())
-            .map(|k| (offset + k as i32, b.at(k)))
-            .filter(|&(_, c)| c > 0)
-            .collect()
-    }
 
     #[test]
     fn test_bucket_downscale_scalar_preserves_total_no_overflow() {
@@ -3353,22 +3333,23 @@ mod tests {
     }
 
     #[test]
-    fn test_do_downscale_scalar_path_re_aligns_base() {
-        // After scalar downscale, index_base should be even (re-aligned).
+    fn test_do_downscale_odd_base_preserves_total() {
+        // Downscale through odd-base steps using SWAR-shift.
         let mut h: Histogram<16> = Histogram::with_scale(0);
         for i in 0..4 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
+        let total_before: u64 = h.positive().iter().sum();
 
-        // Downscale enough that we hit the scalar path.
-        for _ in 0..5 {
+        // At B1, base = -64. After 6 steps: base = -64 >> 6 = -1 (odd).
+        // Step 7 uses the odd SWAR-shift merge.
+        for _ in 0..7 {
             h.do_downscale(1).unwrap();
         }
 
-        // After scalar re-alignment, base should be even.
-        assert_eq!(h.index_base & 1, 0,
-            "base should be re-aligned to even after scalar path, got {}",
-            h.index_base);
+        let total_after: u64 = h.positive().iter().sum();
+        assert_eq!(total_before, total_after,
+            "total changed after 7-step downscale through odd base");
     }
 
     // -----------------------------------------------------------------------
@@ -3654,5 +3635,43 @@ mod tests {
             pack_u8x8([0, 0, 0, 0, 0, 0, 0, 16]),
         ];
         assert!(swar_has_overflow(&data, BucketWidth::B4));
+    }
+
+    // -----------------------------------------------------------------------
+    // Reproducer: bucket total integrity through adaptive downscale
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_adaptive_downscale_sequential_inserts_small_pool() {
+        // Reproducer: insert 1.0..=8.0 into Histogram<8>.
+        // At B1 with 6 bucket words (384 slots), the index span forces
+        // repeated downscaling. Bucket totals must stay consistent.
+        let mut h: Histogram<8> = Histogram::new();
+        for i in 1..=8 {
+            let v = i as f64;
+            h.update(v).unwrap();
+            let b = h.positive();
+            let total: u64 = (0..b.len()).map(|k| b.at(k)).sum();
+            assert_eq!(total, h.count(),
+                "After inserting {v}: bucket total ({total}) != count ({})\n  \
+                 scale={} width={:?} offset={} len={} cap={}",
+                h.count(), h.scale(), b.width(), b.offset(), b.len(), b.capacity());
+        }
+    }
+
+    #[test]
+    fn test_adaptive_downscale_wide_span_small_pool() {
+        // Wide value range in a small pool — forces multi-step downscale.
+        let mut h: Histogram<8> = Histogram::new();
+        let values = [0.001, 1.0, 1000.0, 0.5, 50.0, 0.01, 100.0, 10.0];
+        for (vi, &v) in values.iter().enumerate() {
+            h.update(v).unwrap();
+            let b = h.positive();
+            let total: u64 = (0..b.len()).map(|k| b.at(k)).sum();
+            assert_eq!(total, h.count(),
+                "After values[{vi}]={v}: bucket total ({total}) != count ({})\n  \
+                 scale={} width={:?}",
+                h.count(), h.scale(), b.width());
+        }
     }
 }

@@ -5,7 +5,7 @@
 //!
 //! The [`Precision`] trait bundles a floating-point type ([`HistFloat`]) and an
 //! unsigned integer type ([`HistCount`]) used for the histogram's min/max/sum
-//! and count/zero_count fields respectively.
+//! and count fields respectively.
 //!
 //! Two built-in precision tiers are provided:
 //!
@@ -14,7 +14,7 @@
 //! | [`P32`] | `f32` | `u32` | 28 bytes |
 //! | [`P64`] | `f64` | `u64` | 56 bytes |
 //!
-//! \* Overhead = 3×Float + 2×Count + 2×i32 (sum/min/max + count/zero_count + scale fields).
+//! \* Overhead = 3×Float + 1×Count + 2×i32 (sum/min/max + count + scale fields).
 
 use core::fmt::Debug;
 use core::ops::{Add, AddAssign};
@@ -41,7 +41,7 @@ pub trait HistFloat:
     fn max_of(self, other: Self) -> Self;
 }
 
-/// Unsigned integer type used for histogram count and zero_count.
+/// Unsigned integer type used for histogram count.
 pub trait HistCount: Copy + Clone + Debug + PartialEq + Eq + PartialOrd + Ord {
     /// Returns zero.
     fn zero() -> Self;
@@ -61,7 +61,7 @@ pub trait HistCount: Copy + Clone + Debug + PartialEq + Eq + PartialOrd + Ord {
 pub trait Precision {
     /// Floating-point type for sum/min/max.
     type Float: HistFloat;
-    /// Unsigned integer type for count/zero_count.
+    /// Unsigned integer type for count.
     type Count: HistCount;
 }
 

@@ -57,3 +57,7 @@ harness = false
 [[bench]]
 name = "sub_byte"
 harness = false
+
+[[bench]]
+name = "downscale"
+harness = false
