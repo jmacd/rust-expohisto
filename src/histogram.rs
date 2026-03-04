@@ -783,8 +783,10 @@ impl<const N: usize> Histogram<N> {
                 return None; // would exceed U64
             }
 
+            let shifted = self.index_base & 1 != 0;
+
             // Ensure even base for SWAR.
-            if self.index_base & 1 != 0 {
+            if shifted {
                 let bits = width.bits();
                 let n = self.bucket_word_count();
                 if n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0 {
@@ -801,6 +803,20 @@ impl<const N: usize> Histogram<N> {
             self.index_start >>= 1;
             self.index_end >>= 1;
             self.index_base >>= 1;
+
+            // swar_shift_up_one pushes the top slot off the array
+            // (the assert guarantees it was zero). When the widened
+            // capacity exactly equals the new logical length, the
+            // off-by-one from right-shifting an odd base causes
+            // len > cap. Clamp index_end to keep the range valid.
+            if shifted {
+                let cap = self.bucket_capacity() as i32;
+                let max_end = self.index_start + cap - 1;
+                if self.index_end > max_end {
+                    self.index_end = max_end;
+                }
+            }
+
             done += 1;
         }
 
@@ -1186,6 +1202,22 @@ fn narrow_u32_to_u16(w: u64) -> u64 {
 // ---------------------------------------------------------------------------
 
 impl<const N: usize> Histogram<N> {
+    /// Widens to S64 if any value would lose its class (nonzero→zero
+    /// or finite→infinite) when stored as f32. Must be called BEFORE
+    /// any bucket operations to avoid corrupting bucket layout.
+    fn ensure_s64_for_values(&mut self, values: &[f64]) -> Result<(), Overflow> {
+        if self.stat_width == StatWidth::S32 {
+            for &v in values {
+                let f = v as f32;
+                if (v != 0.0 && f == 0.0) || (v.is_finite() && f.is_infinite()) {
+                    self.stat_widen()?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Widens MMSC fields from S32 to S64.
     ///
     /// The bucket area shrinks from N-2 to N-4 words, which changes
@@ -1405,6 +1437,10 @@ impl<const N: usize> Histogram<N> {
             }
         };
 
+        // Ensure S64 before any bucket ops so stat_widen doesn't
+        // corrupt an already-modified bucket layout.
+        self.ensure_s64_for_values(&[value])?;
+
         if value != 0.0 {
             self.update_buckets(value, incr)?;
             self.add_sum(value * incr as f64);
@@ -1496,7 +1532,8 @@ impl<const N: usize> Histogram<N> {
         // Phase 1: Adaptive SWAR merge at sub-U64 widths.
         while remaining > 0 && self.bucket_width != BucketWidth::U64 {
             // Ensure even base for correct SWAR pairing.
-            if self.index_base & 1 != 0 {
+            let shifted = self.index_base & 1 != 0;
+            if shifted {
                 let width = self.bucket_width;
                 let bits = width.bits();
                 let n = self.bucket_word_count();
@@ -1525,6 +1562,17 @@ impl<const N: usize> Histogram<N> {
             self.index_start >>= 1;
             self.index_end >>= 1;
             self.index_base >>= 1;
+
+            // Same clamp as bucket_widen: after shift_up_one + >>= 1,
+            // the odd-base shift can cause len > cap by 1.
+            if shifted {
+                let cap = self.bucket_capacity() as i32;
+                let max_end = self.index_start + cap - 1;
+                if self.index_end > max_end {
+                    self.index_end = max_end;
+                }
+            }
+
             let new_scale = self.mapping.scale() - 1;
             self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
             remaining -= 1;
@@ -1628,12 +1676,14 @@ impl<const N: usize> Histogram<N> {
 
         let new_count = self.count().checked_add(other.count()).ok_or(Overflow)?;
 
-        // Stat-widen if needed.
+        // Stat-widen if needed (count overflow or value class change).
         if self.stat_width == StatWidth::S32 {
             if new_count > u32::MAX as u64 {
                 self.stat_widen()?;
             }
         }
+        let new_sum = self.sum() + other.sum();
+        self.ensure_s64_for_values(&[other.min(), other.max(), new_sum])?;
 
         if !other.buckets_empty() {
             if self.buckets_empty() {
@@ -1665,7 +1715,7 @@ impl<const N: usize> Histogram<N> {
                 self.set_max(other.max());
             }
         }
-        self.set_sum(self.sum() + other.sum());
+        self.set_sum(new_sum);
         self.set_count(new_count);
         Ok(())
     }
@@ -1688,11 +1738,14 @@ impl<const N: usize> Histogram<N> {
 
         let new_count = self.count().checked_add(other_count).ok_or(Overflow)?;
 
+        // Stat-widen if needed (count overflow or value class change).
         if self.stat_width == StatWidth::S32 {
             if new_count > u32::MAX as u64 {
                 self.stat_widen()?;
             }
         }
+        let new_sum = self.sum() + other_sum;
+        self.ensure_s64_for_values(&[other_min, other_max, new_sum])?;
 
         if other_len > 0 {
             let other_end = other_offset + other_len as i32 - 1;
@@ -1737,8 +1790,14 @@ impl<const N: usize> Histogram<N> {
                             self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
                         }
                         IncrResult::NeedsDownscale(_) => {
-                            debug_assert!(false, "incorrect merge scale in merge_from_raw");
-                            return Err(Overflow);
+                            // Handle like merge_buckets_from: downscale or widen.
+                            if self.bucket_width != BucketWidth::U64 {
+                                let by = self.bucket_widen(1).ok_or(Overflow)?;
+                                let new_scale = self.mapping.scale() - by;
+                                self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
+                            } else {
+                                self.do_downscale(1)?;
+                            }
                         }
                     }
                 }
@@ -1757,7 +1816,7 @@ impl<const N: usize> Histogram<N> {
                 self.set_max(other_max);
             }
         }
-        self.set_sum(self.sum() + other_sum);
+        self.set_sum(new_sum);
         self.set_count(new_count);
         Ok(())
     }
@@ -3672,6 +3731,191 @@ mod tests {
                 "After values[{vi}]={v}: bucket total ({total}) != count ({})\n  \
                  scale={} width={:?}",
                 h.count(), h.scale(), b.width());
+        }
+    }
+}
+
+#[cfg(test)]
+mod regression_stat_widen {
+    use super::*;
+
+    /// Helper: count total across all positive buckets.
+    fn bucket_total<const N: usize>(h: &Histogram<N>) -> u64 {
+        let b = h.positive();
+        (0..b.len()).map(|i| b.at(i)).sum()
+    }
+
+    /// Helper: verify that each value maps to a bucket with a non-zero count.
+    fn verify_bucket_distribution<const N: usize>(h: &Histogram<N>, values: &[f64], label: &str) {
+        let b = h.positive();
+        let scale = h.scale();
+        let mapping = Mapping::new(scale).unwrap();
+        let width = b.width();
+        let offset = b.offset();
+
+        for (vi, &v) in values.iter().enumerate() {
+            if v == 0.0 {
+                continue;
+            }
+            let idx = mapping.map_to_index(v);
+            let bucket_idx = match width {
+                BucketWidth::U64 => idx - offset,
+                _ => {
+                    let shift = width.bits().trailing_zeros();
+                    (idx >> shift) - (offset >> shift)
+                }
+            };
+            if bucket_idx < 0 || bucket_idx as u32 >= b.len() {
+                panic!(
+                    "{}: value[{}]={} idx={} out of range (offset={} len={} scale={} width={:?})",
+                    label, vi, v, idx, offset, b.len(), scale, width
+                );
+            }
+            let count = b.at(bucket_idx as u32);
+            if count == 0 {
+                panic!(
+                    "{}: value[{}]={} at bucket_idx={} (idx={}) has count 0",
+                    label, vi, v, bucket_idx, idx
+                );
+            }
+            // Check for doubling: each value was inserted with incr=1,
+            // so the bucket should have exactly 1 (or more if values collide).
+            let expected: u64 = values
+                .iter()
+                .filter(|&&vv| {
+                    if vv == 0.0 {
+                        return false;
+                    }
+                    let vidx = mapping.map_to_index(vv);
+                    match width {
+                        BucketWidth::U64 => vidx - offset == bucket_idx,
+                        _ => {
+                            let shift = width.bits().trailing_zeros();
+                            (vidx >> shift) - (offset >> shift) == bucket_idx
+                        }
+                    }
+                })
+                .count() as u64;
+            assert_eq!(
+                count, expected,
+                "{}: bucket[{}] (idx {}): hist={} expected={} (scale={}, width={:?})",
+                label,
+                bucket_idx,
+                idx,
+                count,
+                expected,
+                scale,
+                width,
+            );
+        }
+    }
+
+    #[test]
+    fn test_stat_widen_during_insert_preserves_buckets() {
+        let mut h = Histogram::<8>::new();
+        let v1 = 2.125001f64;
+        let v2 = 1.283243e-301_f64;
+        h.update_by_incr(v1, 1).unwrap();
+        h.update_by_incr(v2, 1).unwrap();
+        assert_eq!(h.count(), 2);
+        assert_eq!(bucket_total(&h), 2, "total after inserts");
+        verify_bucket_distribution(&h, &[v1, v2], "insert");
+    }
+
+    #[test]
+    fn test_stat_widen_preserves_buckets_n16() {
+        let mut h = Histogram::<16>::new();
+        let v1 = 2.125001f64;
+        let v2 = 1.283243e-301_f64;
+        h.update_by_incr(v1, 1).unwrap();
+        h.update_by_incr(v2, 1).unwrap();
+        assert_eq!(h.count(), 2);
+        assert_eq!(bucket_total(&h), 2, "N=16 total");
+    }
+
+    #[test]
+    fn test_f32_overflow_triggers_s64() {
+        let mut h = Histogram::<8>::new();
+        let big = 1.866278e+106_f64;
+        assert!((big as f32).is_infinite());
+        h.update_by_incr(big, 1).unwrap();
+        assert_eq!(h.stat_width, StatWidth::S64);
+        assert_eq!(h.count(), 1);
+        assert_eq!(bucket_total(&h), 1);
+    }
+
+    #[test]
+    fn test_f32_underflow_triggers_s64() {
+        let mut h = Histogram::<8>::new();
+        let tiny = 1.283243e-301_f64;
+        assert_eq!(tiny as f32, 0.0);
+        assert_ne!(tiny, 0.0);
+        h.update_by_incr(tiny, 1).unwrap();
+        assert_eq!(h.stat_width, StatWidth::S64);
+        assert_eq!(h.count(), 1);
+    }
+
+    #[test]
+    fn test_merge_needs_downscale_in_raw() {
+        let mut h1 = Histogram::<8>::new();
+        h1.update(1.0).unwrap();
+
+        let mut h2 = Histogram::<8>::new();
+        h2.update(1e30).unwrap();
+        h2.update(1e-30).unwrap();
+
+        let b2 = h2.positive();
+        h1.merge_from_raw(
+            h2.count(),
+            h2.sum(),
+            h2.min(),
+            h2.max(),
+            h2.scale(),
+            b2.offset(),
+            b2.len(),
+            &|i| b2.at(i),
+        )
+        .unwrap();
+        assert_eq!(h1.count(), 3);
+        assert_eq!(bucket_total(&h1), 3);
+    }
+
+    /// Regression: merge triggers ensure_s64 on the target histogram
+    /// when the source contains values exceeding f32 range.
+    #[test]
+    fn test_merge_triggers_stat_widen_on_target() {
+        let v1 = f64::from_le_bytes([70, 70, 70, 70, 70, 70, 50, 70]);
+        let v2 = f64::from_le_bytes([70, 70, 70, 70, 70, 70, 177, 70]);
+        let v3 = f64::from_le_bytes([70, 70, 70, 70, 70, 70, 0, 86]);
+
+        // check_merge_same::<8>
+        {
+            let mut h1 = Histogram::<8>::new();
+            h1.update_by_incr(v1, 1).unwrap();
+            h1.update_by_incr(v2, 1).unwrap();
+
+            let mut h2 = Histogram::<8>::new();
+            h2.update_by_incr(v3, 1).unwrap();
+
+            h1.merge_from(&h2).unwrap();
+            assert_eq!(h1.count(), 3);
+            assert_eq!(bucket_total(&h1), 3, "merge_same N=8");
+            verify_bucket_distribution(&h1, &[v1, v2, v3], "merge_same N=8");
+        }
+
+        // check_merge_same::<16>
+        {
+            let mut h1 = Histogram::<16>::new();
+            h1.update_by_incr(v1, 1).unwrap();
+            h1.update_by_incr(v2, 1).unwrap();
+
+            let mut h2 = Histogram::<16>::new();
+            h2.update_by_incr(v3, 1).unwrap();
+
+            h1.merge_from(&h2).unwrap();
+            assert_eq!(h1.count(), 3);
+            assert_eq!(bucket_total(&h1), 3, "merge_same N=16");
+            verify_bucket_distribution(&h1, &[v1, v2, v3], "merge_same N=16");
         }
     }
 }
