@@ -791,8 +791,7 @@ impl<const N: usize> Histogram<N> {
                 let n = self.bucket_word_count();
                 if n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0 {
                     // Top slot occupied — scalar force-widen.
-                    self.scalar_merge_step(true)?;
-                    done += 1;
+                    done += self.scalar_merge_step(true)?;
                     continue;
                 }
                 swar_shift_up_one(self.bucket_data_mut(), width);
@@ -823,59 +822,99 @@ impl<const N: usize> Histogram<N> {
         Some(done)
     }
 
-    /// Scalar gather-scatter merge by 1 step. Used when SWAR cannot
-    /// operate (odd base with top slot occupied).
+    /// Scalar gather-scatter merge. Used when SWAR cannot operate
+    /// (odd base with top slot occupied).
     ///
     /// If `force_widen` is true, always widens by one level (for the
     /// `CounterOverflow` path). Otherwise, only widens if any pair sum
     /// exceeds the current width's maximum.
     ///
-    /// Returns `true` if the width was preserved, `false` if it widened.
-    fn scalar_merge_step(&mut self, force_widen: bool) -> Option<bool> {
+    /// When the merged range exceeds the new capacity (which happens
+    /// when base is odd and the range is fully packed), additional
+    /// merge levels are applied until the range fits.
+    ///
+    /// Returns the number of scale steps performed (>= 1).
+    fn scalar_merge_step(&mut self, force_widen: bool) -> Option<i32> {
         let cap = self.bucket_capacity() as i32;
         let width = self.bucket_width;
         let max_val = width.counter_max();
+        let bucket_words = self.bucket_word_count();
 
-        let new_start = self.index_start >> 1;
-        let new_end = self.index_end >> 1;
-        let new_len = (new_end - new_start + 1) as usize;
+        let mut cur_start = self.index_start >> 1;
+        let mut cur_end = self.index_end >> 1;
+        let mut cur_len = (cur_end - cur_start + 1) as usize;
 
-        let mut sums = [0u64; 256];
-        debug_assert!(new_len <= sums.len());
-        let mut overflows = force_widen;
+        let mut sums = vec![0u64; cur_len];
+        let mut needs_widen = force_widen;
 
+        // Phase 1: gather from hardware layout, merging adjacent pairs.
         for old_idx in self.index_start..=self.index_end {
             let slot = (old_idx - self.index_base).rem_euclid(cap) as usize;
             let val = self.bucket_get(slot);
-            let out = ((old_idx >> 1) - new_start) as usize;
+            let out = ((old_idx >> 1) - cur_start) as usize;
             sums[out] = sums[out].saturating_add(val);
             if sums[out] > max_val {
-                overflows = true;
+                needs_widen = true;
             }
         }
 
-        if overflows {
-            let new_width = width.wider()?;
-            self.bucket_width = new_width;
+        let mut target_width = if needs_widen {
+            width.wider()?
+        } else {
+            width
+        };
+
+        let mut scale_steps = 1i32;
+
+        // Phase 2: if the merged range doesn't fit in the new capacity,
+        // keep merging pairs and widening until it does.
+        loop {
+            let target_cap = target_width.capacity(bucket_words);
+            if cur_len <= target_cap {
+                break;
+            }
+            // Re-pair the sums array for another merge level.
+            let prev_start = cur_start;
+            let prev_len = cur_len;
+            cur_start >>= 1;
+            cur_end >>= 1;
+            cur_len = (cur_end - cur_start + 1) as usize;
+
+            let mut next = vec![0u64; cur_len];
+            for i in 0..prev_len {
+                let old_idx = prev_start + i as i32;
+                let out = ((old_idx >> 1) - cur_start) as usize;
+                next[out] = next[out].saturating_add(sums[i]);
+            }
+            sums = next;
+
+            if target_width != BucketWidth::U64 {
+                target_width = target_width.wider()?;
+            }
+            scale_steps += 1;
         }
+
+        // Phase 3: commit — clear data, write back.
+        self.bucket_width = target_width;
 
         let data = self.bucket_data_mut();
         for w in data.iter_mut() {
             *w = 0;
         }
 
-        self.index_start = new_start;
-        self.index_end = new_end;
-        self.index_base = new_start & !1; // ensure even for future SWAR
+        self.index_start = cur_start;
+        self.index_end = cur_end;
+        let spw = target_width.slots_per_word() as i32;
+        self.index_base = cur_start & !(spw - 1);
 
         let new_cap = self.bucket_capacity() as i32;
-        for i in 0..new_len {
-            let idx = new_start + i as i32;
+        for i in 0..cur_len {
+            let idx = cur_start + i as i32;
             let slot = (idx - self.index_base).rem_euclid(new_cap) as usize;
             self.bucket_set(slot, sums[i]);
         }
 
-        Some(!overflows)
+        Some(scale_steps)
     }
 
     /// Downscales at U64 width by collapsing 2^by adjacent buckets.
@@ -1241,29 +1280,30 @@ impl<const N: usize> Histogram<N> {
         let new_bucket_words = N - new_start;
 
         // Ensure used buckets fit in the smaller area by downscaling.
-        // After do_downscale, the width may have changed (widen steps),
-        // so we loop until the range fits at the post-downscale width.
+        // Two conditions must hold:
+        //  1. len <= post_cap  (prevents aliasing for U64 wrapping case
+        //     where index_start < index_base)
+        //  2. range_from_base <= post_cap  (prevents sub-U64 overflow
+        //     where all indices must be in [base, base+cap))
         while !self.is_effectively_empty() {
             let post_cap = self.bucket_width.capacity(new_bucket_words);
-            let used = (self.index_end - self.index_start + 1) as usize;
-            if used <= post_cap {
+            let len = (self.index_end - self.index_start + 1) as usize;
+            let range_from_base = (self.index_end - self.index_base + 1) as usize;
+            if len <= post_cap && range_from_base <= post_cap {
                 break;
             }
-            // One widen step halves the index range.
             self.do_downscale(1)?;
         }
 
         // Read existing bucket data into a temp buffer.
         let old_cap = self.bucket_capacity() as i32;
-        let mut tmp = [(0i32, 0u64); 256];
-        let mut n_tmp = 0usize;
+        let mut tmp = Vec::new();
         if !self.is_effectively_empty() {
             for idx in self.index_start..=self.index_end {
                 let slot = (idx - self.index_base).rem_euclid(old_cap) as usize;
                 let val = self.bucket_get(slot);
                 if val > 0 {
-                    tmp[n_tmp] = (idx, val);
-                    n_tmp += 1;
+                    tmp.push((idx, val));
                 }
             }
         }
@@ -1280,8 +1320,7 @@ impl<const N: usize> Histogram<N> {
 
         // Scatter-write buckets at new modular positions.
         let new_cap = self.bucket_capacity() as i32;
-        for i in 0..n_tmp {
-            let (idx, val) = tmp[i];
+        for &(idx, val) in &tmp {
             let slot = (idx - self.index_base).rem_euclid(new_cap) as usize;
             self.bucket_set(slot, val);
         }
@@ -1539,10 +1578,10 @@ impl<const N: usize> Histogram<N> {
                 let n = self.bucket_word_count();
                 if n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0 {
                     // Top slot occupied — can't shift. Scalar merge.
-                    self.scalar_merge_step(false).ok_or(Overflow)?;
-                    let new_scale = self.mapping.scale() - 1;
+                    let steps = self.scalar_merge_step(false).ok_or(Overflow)?;
+                    let new_scale = self.mapping.scale() - steps;
                     self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
-                    remaining -= 1;
+                    remaining -= steps;
                     continue;
                 }
                 swar_shift_up_one(self.bucket_data_mut(), width);
@@ -3917,5 +3956,109 @@ mod regression_stat_widen {
             assert_eq!(bucket_total(&h1), 3, "merge_same N=16");
             verify_bucket_distribution(&h1, &[v1, v2, v3], "merge_same N=16");
         }
+    }
+
+    /// Regression: large weighted inserts of subnormal + normal value
+    /// trigger bucket_widen during downscale, corrupting bucket totals
+    /// when scalar_merge_step produced len > cap.
+    #[test]
+    fn test_weighted_subnormal_merge_bucket_total() {
+        let v1 = f64::from_le_bytes([32, 0, 66, 0, 0, 98, 65, 3]); // ~5.44e-293, subnormal as f32
+        let v2 = f64::from_le_bytes([0, 32, 0, 66, 0, 98, 65, 64]); // ~34.77
+
+        let left_ops: Vec<(f64, u64)> = vec![
+            (v1, 3), (v2, 1), (v1, 12), (v2, 4), (v1, 192), (v2, 64),
+        ];
+        let right_ops: Vec<(f64, u64)> = vec![
+            (v1, 3072), (v2, 1024),
+        ];
+
+        fn check<const N: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
+            let mut h1 = Histogram::<N>::new();
+            for &(v, incr) in left {
+                h1.update_by_incr(v, incr).unwrap();
+            }
+            let mut h2 = Histogram::<N>::new();
+            for &(v, incr) in right {
+                h2.update_by_incr(v, incr).unwrap();
+            }
+            h1.merge_from(&h2).unwrap();
+            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
+            assert_eq!(h1.count(), expected, "{label}: count mismatch");
+            let bt = bucket_total(&h1);
+            assert!(bt <= h1.count(), "{label}: bucket total ({bt}) exceeds count ({})", h1.count());
+        }
+
+        fn check_cross<const N: usize, const M: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
+            let mut h1 = Histogram::<N>::new();
+            for &(v, incr) in left {
+                h1.update_by_incr(v, incr).unwrap();
+            }
+            let mut h2 = Histogram::<M>::new();
+            for &(v, incr) in right {
+                h2.update_by_incr(v, incr).unwrap();
+            }
+            h1.merge_from_other(&h2).unwrap();
+            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
+            assert_eq!(h1.count(), expected, "{label}: count mismatch");
+            let bt = bucket_total(&h1);
+            assert!(bt <= h1.count(), "{label}: bucket total ({bt}) exceeds count ({})", h1.count());
+        }
+
+        check::<8>(&left_ops, &right_ops, "same N=8");
+        check::<16>(&left_ops, &right_ops, "same N=16");
+        check_cross::<8, 16>(&left_ops, &right_ops, "cross 8←16");
+        check_cross::<16, 8>(&left_ops, &right_ops, "cross 16←8");
+    }
+
+    /// Regression: three values with a subnormal, split across merge,
+    /// with echo-amplified increments.
+    #[test]
+    fn test_three_vals_with_subnormal_echo() {
+        let v1 = f64::from_le_bytes([22, 22, 0, 237, 237, 59, 59, 59]); // ~2.25e-23
+        let v2 = f64::from_le_bytes([59, 59, 1, 0, 59, 31, 0, 0]);     // ~1.70e-310, subnormal as f32
+        let v3 = f64::from_le_bytes([0, 59, 237, 237, 64, 0, 122, 64]); // ~416.0
+
+        let left: Vec<(f64, u64)> = vec![(v1, 300), (v2, 5)];
+        let right: Vec<(f64, u64)> = vec![
+            (v3, 5), (v1, 1200), (v2, 20), (v3, 20), (v1, 19200), (v2, 320), (v3, 320),
+        ];
+
+        fn check<const N: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
+            let mut h1 = Histogram::<N>::new();
+            for &(v, incr) in left {
+                h1.update_by_incr(v, incr).unwrap();
+            }
+            let mut h2 = Histogram::<N>::new();
+            for &(v, incr) in right {
+                h2.update_by_incr(v, incr).unwrap();
+            }
+            h1.merge_from(&h2).unwrap();
+            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
+            assert_eq!(h1.count(), expected, "{label}: count");
+            let bt = bucket_total(&h1);
+            assert!(bt <= h1.count(), "{label}: bt={bt} > count={}", h1.count());
+        }
+
+        fn check_cross<const N: usize, const M: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
+            let mut h1 = Histogram::<N>::new();
+            for &(v, incr) in left {
+                h1.update_by_incr(v, incr).unwrap();
+            }
+            let mut h2 = Histogram::<M>::new();
+            for &(v, incr) in right {
+                h2.update_by_incr(v, incr).unwrap();
+            }
+            h1.merge_from_other(&h2).unwrap();
+            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
+            assert_eq!(h1.count(), expected, "{label}: count");
+            let bt = bucket_total(&h1);
+            assert!(bt <= h1.count(), "{label}: bt={bt} > count={}", h1.count());
+        }
+
+        check::<8>(&left, &right, "same 8");
+        check::<16>(&left, &right, "same 16");
+        check_cross::<8, 16>(&left, &right, "cross 8←16");
+        check_cross::<16, 8>(&left, &right, "cross 16←8");
     }
 }
