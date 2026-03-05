@@ -36,12 +36,12 @@
 //! # Example
 //!
 //! ```
-//! use rust_expohisto::Histogram;
+//! use rust_expohisto::{Histogram, P32};
 //!
 //! // Create a histogram with 16 u64 words (128 bytes) of data pool.
-//! // MMSC fields start at 4-byte width (2 words), leaving 14 words
+//! // P32 uses 2 words for MMSC fields (f32/u32), leaving 14 words
 //! // for bucket data: 896 1-bit buckets, widening to 14 u64 counters.
-//! let mut hist: Histogram<16> = Histogram::new();
+//! let mut hist: Histogram<16, P32> = Histogram::new();
 //!
 //! // Record observations
 //! hist.update(0.5).unwrap();
@@ -67,19 +67,17 @@
 //!
 //! # Size Considerations
 //!
-//! `Histogram<N>` has a single const generic: the number of `u64` words
-//! in the data pool. The pool holds auto-widening MMSC statistics
-//! (min/max/sum/count) at the front and bucket counters after them.
-//! MMSC starts at 4-byte / 2-word (S32) and auto-widens to 8-byte / 4-word
-//! (S64) when count exceeds `u32::MAX`.
+//! `Histogram<N, P>` uses const generics for pool size (`N`) and the
+//! precision tier `P` controls MMSC field width.
+//! [`P32`] uses 2 words (f32/u32), [`P64`] uses 4 words (f64/u64).
 //!
-//! | `Histogram<N>` | Pool bytes | S32 bucket words | S32 B1 capacity |
-//! |----------------|-----------|-------------------|-----------------|
-//! | `Histogram<8>` | 64 | 6 | 384 |
-//! | `Histogram<12>` | 96 | 10 | 640 |
-//! | `Histogram<16>` | 128 | 14 | 896 |
-//! | `Histogram<20>` | 160 | 18 | 1152 |
-//! | `Histogram<32>` | 256 | 30 | 1920 |
+//! | `Histogram<N, P32>` | Pool bytes | Bucket words | B1 capacity |
+//! |---------------------|-----------|--------------|-------------|
+//! | `Histogram<8, P32>` | 64 | 6 | 384 |
+//! | `Histogram<12, P32>` | 96 | 10 | 640 |
+//! | `Histogram<16, P32>` | 128 | 14 | 896 |
+//! | `Histogram<20, P32>` | 160 | 18 | 1152 |
+//! | `Histogram<32, P32>` | 256 | 30 | 1920 |
 //!
 //! # Scale and Resolution
 //!
@@ -115,6 +113,6 @@ pub mod newrelic;
 #[cfg(feature = "dynatrace")]
 pub mod dynatrace;
 
-pub use histogram::{BucketView, BucketWidth, BucketsIter, Histogram, Overflow, StatWidth};
+pub use histogram::{BucketView, BucketWidth, BucketsIter, Histogram, Overflow};
 pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
 pub use precision::{HistCount, HistFloat, P32, P64, Precision};

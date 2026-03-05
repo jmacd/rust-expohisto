@@ -16,7 +16,7 @@
 //!    including the benefit of starting wider (skip sub-byte entirely).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rust_expohisto::{BucketWidth, Histogram, Mapping};
+use rust_expohisto::{BucketWidth, Histogram, Mapping, P32};
 
 /// Generate `count` distinct values that each land in a unique bucket at
 /// the given scale. Uses lower_boundary midpoints to guarantee distinct indices.
@@ -55,7 +55,7 @@ fn bench_sub_byte(c: &mut Criterion) {
         ] {
             group.bench_function(BenchmarkId::new("start", label), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<16> =
+                    let mut h: Histogram<16, P32> =
                         Histogram::with_scale(scale).with_min_bucket_width(min_w);
                     for &v in &values {
                         h.update(black_box(v)).unwrap();
@@ -89,7 +89,7 @@ fn bench_sub_byte(c: &mut Criterion) {
                 let id = format!("{}/{}", dup_label, width_label);
                 group.bench_function(BenchmarkId::new("start", &id), |b| {
                     b.iter(|| {
-                        let mut h: Histogram<16> =
+                        let mut h: Histogram<16, P32> =
                             Histogram::with_scale(scale).with_min_bucket_width(min_w);
                         for &v in &values {
                             h.update_by_incr(black_box(v), reps).unwrap();
@@ -118,7 +118,7 @@ fn bench_sub_byte(c: &mut Criterion) {
         ] {
             group.bench_function(BenchmarkId::new("start", label), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<16> =
+                    let mut h: Histogram<16, P32> =
                         Histogram::with_scale(scale).with_min_bucket_width(min_w);
                     for _cycle in 0..10 {
                         for &v in &values {

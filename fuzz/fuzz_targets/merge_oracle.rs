@@ -2,6 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use rust_expohisto::{Histogram, Mapping};
+use rust_expohisto::{P32, Precision};
 use std::collections::BTreeMap;
 
 /// A weighted insert operation: record `value` with multiplicity `incr`.
@@ -107,7 +108,7 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn check_merge_same<const N: usize>(left: &[Op], right: &[Op]) {
-    let mut h1 = Histogram::<N>::new();
+    let mut h1 = Histogram::<N, P32>::new();
     let mut ok_left: Vec<Op> = Vec::new();
     for &op in left {
         if h1.update_by_incr(op.value, op.incr).is_ok() {
@@ -115,7 +116,7 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op]) {
         }
     }
 
-    let mut h2 = Histogram::<N>::new();
+    let mut h2 = Histogram::<N, P32>::new();
     let mut ok_right: Vec<Op> = Vec::new();
     for &op in right {
         if h2.update_by_incr(op.value, op.incr).is_ok() {
@@ -132,7 +133,7 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op]) {
 }
 
 fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[Op]) {
-    let mut h1 = Histogram::<N>::new();
+    let mut h1 = Histogram::<N, P32>::new();
     let mut ok_left: Vec<Op> = Vec::new();
     for &op in left {
         if h1.update_by_incr(op.value, op.incr).is_ok() {
@@ -140,7 +141,7 @@ fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[O
         }
     }
 
-    let mut h2 = Histogram::<M>::new();
+    let mut h2 = Histogram::<M, P32>::new();
     let mut ok_right: Vec<Op> = Vec::new();
     for &op in right {
         if h2.update_by_incr(op.value, op.incr).is_ok() {
@@ -160,7 +161,7 @@ fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[O
 // Oracle
 // ---------------------------------------------------------------------------
 
-fn verify_histogram<const N: usize>(hist: &Histogram<N>, inserted: &[Op]) {
+fn verify_histogram<const N: usize, P: Precision>(hist: &Histogram<N, P>, inserted: &[Op]) {
     // ── 1. count ──────────────────────────────────────────────────────
     let total_count: u64 = inserted.iter().map(|op| op.incr).sum();
     if total_count == 0 {

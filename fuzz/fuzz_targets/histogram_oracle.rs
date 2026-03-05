@@ -1,7 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rust_expohisto::{Histogram, Mapping, StatWidth, max_scale};
+use rust_expohisto::{Histogram, Mapping, max_scale};
+use rust_expohisto::{P32, P64, Precision};
 use std::collections::BTreeMap;
 
 fuzz_target!(|data: &[u8]| {
@@ -19,14 +20,16 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    check_histogram::<8>(&values);
-    check_histogram::<16>(&values);
+    check_histogram::<8, P32>(&values);
+    check_histogram::<16, P32>(&values);
+    check_histogram::<8, P64>(&values);
+    check_histogram::<16, P64>(&values);
 });
 
 /// Reference-oracle test: insert every value, then verify the histogram
 /// state matches an independently-computed expectation.
-fn check_histogram<const N: usize>(values: &[f64]) {
-    let mut hist = Histogram::<N>::new();
+fn check_histogram<const N: usize, P: Precision>(values: &[f64]) {
+    let mut hist = Histogram::<N, P>::new();
     let mut inserted: Vec<f64> = Vec::new();
 
     for &v in values {
@@ -52,17 +55,16 @@ fn check_histogram<const N: usize>(values: &[f64]) {
     let expected_min = inserted.iter().copied().fold(f64::INFINITY, f64::min);
     let expected_max = inserted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
-    if hist.stat_width() == StatWidth::S32 {
-        // S32 stores min/max as f32 — compare at that precision.
+    if P::STAT_WORDS == 2 {
         assert_eq!(
             hist.min() as f32,
             expected_min as f32,
-            "min mismatch (S32)",
+            "min mismatch (P32)",
         );
         assert_eq!(
             hist.max() as f32,
             expected_max as f32,
-            "max mismatch (S32)",
+            "max mismatch (P32)",
         );
     } else {
         assert_eq!(hist.min(), expected_min, "min mismatch");
@@ -143,17 +145,13 @@ fn check_histogram<const N: usize>(values: &[f64]) {
 
     // ── 5. scale optimality ───────────────────────────────────────────
     // Verify that the scale is the highest one where the index span
-    // fits in capacity.  We use the *initial* B1 capacity (before any
+    // fits in capacity. We use the *initial* B1 capacity (before any
     // widening) because the histogram only lowers scale when span
     // exceeds the capacity at whatever width it currently has.
     //
-    // Two reasons the scale can be lower than what span alone requires:
-    //   a) counter overflow forced widen-steps (each costs 1 scale)
-    //   b) stat widening (S32→S64) shrinks bucket words
-    //
-    // So we only assert scale <= span-optimal-scale (the histogram may
-    // be lower, but never higher).
-    let stat_words = if hist.stat_width() == StatWidth::S32 { 2 } else { 4 };
+    // Counter overflow can force widen-steps (each costs 1 scale),
+    // so we only assert scale <= span-optimal-scale.
+    let stat_words = P::STAT_WORDS;
     let b1_cap = ((N - stat_words) * 64) as i32;
 
     // Find the highest scale where span fits at B1 capacity.

@@ -63,6 +63,8 @@ pub trait Precision {
     type Float: HistFloat;
     /// Unsigned integer type for count.
     type Count: HistCount;
+    /// Number of `u64` words consumed by MMSC fields at this precision.
+    const STAT_WORDS: usize;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +78,7 @@ pub struct P64;
 impl Precision for P64 {
     type Float = f64;
     type Count = u64;
+    const STAT_WORDS: usize = 4;
 }
 
 impl HistFloat for f64 {
@@ -131,6 +134,7 @@ pub struct P32;
 impl Precision for P32 {
     type Float = f32;
     type Count = u32;
+    const STAT_WORDS: usize = 2;
 }
 
 impl HistFloat for f32 {
