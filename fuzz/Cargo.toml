@@ -26,3 +26,13 @@ doc = false
 name = "merge_oracle"
 path = "fuzz_targets/merge_oracle.rs"
 doc = false
+
+[[bin]]
+name = "stateful_oracle"
+path = "fuzz_targets/stateful_oracle.rs"
+doc = false
+
+[[bin]]
+name = "rng_stress"
+path = "fuzz_targets/rng_stress.rs"
+doc = false

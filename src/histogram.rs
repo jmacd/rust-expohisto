@@ -224,7 +224,6 @@ fn change_scale(mut hl: HighLow, size: i32) -> i32 {
 ///
 /// At minimum, `N` should be 8 (64 bytes of pool), giving 6 bucket words
 /// at P32 (96 B4 buckets) down to 4 bucket words at P64 (4 U64 buckets).
-#[derive(Clone)]
 pub struct Histogram<const N: usize, P: Precision> {
     // -- Fixed metadata (never relocates) --
     mapping: Mapping,
@@ -239,6 +238,22 @@ pub struct Histogram<const N: usize, P: Precision> {
     data: [u64; N],
 
     _precision: PhantomData<P>,
+}
+
+impl<const N: usize, P: Precision> Clone for Histogram<N, P> {
+    fn clone(&self) -> Self {
+        Self {
+            mapping: self.mapping,
+            max_scale: self.max_scale,
+            min_bucket_width: self.min_bucket_width,
+            bucket_width: self.bucket_width,
+            index_base: self.index_base,
+            index_start: self.index_start,
+            index_end: self.index_end,
+            data: self.data,
+            _precision: PhantomData,
+        }
+    }
 }
 
 impl<const N: usize, P: Precision> fmt::Debug for Histogram<N, P> {
@@ -523,6 +538,25 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         let cap = self.bucket_capacity() as i32;
         let slot = (self.index_start - self.index_base).rem_euclid(cap);
         self.bucket_get(slot as usize) == 0
+    }
+
+    /// Trims leading and trailing zero buckets from the index range.
+    fn trim_bucket_range(&mut self) {
+        let cap = self.bucket_capacity() as i32;
+        while self.index_end > self.index_start {
+            let slot = (self.index_end - self.index_base).rem_euclid(cap) as usize;
+            if self.bucket_get(slot) != 0 {
+                break;
+            }
+            self.index_end -= 1;
+        }
+        while self.index_start < self.index_end {
+            let slot = (self.index_start - self.index_base).rem_euclid(cap) as usize;
+            if self.bucket_get(slot) != 0 {
+                break;
+            }
+            self.index_start += 1;
+        }
     }
 
     /// Gets the value at a physical slot index.
@@ -1345,7 +1379,14 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
-            self.update_buckets(value, incr)?;
+            let snapshot = self.clone();
+            match self.update_buckets(value, incr) {
+                Ok(()) => {}
+                Err(e) => {
+                    *self = snapshot;
+                    return Err(e);
+                }
+            }
             self.add_sum(value * incr as f64);
         }
 
@@ -1489,6 +1530,8 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
         }
 
+        self.trim_bucket_range();
+
         Ok(())
     }
 
@@ -1578,41 +1621,54 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         }
 
         let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
+
+        // Save state so we can roll back if the merge fails partway.
+        let snapshot = self.clone();
+
         let new_sum = self.sum() + other.sum();
 
-        if !other.buckets_empty() {
-            if self.buckets_empty() {
-                self.bucket_width = self.bucket_width.max(other.bucket_width);
+        let result = (|| {
+            if !other.buckets_empty() {
+                if self.buckets_empty() {
+                    self.bucket_width = self.bucket_width.max(other.bucket_width);
+                }
+
+                let min_scale = self.mapping.scale().min(other.scale());
+                let cap = self.bucket_capacity() as i32;
+
+                let hlp = self.high_low_at_scale(min_scale)
+                    .merge(Self::high_low_at_scale_of(other, other.mapping.scale(), min_scale));
+
+                let min_scale = min_scale - change_scale(hlp, cap);
+
+                self.downscale_to(min_scale)?;
+
+                self.merge_buckets_from(other, other.mapping.scale())?;
+
+                self.trim_bucket_range();
             }
 
-            let min_scale = self.mapping.scale().min(other.scale());
-            let cap = self.bucket_capacity() as i32;
-
-            let hlp = self.high_low_at_scale(min_scale)
-                .merge(Self::high_low_at_scale_of(other, other.mapping.scale(), min_scale));
-
-            let min_scale = min_scale - change_scale(hlp, cap);
-
-            self.downscale_to(min_scale)?;
-
-            self.merge_buckets_from(other, other.mapping.scale())?;
-        }
-
-        // Commit stats.
-        if self.count() == 0 {
-            self.set_min(other.min());
-            self.set_max(other.max());
-        } else {
-            if other.min() < self.min() {
+            // Commit stats.
+            if self.count() == 0 {
                 self.set_min(other.min());
-            }
-            if other.max() > self.max() {
                 self.set_max(other.max());
+            } else {
+                if other.min() < self.min() {
+                    self.set_min(other.min());
+                }
+                if other.max() > self.max() {
+                    self.set_max(other.max());
+                }
             }
+            self.set_sum(new_sum);
+            self.set_count(new_count);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            *self = snapshot;
         }
-        self.set_sum(new_sum);
-        self.set_count(new_count);
-        Ok(())
+        result
     }
 
     /// Merges from raw histogram data, enabling cross-size merging.
@@ -1632,86 +1688,98 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         }
 
         let new_count = self.checked_add_count(other_count).ok_or(Overflow)?;
+
+        // Save state so we can roll back if the merge fails partway.
+        let snapshot = self.clone();
+
         let new_sum = self.sum() + other_sum;
 
-        if other_len > 0 {
-            let other_end = other_offset + other_len as i32 - 1;
-            let cap = self.bucket_capacity() as i32;
-            let min_scale = self.mapping.scale().min(other_scale);
+        let result = (|| {
+            if other_len > 0 {
+                let other_end = other_offset + other_len as i32 - 1;
+                let cap = self.bucket_capacity() as i32;
+                let min_scale = self.mapping.scale().min(other_scale);
 
-            let self_hl = if self.buckets_empty() {
-                HighLow::empty()
-            } else {
-                let shift = self.mapping.scale() - min_scale;
-                HighLow {
-                    low: self.index_start >> shift,
-                    high: self.index_end >> shift,
-                }
-            };
-            let other_hl = {
-                let shift = other_scale - min_scale;
-                HighLow {
-                    low: other_offset >> shift,
-                    high: other_end >> shift,
-                }
-            };
-            let hlp = self_hl.merge(other_hl);
-            let min_scale = min_scale - change_scale(hlp, cap);
+                let self_hl = if self.buckets_empty() {
+                    HighLow::empty()
+                } else {
+                    let shift = self.mapping.scale() - min_scale;
+                    HighLow {
+                        low: self.index_start >> shift,
+                        high: self.index_end >> shift,
+                    }
+                };
+                let other_hl = {
+                    let shift = other_scale - min_scale;
+                    HighLow {
+                        low: other_offset >> shift,
+                        high: other_end >> shift,
+                    }
+                };
+                let hlp = self_hl.merge(other_hl);
+                let min_scale = min_scale - change_scale(hlp, cap);
 
-            self.downscale_to(min_scale)?;
+                self.downscale_to(min_scale)?;
 
-            for i in 0..other_len {
-                let count = other_at(i);
-                if count == 0 {
-                    continue;
-                }
-                loop {
-                    let their_change = other_scale - self.mapping.scale();
-                    let index = (other_offset + i as i32) >> their_change;
+                for i in 0..other_len {
+                    let count = other_at(i);
+                    if count == 0 {
+                        continue;
+                    }
+                    loop {
+                        let their_change = other_scale - self.mapping.scale();
+                        let index = (other_offset + i as i32) >> their_change;
 
-                    match self.increment_index_by(index, count) {
-                        IncrResult::Ok => break,
-                        IncrResult::CounterOverflow => {
-                            let by = self.bucket_widen(1).ok_or(Overflow)?;
-                            let new_scale = self.mapping.scale() - by;
-                            self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
-                        }
-                        IncrResult::NeedsDownscale(_) => {
-                            // Handle like merge_buckets_from: downscale or widen.
-                            if self.bucket_width != BucketWidth::U64 {
+                        match self.increment_index_by(index, count) {
+                            IncrResult::Ok => break,
+                            IncrResult::CounterOverflow => {
                                 let by = self.bucket_widen(1).ok_or(Overflow)?;
                                 let new_scale = self.mapping.scale() - by;
                                 self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
-                            } else {
-                                self.do_downscale(1)?;
+                            }
+                            IncrResult::NeedsDownscale(_) => {
+                                if self.bucket_width != BucketWidth::U64 {
+                                    let by = self.bucket_widen(1).ok_or(Overflow)?;
+                                    let new_scale = self.mapping.scale() - by;
+                                    self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
+                                } else {
+                                    self.do_downscale(1)?;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Commit stats.
-        if self.count() == 0 {
-            self.set_min(other_min);
-            self.set_max(other_max);
-        } else {
-            if other_min < self.min() {
+            self.trim_bucket_range();
+
+            // Commit stats.
+            if self.count() == 0 {
                 self.set_min(other_min);
-            }
-            if other_max > self.max() {
                 self.set_max(other_max);
+            } else {
+                if other_min < self.min() {
+                    self.set_min(other_min);
+                }
+                if other_max > self.max() {
+                    self.set_max(other_max);
+                }
             }
+            self.set_sum(new_sum);
+            self.set_count(new_count);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            *self = snapshot;
         }
-        self.set_sum(new_sum);
-        self.set_count(new_count);
-        Ok(())
+        result
     }
 
-    /// Merges a histogram of a different size or precision into this one.
-    pub fn merge_from_other<const M: usize, Q: Precision>(
+    /// Merges a histogram of a different size into this one.
+    pub fn merge_from_other<const M: usize>(
         &mut self,
-        other: &Histogram<M, Q>,
+        other: &Histogram<M, P>,
     ) -> Result<(), Overflow> {
         self.merge_from_raw(
             other.count(),
@@ -3537,12 +3605,12 @@ mod tests {
             assert!(bt <= h1.count(), "{label}: bucket total ({bt}) exceeds count ({})", h1.count());
         }
 
-        fn check_cross<const N: usize, P: Precision, const M: usize, Q: Precision>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
+        fn check_cross<const N: usize, P: Precision, const M: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
             let mut h1 = Histogram::<N, P>::new();
             for &(v, incr) in left {
                 h1.update_by_incr(v, incr).unwrap();
             }
-            let mut h2 = Histogram::<M, Q>::new();
+            let mut h2 = Histogram::<M, P>::new();
             for &(v, incr) in right {
                 h2.update_by_incr(v, incr).unwrap();
             }
@@ -3555,8 +3623,8 @@ mod tests {
 
         check::<8, P32>(&left_ops, &right_ops, "same N=8");
         check::<16, P32>(&left_ops, &right_ops, "same N=16");
-        check_cross::<8, P32, 16, P32>(&left_ops, &right_ops, "cross 8←16");
-        check_cross::<16, P32, 8, P32>(&left_ops, &right_ops, "cross 16←8");
+        check_cross::<8, P32, 16>(&left_ops, &right_ops, "cross 8←16");
+        check_cross::<16, P32, 8>(&left_ops, &right_ops, "cross 16←8");
     }
 
     /// Regression: three values with a subnormal, split across merge,
@@ -3588,12 +3656,12 @@ mod tests {
             assert!(bt <= h1.count(), "{label}: bt={bt} > count={}", h1.count());
         }
 
-        fn check_cross<const N: usize, P: Precision, const M: usize, Q: Precision>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
+        fn check_cross<const N: usize, P: Precision, const M: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
             let mut h1 = Histogram::<N, P>::new();
             for &(v, incr) in left {
                 h1.update_by_incr(v, incr).unwrap();
             }
-            let mut h2 = Histogram::<M, Q>::new();
+            let mut h2 = Histogram::<M, P>::new();
             for &(v, incr) in right {
                 h2.update_by_incr(v, incr).unwrap();
             }
@@ -3606,7 +3674,76 @@ mod tests {
 
         check::<8, P32>(&left, &right, "same 8");
         check::<16, P32>(&left, &right, "same 16");
-        check_cross::<8, P32, 16, P32>(&left, &right, "cross 8←16");
-        check_cross::<16, P32, 8, P32>(&left, &right, "cross 16←8");
+        check_cross::<8, P32, 16>(&left, &right, "cross 8←16");
+        check_cross::<16, P32, 8>(&left, &right, "cross 16←8");
+    }
+
+    #[test]
+    fn test_merge_p64_bucket_total_exceeds_count() {
+        let mut h0 = Histogram::<8, P64>::new();
+        let mut h1 = Histogram::<8, P64>::new();
+
+        h1.update_by_incr(2.8396262443943004e+238, 40).unwrap();
+        h0.update_by_incr(2.635549485807631e-82, 1).unwrap();
+
+        // Step 3: merge h0 into h1
+        h1.merge_from(&h0).unwrap();
+        assert_eq!(h1.count(), 41);
+
+        // Step 4: merge h1 into h0
+        if h0.merge_from(&h1).is_ok() {
+            let b = h0.positive();
+            let bt: u64 = (0..b.len()).map(|i| b.at(i)).sum();
+            assert!(bt <= h0.count(),
+                "bucket total ({bt}) exceeds count ({})", h0.count());
+        }
+    }
+
+    #[test]
+    fn test_merge_p32_bucket_len_after_merge_chain() {
+        use crate::Mapping;
+
+        let v0: f64 = 5.653943197254256e-308;
+        let v1: f64 = 2.740490672504645e-61;
+
+        let mut h0 = Histogram::<8, P32>::new();
+        let mut h1 = Histogram::<8, P32>::new();
+
+        h0.update_by_incr(v0, 1).unwrap();
+        h1.update_by_incr(v1, 1).unwrap();
+
+        // Merge chain: h0→h1, h0→h1, h1→h0
+        h1.merge_from(&h0).unwrap();
+        h1.merge_from(&h0).unwrap();
+        h0.merge_from(&h1).unwrap();
+
+        // Insert many zeros
+        for _ in 0..150 {
+            h0.update_by_incr(0.0, 1).unwrap();
+        }
+
+        // Verify bucket structure
+        let b = h0.positive();
+        let scale = h0.scale();
+        let mapping = Mapping::new(scale).unwrap();
+
+        // All non-zero values should map to indices at the current scale
+        let idx0 = mapping.map_to_index(v0);
+        let idx1 = mapping.map_to_index(v1);
+        let exp_min = idx0.min(idx1);
+        let exp_max = idx0.max(idx1);
+        let exp_len = (exp_max - exp_min + 1) as u32;
+
+        assert_eq!(b.offset(), exp_min,
+            "offset mismatch: got {} expected {} (scale={})", b.offset(), exp_min, scale);
+        assert_eq!(b.len(), exp_len,
+            "len mismatch: got {} expected {} (scale={}, idx0={}, idx1={})",
+            b.len(), exp_len, scale, idx0, idx1);
+
+        // No trailing/leading zero buckets
+        if b.len() > 0 {
+            assert!(b.at(0) > 0, "leading zero bucket");
+            assert!(b.at(b.len() - 1) > 0, "trailing zero bucket");
+        }
     }
 }
