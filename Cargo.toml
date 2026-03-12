@@ -61,3 +61,7 @@ harness = false
 [[bench]]
 name = "downscale"
 harness = false
+
+[[bench]]
+name = "literal"
+harness = false
