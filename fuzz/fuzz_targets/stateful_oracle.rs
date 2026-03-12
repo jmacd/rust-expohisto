@@ -128,16 +128,16 @@ fn decode_increment(sel: u8) -> u64 {
 // Verification
 // ---------------------------------------------------------------------------
 
-fn verify_p32<const N: usize>(hist: &Histogram<N, P32>, shadow: &Shadow, label: &str) {
+fn verify_p32<const N: usize>(hist: &mut Histogram<N, P32>, shadow: &Shadow, label: &str) {
     verify_generic::<N, P32>(hist, shadow, label, true);
 }
 
-fn verify_p64<const N: usize>(hist: &Histogram<N, P64>, shadow: &Shadow, label: &str) {
+fn verify_p64<const N: usize>(hist: &mut Histogram<N, P64>, shadow: &Shadow, label: &str) {
     verify_generic::<N, P64>(hist, shadow, label, false);
 }
 
 fn verify_generic<const N: usize, P: rust_expohisto::Precision>(
-    hist: &Histogram<N, P>,
+    hist: &mut Histogram<N, P>,
     shadow: &Shadow,
     label: &str,
     is_p32: bool,
@@ -188,17 +188,19 @@ fn verify_generic<const N: usize, P: rust_expohisto::Precision>(
         .sum();
     let expected_zero_count = expected_count - non_zero_total;
 
+    let count = hist.count();
+    let scale = hist.scale();
     let buckets = hist.positive();
     let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
 
     assert!(
-        bucket_total <= hist.count(),
+        bucket_total <= count,
         "{}: bucket total ({}) exceeds count ({})",
         label,
         bucket_total,
-        hist.count(),
+        count,
     );
-    let actual_zero_count = hist.count() - bucket_total;
+    let actual_zero_count = count - bucket_total;
     assert_eq!(
         actual_zero_count, expected_zero_count,
         "{}: zero count mismatch (actual={}, expected={})",
@@ -213,7 +215,6 @@ fn verify_generic<const N: usize, P: rust_expohisto::Precision>(
         return;
     }
 
-    let scale = hist.scale();
     let mapping = Mapping::new(scale).expect("reported scale should be valid");
 
     let mut expected_buckets: BTreeMap<i32, u64> = BTreeMap::new();
@@ -429,12 +430,12 @@ fuzz_target!(|data: &[u8]| {
 
     // Verify all histograms at end of sequence.
     for i in 0..P32_POOL {
-        verify_p32(&p32[i], &sp32[i], &format!("p32[{i}]"));
+        verify_p32(&mut p32[i], &sp32[i], &format!("p32[{i}]"));
     }
     for i in 0..P64_POOL {
-        verify_p64(&p64[i], &sp64[i], &format!("p64[{i}]"));
+        verify_p64(&mut p64[i], &sp64[i], &format!("p64[{i}]"));
     }
     if !sbig.is_empty() {
-        verify_p32(&big, &sbig, "big");
+        verify_p32(&mut big, &sbig, "big");
     }
 });

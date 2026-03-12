@@ -82,16 +82,18 @@ fn check_histogram<const N: usize, P: Precision>(values: &[f64], literal_mode: b
     let non_zero: Vec<f64> = inserted.iter().copied().filter(|&v| v != 0.0).collect();
     let expected_zero_count = (inserted.len() - non_zero.len()) as u64;
 
+    let count = hist.count();
+    let scale = hist.scale();
     let buckets = hist.positive();
     let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
 
     assert!(
-        bucket_total <= hist.count(),
+        bucket_total <= count,
         "bucket total ({}) exceeds count ({})",
         bucket_total,
-        hist.count(),
+        count,
     );
-    let actual_zero_count = hist.count() - bucket_total;
+    let actual_zero_count = count - bucket_total;
 
     assert_eq!(
         actual_zero_count, expected_zero_count,
@@ -104,7 +106,6 @@ fn check_histogram<const N: usize, P: Precision>(values: &[f64], literal_mode: b
         return;
     }
 
-    let scale = hist.scale();
     let mapping = Mapping::new(scale).expect("reported scale should be valid");
 
     // Build expected index → count map.

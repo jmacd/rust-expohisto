@@ -316,16 +316,17 @@ fn run<const N: usize, const M: usize, P: rust_expohisto::Precision>(cfg: &Confi
     }
 
     // Bucket totals.
+    let count = hist.count();
     let buckets = hist.positive();
     let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
 
     assert!(
-        bucket_total <= hist.count(),
+        bucket_total <= count,
         "bucket total ({}) exceeds count ({})",
-        bucket_total, hist.count(),
+        bucket_total, count,
     );
 
-    let actual_zero_count = hist.count() - bucket_total;
+    let actual_zero_count = count - bucket_total;
     assert_eq!(
         actual_zero_count, exp_zero_count,
         "zero count mismatch: hist={} oracle={}",

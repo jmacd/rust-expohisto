@@ -726,6 +726,11 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 // ---------------------------------------------------------------------------
 
 /// Read-only view of bucket data in a histogram.
+///
+/// Obtaining a `BucketView` via [`positive()`](Histogram::positive)
+/// requires `&mut self` because literal-mode histograms are lazily
+/// promoted to bucket mode on first read. After promotion, subsequent
+/// reads are normal bucket lookups with no extra cost.
 #[derive(Debug)]
 pub struct BucketView<'a, const N: usize, P: Precision> {
     hist: &'a Histogram<N, P>,
@@ -1498,8 +1503,18 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     }
 
     /// Returns a read-only view of the positive buckets.
+    ///
+    /// Takes `&mut self` because literal-mode histograms are lazily
+    /// promoted to bucket mode on first read. After promotion the
+    /// histogram stays in bucket mode, so subsequent reads pay no
+    /// extra cost.
     #[inline]
-    pub fn positive(&self) -> BucketView<'_, N, P> {
+    pub fn positive(&mut self) -> BucketView<'_, N, P> {
+        if self.literal {
+            // promote() cannot fail here — if it could (which requires
+            // an invalid max_scale), we'd have failed at construction.
+            let _ = self.promote();
+        }
         BucketView { hist: self }
     }
 
@@ -2222,9 +2237,10 @@ mod tests {
     use super::*;
     use crate::precision::{P32, P64, Precision};
 
-    fn derived_zero_count<const N: usize, P: Precision>(h: &Histogram<N, P>) -> u64 {
+    fn derived_zero_count<const N: usize, P: Precision>(h: &mut Histogram<N, P>) -> u64 {
         let buckets = h.positive();
         let non_zero: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
+        drop(buckets);
         h.count() - non_zero
     }
 
@@ -2236,7 +2252,7 @@ mod tests {
         assert_eq!(h.sum(), 1.0);
         assert_eq!(h.min(), 1.0);
         assert_eq!(h.max(), 1.0);
-        assert_eq!(derived_zero_count(&h), 0);
+        assert_eq!(derived_zero_count(&mut h), 0);
         assert_eq!(h.bucket_width(), BucketWidth::B1);
     }
 
@@ -2245,7 +2261,7 @@ mod tests {
         let mut h: Histogram<16, P32> = Histogram::new();
         h.update(0.0).unwrap();
         assert_eq!(h.count(), 1);
-        assert_eq!(derived_zero_count(&h), 1);
+        assert_eq!(derived_zero_count(&mut h), 1);
         assert_eq!(h.sum(), 0.0);
     }
 
@@ -2531,25 +2547,37 @@ mod tests {
                 assert!(sum_diff / denom < 1e-5,
                     "sum mismatch for size={K} sets {i} x {j}: {} vs {}",
                     ms, ss);
-                assert_eq!(derived_zero_count(&merged), derived_zero_count(&single),
+                assert_eq!(derived_zero_count(&mut merged), derived_zero_count(&mut single),
                     "zero_count mismatch for size={K} sets {i} x {j}");
 
-                let mb = merged.positive();
-                let sb = single.positive();
-                let m_total: u64 = (0..mb.len()).map(|k| mb.at(k)).sum();
-                let s_total: u64 = (0..sb.len()).map(|k| sb.at(k)).sum();
+                let m_total: u64 = {
+                    let mb = merged.positive();
+                    (0..mb.len()).map(|k| mb.at(k)).sum()
+                };
+                let s_total: u64 = {
+                    let sb = single.positive();
+                    (0..sb.len()).map(|k| sb.at(k)).sum()
+                };
                 if m_total != s_total {
+                    let mb = merged.positive();
+                    let mb_buckets: Vec<_> = (0..mb.len()).map(|k| mb.at(k)).collect();
+                    let mb_width = mb.width();
+                    let mb_len = mb.len();
+                    drop(mb);
+                    let sb = single.positive();
+                    let sb_buckets: Vec<_> = (0..sb.len()).map(|k| sb.at(k)).collect();
+                    let sb_width = sb.width();
+                    let sb_len = sb.len();
+                    drop(sb);
                     eprintln!("FAIL size={K} sets {i} x {j}");
                     eprintln!("  set_a: {:?}", set_a);
                     eprintln!("  set_b: {:?}", set_b);
                     eprintln!("  merged: width={:?} start={} end={} base={}",
-                        mb.width(), merged.index_start, merged.index_end, merged.index_base);
+                        mb_width, merged.index_start, merged.index_end, merged.index_base);
                     eprintln!("  single: width={:?} start={} end={} base={}",
-                        sb.width(), single.index_start, single.index_end, single.index_base);
-                    eprintln!("  merged buckets (len={}): {:?}", mb.len(),
-                        (0..mb.len()).map(|k| mb.at(k)).collect::<Vec<_>>());
-                    eprintln!("  single buckets (len={}): {:?}", sb.len(),
-                        (0..sb.len()).map(|k| sb.at(k)).collect::<Vec<_>>());
+                        sb_width, single.index_start, single.index_end, single.index_base);
+                    eprintln!("  merged buckets (len={}): {:?}", mb_len, mb_buckets);
+                    eprintln!("  single buckets (len={}): {:?}", sb_len, sb_buckets);
                 }
                 assert_eq!(m_total, s_total,
                     "bucket total mismatch for size={K} sets {i} x {j}");
@@ -2569,14 +2597,17 @@ mod tests {
             other.update(v).unwrap();
             let bv = other.positive();
             let btotal: u64 = (0..bv.len()).map(|k| bv.at(k)).sum();
-            let non_zero_count = other.count() - derived_zero_count(&other);
+            let bv_width = bv.width();
+            let bv_buckets: Vec<_> = (0..bv.len()).map(|k| bv.at(k)).collect();
+            drop(bv);
+            let non_zero_count = other.count() - derived_zero_count(&mut other);
             eprintln!("Other after val[{}]={}: scale={} width={:?} start={} end={} base={} cap={} btotal={} expected={}",
-                vi, v, other.scale(), bv.width(),
+                vi, v, other.scale(), bv_width,
                 other.index_start, other.index_end, other.index_base,
                 other.bucket_capacity(), btotal, non_zero_count);
             if btotal != non_zero_count {
                 eprintln!("  ** BUCKET TOTAL MISMATCH IN OTHER ** raw data: {:?}", &other.data);
-                eprintln!("  buckets: {:?}", (0..bv.len()).map(|k| bv.at(k)).collect::<Vec<_>>());
+                eprintln!("  buckets: {:?}", bv_buckets);
             }
         }
 
@@ -2747,7 +2778,7 @@ mod tests {
         collector.merge_from_other(&source).unwrap();
 
         assert_eq!(collector.count(), 4);
-        assert_eq!(derived_zero_count(&collector), 1);
+        assert_eq!(derived_zero_count(&mut collector), 1);
         assert!((collector.sum() - 7.0).abs() < 1e-5);
     }
 
@@ -3884,10 +3915,15 @@ mod tests {
             h.update(v).unwrap();
             let b = h.positive();
             let total: u64 = (0..b.len()).map(|k| b.at(k)).sum();
+            let b_width = b.width();
+            let b_offset = b.offset();
+            let b_len = b.len();
+            let b_cap = b.capacity();
+            drop(b);
             assert_eq!(total, h.count(),
                 "After inserting {v}: bucket total ({total}) != count ({})\n  \
                  scale={} width={:?} offset={} len={} cap={}",
-                h.count(), h.scale(), b.width(), b.offset(), b.len(), b.capacity());
+                h.count(), h.scale(), b_width, b_offset, b_len, b_cap);
         }
     }
 
@@ -3900,10 +3936,12 @@ mod tests {
             h.update(v).unwrap();
             let b = h.positive();
             let total: u64 = (0..b.len()).map(|k| b.at(k)).sum();
+            let b_width = b.width();
+            drop(b);
             assert_eq!(total, h.count(),
                 "After values[{vi}]={v}: bucket total ({total}) != count ({})\n  \
                  scale={} width={:?}",
-                h.count(), h.scale(), b.width());
+                h.count(), h.scale(), b_width);
         }
     }
 
@@ -3912,7 +3950,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Helper: count total across all positive buckets.
-    fn bucket_total<const N: usize, P: Precision>(h: &Histogram<N, P>) -> u64 {
+    fn bucket_total<const N: usize, P: Precision>(h: &mut Histogram<N, P>) -> u64 {
         let b = h.positive();
         (0..b.len()).map(|i| b.at(i)).sum()
     }
@@ -3926,20 +3964,25 @@ mod tests {
         h2.update(1e30).unwrap();
         h2.update(1e-30).unwrap();
 
+        let h2_count = h2.count();
+        let h2_sum = h2.sum();
+        let h2_min = h2.min();
+        let h2_max = h2.max();
+        let h2_scale = h2.scale();
         let b2 = h2.positive();
         h1.merge_from_raw(
-            h2.count(),
-            h2.sum(),
-            h2.min(),
-            h2.max(),
-            h2.scale(),
+            h2_count,
+            h2_sum,
+            h2_min,
+            h2_max,
+            h2_scale,
             b2.offset(),
             b2.len(),
             &|i| b2.at(i),
         )
         .unwrap();
         assert_eq!(h1.count(), 3);
-        assert_eq!(bucket_total(&h1), 3);
+        assert_eq!(bucket_total(&mut h1), 3);
     }
 
     /// Regression: large weighted inserts of subnormal + normal value
@@ -4060,10 +4103,11 @@ mod tests {
 
         // Step 4: merge h1 into h0
         if h0.merge_from(&h1).is_ok() {
+            let count = h0.count();
             let b = h0.positive();
             let bt: u64 = (0..b.len()).map(|i| b.at(i)).sum();
-            assert!(bt <= h0.count(),
-                "bucket total ({bt}) exceeds count ({})", h0.count());
+            assert!(bt <= count,
+                "bucket total ({bt}) exceeds count ({count})");
         }
     }
 
@@ -4091,7 +4135,6 @@ mod tests {
         }
 
         // Verify bucket structure
-        let b = h0.positive();
         let scale = h0.scale();
         let mapping = Mapping::new(scale).unwrap();
 
@@ -4102,6 +4145,7 @@ mod tests {
         let exp_max = idx0.max(idx1);
         let exp_len = (exp_max - exp_min + 1) as u32;
 
+        let b = h0.positive();
         assert_eq!(b.offset(), exp_min,
             "offset mismatch: got {} expected {} (scale={})", b.offset(), exp_min, scale);
         assert_eq!(b.len(), exp_len,
@@ -4434,7 +4478,7 @@ mod tests {
 
     #[test]
     fn test_literal_empty_bucket_view() {
-        let h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8, P32> = Histogram::new();
         assert!(h.is_literal());
         assert!(h.positive().is_empty());
         assert_eq!(h.positive().len(), 0);

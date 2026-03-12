@@ -135,7 +135,7 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: boo
     }
 
     ok_left.extend_from_slice(&ok_right);
-    verify_histogram(&h1, &ok_left);
+    verify_histogram(&mut h1, &ok_left);
 }
 
 fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[Op], literal_mode: bool) {
@@ -160,14 +160,14 @@ fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[O
     }
 
     ok_left.extend_from_slice(&ok_right);
-    verify_histogram(&h1, &ok_left);
+    verify_histogram(&mut h1, &ok_left);
 }
 
 // ---------------------------------------------------------------------------
 // Oracle
 // ---------------------------------------------------------------------------
 
-fn verify_histogram<const N: usize, P: Precision>(hist: &Histogram<N, P>, inserted: &[Op]) {
+fn verify_histogram<const N: usize, P: Precision>(hist: &mut Histogram<N, P>, inserted: &[Op]) {
     // ── 1. count ──────────────────────────────────────────────────────
     let total_count: u64 = inserted.iter().map(|op| op.incr).sum();
     if total_count == 0 {
@@ -209,16 +209,18 @@ fn verify_histogram<const N: usize, P: Precision>(hist: &Histogram<N, P>, insert
         .sum();
     let expected_zero_count = total_count - non_zero_total;
 
+    let count = hist.count();
+    let scale = hist.scale();
     let buckets = hist.positive();
     let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
 
     assert!(
-        bucket_total <= hist.count(),
+        bucket_total <= count,
         "bucket total ({}) exceeds count ({})",
         bucket_total,
-        hist.count(),
+        count,
     );
-    let actual_zero_count = hist.count() - bucket_total;
+    let actual_zero_count = count - bucket_total;
 
     assert_eq!(
         actual_zero_count, expected_zero_count,
@@ -231,7 +233,6 @@ fn verify_histogram<const N: usize, P: Precision>(hist: &Histogram<N, P>, insert
         return;
     }
 
-    let scale = hist.scale();
     let mapping = Mapping::new(scale).expect("reported scale should be valid");
 
     let mut expected: BTreeMap<i32, u64> = BTreeMap::new();
