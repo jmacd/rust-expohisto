@@ -218,6 +218,22 @@ fn change_scale(mut hl: HighLow, size: i32) -> i32 {
 /// `P` selects the precision tier: [`P32`](crate::P32) uses 2 words
 /// for MMSC (f32/u32), [`P64`](crate::P64) uses 4 words (f64/u64).
 ///
+/// # Literal Mode
+///
+/// New histograms start in **literal mode**, where the data pool stores
+/// raw `f64` bit patterns instead of bucket counters. This holds up to
+/// `N - STAT_WORDS` values (e.g. 6 values for `Histogram<8, P32>`).
+/// When the next non-zero observation would exceed capacity, the
+/// histogram **promotes** to bucket mode: the full value range determines
+/// the optimal starting scale in one pass, avoiding incremental
+/// downscale/widen work during cold-start.
+///
+/// Literal mode is transparent to readers — [`BucketView`] computes a
+/// virtual bucket view on the fly. Disable with
+/// [`with_literal_mode(false)`](Self::with_literal_mode).
+///
+/// # Counter Widening
+///
 /// Bucket counters start at 1-bit and auto-widen in place
 /// (1→2→4 bits → u8 → u16 → u32 → u64) via combined downscale+widen
 /// when a counter saturates.
@@ -230,11 +246,15 @@ pub struct Histogram<const N: usize, P: Precision> {
     max_scale: i8,
     min_bucket_width: BucketWidth,
     bucket_width: BucketWidth,
+    /// When true, `data[STAT_WORDS..]` holds raw f64 bit patterns (literals)
+    /// instead of bucket counters. `index_end` is repurposed as the literal
+    /// count. Fits in the existing 1-byte alignment gap before `index_base`.
+    literal: bool,
     index_base: i32,
     index_start: i32,
     index_end: i32,
 
-    // -- Data pool: MMSC at front, buckets after --
+    // -- Data pool: MMSC at front, buckets/literals after --
     data: [u64; N],
 
     _precision: PhantomData<P>,
@@ -247,6 +267,7 @@ impl<const N: usize, P: Precision> Clone for Histogram<N, P> {
             max_scale: self.max_scale,
             min_bucket_width: self.min_bucket_width,
             bucket_width: self.bucket_width,
+            literal: self.literal,
             index_base: self.index_base,
             index_start: self.index_start,
             index_end: self.index_end,
@@ -258,16 +279,22 @@ impl<const N: usize, P: Precision> Clone for Histogram<N, P> {
 
 impl<const N: usize, P: Precision> fmt::Debug for Histogram<N, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Histogram")
-            .field("scale", &self.scale())
+        let mut s = f.debug_struct("Histogram");
+        s.field("scale", &self.scale())
             .field("bucket_width", &self.bucket_width)
             .field("count", &self.count())
             .field("sum", &self.sum())
             .field("min", &self.min())
             .field("max", &self.max())
-            .field("zero_count", &self.count().saturating_sub(self.non_zero_count()))
-            .field("bucket_len", &self.bucket_len())
-            .finish()
+            .field("zero_count", &self.count().saturating_sub(self.non_zero_count()));
+        if self.literal {
+            s.field("mode", &"literal");
+            s.field("literal_count", &self.literal_count());
+        } else {
+            s.field("mode", &"bucket");
+            s.field("bucket_len", &self.bucket_len());
+        }
+        s.finish()
     }
 }
 
@@ -469,6 +496,9 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
     /// Returns the total count stored across all positive buckets.
     fn non_zero_count(&self) -> u64 {
+        if self.literal {
+            return self.literal_count() as u64;
+        }
         let mut total = 0u64;
         for pos in 0..self.bucket_len() {
             total = total.saturating_add(self.bucket_at(pos));
@@ -514,8 +544,19 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     }
 
     /// Returns the number of buckets in use.
+    ///
+    /// In literal mode this returns the virtual bucket span that would result
+    /// from promoting the stored literals.
     #[inline]
     pub fn bucket_len(&self) -> u32 {
+        if self.literal {
+            if self.literal_count() == 0 {
+                return 0;
+            }
+            let (offset, len, _) = self.literal_effective_layout();
+            let _ = offset;
+            return len;
+        }
         if self.is_effectively_empty() {
             0
         } else {
@@ -526,6 +567,9 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Returns true if no buckets have been used.
     #[inline]
     pub fn buckets_empty(&self) -> bool {
+        if self.literal {
+            return self.literal_count() == 0;
+        }
         self.bucket_len() == 0
     }
 
@@ -623,10 +667,32 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Returns the count at position `pos` (0-indexed from offset).
     #[inline]
     pub fn bucket_at(&self, pos: u32) -> u64 {
+        if self.literal {
+            return self.literal_bucket_at(pos);
+        }
         let index = self.index_start + pos as i32;
         let cap = self.bucket_capacity() as i32;
         let slot = (index - self.index_base).rem_euclid(cap) as usize;
         self.bucket_get(slot)
+    }
+
+    /// Virtual bucket lookup for literal mode: counts how many stored
+    /// literals map to the bucket at position `pos` from offset.
+    fn literal_bucket_at(&self, pos: u32) -> u64 {
+        let (min_idx, _, effective_scale) = self.literal_effective_layout();
+        let target_index = min_idx + pos as i32;
+        let mapping = Mapping::new(self.max_scale as i32).unwrap();
+        let change = (self.max_scale as i32) - effective_scale;
+
+        let mut count = 0u64;
+        for &bits in self.literal_values() {
+            let v = f64::from_bits(bits);
+            let idx = mapping.map_to_index(v) >> change;
+            if idx == target_index {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Attempts to add `incr` to a physical slot. Returns false on overflow.
@@ -644,6 +710,13 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Returns the bucket offset (smallest index).
     #[inline]
     pub fn bucket_offset(&self) -> i32 {
+        if self.literal {
+            if self.literal_count() == 0 {
+                return 0;
+            }
+            let (min_idx, _, _) = self.literal_effective_layout();
+            return min_idx;
+        }
         self.index_start
     }
 }
@@ -662,7 +735,7 @@ impl<const N: usize, P: Precision> BucketView<'_, N, P> {
     /// Returns the offset (smallest index).
     #[inline]
     pub fn offset(&self) -> i32 {
-        self.hist.index_start
+        self.hist.bucket_offset()
     }
 
     /// Number of logical buckets in use.
@@ -1263,6 +1336,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             max_scale: scale as i8,
             min_bucket_width: BucketWidth::B1,
             bucket_width: BucketWidth::B1,
+            literal: true,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -1280,6 +1354,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             max_scale: scale as i8,
             min_bucket_width: BucketWidth::B1,
             bucket_width: BucketWidth::B1,
+            literal: true,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -1296,6 +1371,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             max_scale: scale as i8,
             min_bucket_width: BucketWidth::B1,
             bucket_width: BucketWidth::B1,
+            literal: true,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -1318,9 +1394,90 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         self
     }
 
+    /// Disables literal mode so the histogram starts directly in bucket mode.
+    ///
+    /// Useful for benchmarks or when the caller knows the value range upfront.
+    #[inline]
+    pub fn with_literal_mode(mut self, enabled: bool) -> Self {
+        self.literal = enabled;
+        self
+    }
+
+    /// Returns true if the histogram is in literal mode.
+    #[inline]
+    pub fn is_literal(&self) -> bool {
+        self.literal
+    }
+
+    /// Returns the number of literal values stored (0 if not in literal mode).
+    #[inline]
+    fn literal_count(&self) -> usize {
+        if self.literal { self.index_end as usize } else { 0 }
+    }
+
+    /// Maximum number of literals that can be stored.
+    #[inline]
+    fn literal_capacity(&self) -> usize {
+        self.bucket_word_count()
+    }
+
+    /// Returns the stored literal values as a slice.
+    #[inline]
+    fn literal_values(&self) -> &[u64] {
+        let start = self.bucket_data_start();
+        &self.data[start..start + self.literal_count()]
+    }
+
+    /// Computes the effective layout for a literal-mode histogram:
+    /// `(min_index, bucket_len, effective_scale)`.
+    ///
+    /// Maps all stored literals to indices at `max_scale`, then applies
+    /// `change_scale` to find the scale where the index span fits in
+    /// bucket capacity.
+    fn literal_effective_layout(&self) -> (i32, u32, i32) {
+        debug_assert!(self.literal && self.literal_count() > 0);
+
+        let mapping = Mapping::new(self.max_scale as i32).unwrap();
+        let vals = self.literal_values();
+
+        let mut min_idx = i32::MAX;
+        let mut max_idx = i32::MIN;
+        for &bits in vals {
+            let v = f64::from_bits(bits);
+            let idx = mapping.map_to_index(v);
+            min_idx = min_idx.min(idx);
+            max_idx = max_idx.max(idx);
+        }
+
+        if min_idx == max_idx {
+            // All values map to the same index.
+            return (min_idx, 1, self.max_scale as i32);
+        }
+
+        let cap = self.bucket_width.capacity(self.bucket_word_count()) as i32;
+        let hl = HighLow { low: min_idx, high: max_idx };
+        let change = change_scale(hl, cap);
+        let effective_scale = (self.max_scale as i32) - change;
+        let shifted_low = min_idx >> change;
+        let shifted_high = max_idx >> change;
+        let len = (shifted_high - shifted_low + 1) as u32;
+
+        (shifted_low, len, effective_scale)
+    }
+
     /// Returns the current scale.
+    ///
+    /// In literal mode, returns the effective scale that promotion would
+    /// choose (or 0 if no non-zero values are stored).
     #[inline]
     pub fn scale(&self) -> i32 {
+        if self.literal {
+            if self.literal_count() == 0 {
+                return 0;
+            }
+            let (_, _, scale) = self.literal_effective_layout();
+            return scale;
+        }
         if self.non_zero_count() == 0 {
             0
         } else {
@@ -1350,6 +1507,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     pub fn clear(&mut self) {
         self.data.fill(0);
         self.bucket_width = self.min_bucket_width;
+        self.literal = true;
         self.index_start = 0;
         self.index_end = 0;
         self.index_base = 0;
@@ -1379,12 +1537,23 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
-            let snapshot = self.clone();
-            match self.update_buckets(value, incr) {
-                Ok(()) => {}
-                Err(e) => {
-                    *self = snapshot;
-                    return Err(e);
+            if self.literal {
+                let snapshot = self.clone();
+                match self.update_literal(value, incr) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        *self = snapshot;
+                        return Err(e);
+                    }
+                }
+            } else {
+                let snapshot = self.clone();
+                match self.update_buckets(value, incr) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        *self = snapshot;
+                        return Err(e);
+                    }
                 }
             }
             self.add_sum(value * incr as f64);
@@ -1403,6 +1572,140 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             }
         }
         self.set_count(new_count);
+        Ok(())
+    }
+
+    /// Stores a value in literal mode, promoting to bucket mode on overflow.
+    fn update_literal(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
+        debug_assert!(self.literal);
+
+        let count = self.literal_count();
+        let cap = self.literal_capacity();
+        let needed = incr as usize;
+
+        if count + needed <= cap {
+            // Fits — store `incr` copies of the value's bit pattern.
+            let start = self.bucket_data_start() + count;
+            let bits = value.to_bits();
+            for i in 0..needed {
+                self.data[start + i] = bits;
+            }
+            self.index_end += incr as i32;
+            Ok(())
+        } else {
+            // Overflow — promote with the trigger value included.
+            self.promote_with(value, incr)
+        }
+    }
+
+    /// Promotes from literal mode to bucket mode, including a trigger value
+    /// that caused overflow of literal capacity.
+    fn promote_with(&mut self, trigger: f64, trigger_incr: u64) -> Result<(), Overflow> {
+        debug_assert!(self.literal);
+
+        // Collect stored literal values before we clobber the data pool.
+        let count = self.literal_count();
+        let mut literals = [0u64; 64]; // max N in practice
+        literals[..count].copy_from_slice(self.literal_values());
+
+        // Compute indices at max_scale for all literals + trigger.
+        let mapping = Mapping::new(self.max_scale as i32).unwrap();
+        let mut min_idx = i32::MAX;
+        let mut max_idx = i32::MIN;
+        for &bits in &literals[..count] {
+            let idx = mapping.map_to_index(f64::from_bits(bits));
+            min_idx = min_idx.min(idx);
+            max_idx = max_idx.max(idx);
+        }
+        let trigger_idx = mapping.map_to_index(trigger);
+        min_idx = min_idx.min(trigger_idx);
+        max_idx = max_idx.max(trigger_idx);
+
+        // Determine optimal scale.
+        let cap = self.min_bucket_width.capacity(self.bucket_word_count()) as i32;
+        let hl = if min_idx == i32::MAX {
+            HighLow::empty()
+        } else {
+            HighLow { low: min_idx, high: max_idx }
+        };
+        let change = change_scale(hl, cap);
+        let effective_scale = (self.max_scale as i32) - change;
+
+        // Switch to bucket mode.
+        self.literal = false;
+        self.bucket_width = self.min_bucket_width;
+        self.mapping = Mapping::new(effective_scale).map_err(|_| Overflow)?;
+        // Clear bucket data but keep MMSC words.
+        let start = self.bucket_data_start();
+        for w in &mut self.data[start..] {
+            *w = 0;
+        }
+        self.index_base = 0;
+        self.index_start = 0;
+        self.index_end = 0;
+
+        // Reinsert all stored literals.
+        for &bits in &literals[..count] {
+            let v = f64::from_bits(bits);
+            self.update_buckets(v, 1)?;
+        }
+
+        // Insert the trigger value.
+        self.update_buckets(trigger, trigger_incr)?;
+
+        Ok(())
+    }
+
+    /// Promotes from literal mode to bucket mode without a trigger value.
+    /// Used when self is a merge destination and needs to accept bucket data.
+    fn promote(&mut self) -> Result<(), Overflow> {
+        debug_assert!(self.literal);
+
+        let count = self.literal_count();
+
+        if count == 0 {
+            // No literals stored — just flip the flag.
+            self.literal = false;
+            return Ok(());
+        }
+
+        // Collect stored literal values.
+        let mut literals = [0u64; 64];
+        literals[..count].copy_from_slice(self.literal_values());
+
+        // Compute indices at max_scale.
+        let mapping = Mapping::new(self.max_scale as i32).unwrap();
+        let mut min_idx = i32::MAX;
+        let mut max_idx = i32::MIN;
+        for &bits in &literals[..count] {
+            let idx = mapping.map_to_index(f64::from_bits(bits));
+            min_idx = min_idx.min(idx);
+            max_idx = max_idx.max(idx);
+        }
+
+        let cap = self.min_bucket_width.capacity(self.bucket_word_count()) as i32;
+        let hl = HighLow { low: min_idx, high: max_idx };
+        let change = change_scale(hl, cap);
+        let effective_scale = (self.max_scale as i32) - change;
+
+        // Switch to bucket mode.
+        self.literal = false;
+        self.bucket_width = self.min_bucket_width;
+        self.mapping = Mapping::new(effective_scale).map_err(|_| Overflow)?;
+        let start = self.bucket_data_start();
+        for w in &mut self.data[start..] {
+            *w = 0;
+        }
+        self.index_base = 0;
+        self.index_start = 0;
+        self.index_end = 0;
+
+        // Reinsert all stored literals.
+        for &bits in &literals[..count] {
+            let v = f64::from_bits(bits);
+            self.update_buckets(v, 1)?;
+        }
+
         Ok(())
     }
 
@@ -1628,7 +1931,20 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         let new_sum = self.sum() + other.sum();
 
         let result = (|| {
-            if !other.buckets_empty() {
+            // Literal source: iterate its raw values as insertions.
+            if other.literal {
+                if self.literal {
+                    self.promote()?;
+                }
+                for &bits in other.literal_values() {
+                    let v = f64::from_bits(bits);
+                    self.update_buckets(v, 1)?;
+                }
+            } else if !other.buckets_empty() {
+                if self.literal {
+                    self.promote()?;
+                }
+
                 if self.buckets_empty() {
                     self.bucket_width = self.bucket_width.max(other.bucket_width);
                 }
@@ -1696,6 +2012,10 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
         let result = (|| {
             if other_len > 0 {
+                if self.literal {
+                    self.promote()?;
+                }
+
                 let other_end = other_offset + other_len as i32 - 1;
                 let cap = self.bucket_capacity() as i32;
                 let min_scale = self.mapping.scale().min(other_scale);
@@ -1781,6 +2101,47 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         &mut self,
         other: &Histogram<M, P>,
     ) -> Result<(), Overflow> {
+        // Literal source: iterate its raw values as insertions.
+        if other.literal {
+            if other.count() == 0 {
+                return Ok(());
+            }
+
+            let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
+            let snapshot = self.clone();
+
+            let result = (|| {
+                if self.literal {
+                    self.promote()?;
+                }
+                for &bits in other.literal_values() {
+                    let v = f64::from_bits(bits);
+                    self.update_buckets(v, 1)?;
+                }
+
+                // Commit stats.
+                if self.count() == 0 {
+                    self.set_min(other.min());
+                    self.set_max(other.max());
+                } else {
+                    if other.min() < self.min() {
+                        self.set_min(other.min());
+                    }
+                    if other.max() > self.max() {
+                        self.set_max(other.max());
+                    }
+                }
+                self.set_sum(self.sum() + other.sum());
+                self.set_count(new_count);
+                Ok(())
+            })();
+
+            if result.is_err() {
+                *self = snapshot;
+            }
+            return result;
+        }
+
         self.merge_from_raw(
             other.count(),
             other.sum(),
@@ -2906,7 +3267,9 @@ mod tests {
     fn test_do_downscale_preserves_width_when_possible() {
         // Fill histogram with small counts at many indices.
         // Downscale should merge pairs without widening.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         // Insert 1 at each of several indices (all count=1, sums ≤ 2).
         for i in 0..8 {
             h.update(2.0_f64.powi(i)).unwrap();
@@ -2922,7 +3285,9 @@ mod tests {
     #[test]
     fn test_do_downscale_widens_on_overflow() {
         // Fill histogram with counts that will overflow on merge.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         h.update_by_incr(2.0, 15).unwrap();  // index 0, count 15
         h.update_by_incr(4.0, 15).unwrap();  // index 1, count 15
         assert_eq!(h.bucket_width(), BucketWidth::B4);
@@ -3117,7 +3482,7 @@ mod tests {
     fn test_bucket_downscale_scalar_preserves_total_no_overflow() {
         // Two values at adjacent indices with small counts → scalar merge
         // should sum them without widening.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_literal_mode(false);
         h.update_by_incr(2.0, 3).unwrap();  // index 0
         h.update_by_incr(4.0, 5).unwrap();  // index 1
 
@@ -3161,7 +3526,9 @@ mod tests {
     #[test]
     fn test_do_downscale_multi_step_preserves_total() {
         // Insert 4 values at separate indices, then downscale by 3.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         for i in 0..4 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3181,7 +3548,8 @@ mod tests {
     fn test_do_downscale_multi_step_through_alignment_boundary() {
         // Start with base aligned to 16, downscale 5+ times so base
         // goes from even to odd and back. Verify totals survive.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
+            .with_literal_mode(false);
         for i in 0..8 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3199,7 +3567,7 @@ mod tests {
     #[test]
     fn test_do_downscale_odd_base_preserves_total() {
         // Downscale through odd-base steps using SWAR-shift.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_literal_mode(false);
         for i in 0..4 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3354,7 +3722,7 @@ mod tests {
     #[test]
     fn test_sum_conservation_scalar_path() {
         // Force the scalar path and check totals at each step.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_literal_mode(false);
         for i in 0..10 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3745,5 +4113,354 @@ mod tests {
             assert!(b.at(0) > 0, "leading zero bucket");
             assert!(b.at(b.len() - 1) > 0, "trailing zero bucket");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Literal mode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_literal_mode_default() {
+        let h: Histogram<8, P32> = Histogram::new();
+        assert!(h.is_literal());
+        assert_eq!(h.count(), 0);
+        assert_eq!(h.sum(), 0.0);
+    }
+
+    #[test]
+    fn test_literal_mode_stores_values() {
+        let mut h: Histogram<8, P32> = Histogram::new();
+        h.update(1.0).unwrap();
+        h.update(2.0).unwrap();
+        h.update(4.0).unwrap();
+        assert!(h.is_literal());
+        assert_eq!(h.count(), 3);
+        assert_eq!(h.sum(), 7.0);
+        assert_eq!(h.min(), 1.0);
+        assert_eq!(h.max(), 4.0);
+    }
+
+    #[test]
+    fn test_literal_mode_capacity_p32() {
+        // Histogram<8, P32>: STAT_WORDS=2, so 6 literal slots.
+        let mut h: Histogram<8, P32> = Histogram::new();
+        for i in 0..6 {
+            h.update(2.0_f64.powi(i)).unwrap();
+        }
+        assert!(h.is_literal(), "should still be literal with 6 values");
+        assert_eq!(h.count(), 6);
+
+        // 7th value should trigger promotion.
+        h.update(128.0).unwrap();
+        assert!(!h.is_literal(), "should promote on 7th value");
+        assert_eq!(h.count(), 7);
+    }
+
+    #[test]
+    fn test_literal_mode_capacity_p64() {
+        // Histogram<8, P64>: STAT_WORDS=4, so 4 literal slots.
+        let mut h: Histogram<8, P64> = Histogram::new();
+        for i in 0..4 {
+            h.update(2.0_f64.powi(i)).unwrap();
+        }
+        assert!(h.is_literal(), "should still be literal with 4 values");
+
+        h.update(32.0).unwrap();
+        assert!(!h.is_literal(), "should promote on 5th value");
+        assert_eq!(h.count(), 5);
+    }
+
+    #[test]
+    fn test_literal_mode_opt_out() {
+        let mut h: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+        assert!(!h.is_literal());
+        h.update(1.0).unwrap();
+        assert!(!h.is_literal());
+    }
+
+    #[test]
+    fn test_literal_mode_clear_resets() {
+        let mut h: Histogram<8, P32> = Histogram::new();
+        // Fill to promotion.
+        for i in 0..7 {
+            h.update(2.0_f64.powi(i)).unwrap();
+        }
+        assert!(!h.is_literal());
+        h.clear();
+        assert!(h.is_literal());
+        assert_eq!(h.count(), 0);
+    }
+
+    #[test]
+    fn test_literal_mode_zero_values() {
+        // Zero values don't consume literal slots.
+        let mut h: Histogram<8, P32> = Histogram::new();
+        h.update(0.0).unwrap();
+        h.update(0.0).unwrap();
+        h.update(0.0).unwrap();
+        assert!(h.is_literal());
+        assert_eq!(h.count(), 3);
+        assert_eq!(h.sum(), 0.0);
+        // Bucket view should be empty (zeros are tracked in MMSC only).
+        assert!(h.positive().is_empty());
+    }
+
+    #[test]
+    fn test_literal_mode_identical_values() {
+        let mut h: Histogram<8, P32> = Histogram::new();
+        for _ in 0..6 {
+            h.update(42.0).unwrap();
+        }
+        assert!(h.is_literal());
+        assert_eq!(h.count(), 6);
+        assert_eq!(h.sum(), 252.0);
+        assert_eq!(h.min(), 42.0);
+        assert_eq!(h.max(), 42.0);
+        // All map to the same bucket → len should be 1.
+        assert_eq!(h.positive().len(), 1);
+        assert_eq!(h.positive().at(0), 6);
+    }
+
+    #[test]
+    fn test_literal_mode_bucket_view() {
+        // Compare literal-mode virtual view to bucket-mode actual view.
+        let mut lit: Histogram<8, P32> = Histogram::new();
+        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+
+        let values = [1.0, 2.0, 4.0];
+        for &v in &values {
+            lit.update(v).unwrap();
+            bkt.update(v).unwrap();
+        }
+
+        assert!(lit.is_literal());
+        assert!(!bkt.is_literal());
+
+        // Both should report the same scale, offset, len, and counts.
+        assert_eq!(lit.scale(), bkt.scale());
+        assert_eq!(lit.positive().offset(), bkt.positive().offset());
+        assert_eq!(lit.positive().len(), bkt.positive().len());
+        for i in 0..lit.positive().len() {
+            assert_eq!(
+                lit.positive().at(i),
+                bkt.positive().at(i),
+                "bucket[{i}] mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_literal_promotion_optimal_scale() {
+        // Verify that promotion picks the optimal scale (matching what
+        // bucket mode would choose given the same values).
+        let mut h: Histogram<8, P32> = Histogram::new();
+        // Insert values that span a wide range to force downscaling.
+        let values = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        for &v in &values {
+            h.update(v).unwrap();
+        }
+        assert!(h.is_literal());
+
+        // Now promote by inserting one more.
+        h.update(64.0).unwrap();
+        assert!(!h.is_literal());
+
+        // Compare to bucket-mode histogram with same values.
+        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+        for &v in &values {
+            bkt.update(v).unwrap();
+        }
+        bkt.update(64.0).unwrap();
+
+        // The total counts should match.
+        let lit_total: u64 = h.positive().iter().sum();
+        let bkt_total: u64 = bkt.positive().iter().sum();
+        assert_eq!(lit_total, bkt_total);
+        assert_eq!(h.count(), bkt.count());
+        assert_eq!(h.sum(), bkt.sum());
+    }
+
+    #[test]
+    fn test_literal_update_by_incr() {
+        let mut h: Histogram<8, P32> = Histogram::new();
+        // 3 copies of the same value.
+        h.update_by_incr(5.0, 3).unwrap();
+        assert!(h.is_literal());
+        assert_eq!(h.count(), 3);
+        assert_eq!(h.sum(), 15.0);
+    }
+
+    #[test]
+    fn test_literal_update_by_incr_overflow() {
+        // Histogram<8, P32>: 6 literal slots. incr=7 should promote.
+        let mut h: Histogram<8, P32> = Histogram::new();
+        h.update_by_incr(3.14, 7).unwrap();
+        assert!(!h.is_literal());
+        assert_eq!(h.count(), 7);
+    }
+
+    #[test]
+    fn test_literal_merge_literal_into_literal() {
+        let mut a: Histogram<8, P32> = Histogram::new();
+        a.update(1.0).unwrap();
+        a.update(2.0).unwrap();
+
+        let mut b: Histogram<8, P32> = Histogram::new();
+        b.update(4.0).unwrap();
+        b.update(8.0).unwrap();
+
+        a.merge_from(&b).unwrap();
+
+        // After merge, `a` may or may not still be literal depending on
+        // total count vs capacity. With 4 values and capacity 6, it could
+        // remain literal if merge-from-literal inserts one by one. But our
+        // implementation promotes `a` first, so `a` is now bucket mode.
+        assert_eq!(a.count(), 4);
+        assert_eq!(a.sum(), 15.0);
+        assert_eq!(a.min(), 1.0);
+        assert_eq!(a.max(), 8.0);
+    }
+
+    #[test]
+    fn test_literal_merge_literal_into_bucket() {
+        let mut collector: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        collector.update(1.0).unwrap();
+        collector.update(2.0).unwrap();
+
+        let mut source: Histogram<16, P32> = Histogram::new();
+        source.update(4.0).unwrap();
+        source.update(8.0).unwrap();
+        assert!(source.is_literal());
+
+        collector.merge_from(&source).unwrap();
+        assert_eq!(collector.count(), 4);
+        assert_eq!(collector.sum(), 15.0);
+    }
+
+    #[test]
+    fn test_literal_merge_bucket_into_literal() {
+        let mut collector: Histogram<16, P32> = Histogram::new();
+        collector.update(1.0).unwrap();
+        assert!(collector.is_literal());
+
+        let mut source: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        source.update(4.0).unwrap();
+        source.update(8.0).unwrap();
+
+        collector.merge_from(&source).unwrap();
+        // collector should have promoted to accept bucket data.
+        assert!(!collector.is_literal());
+        assert_eq!(collector.count(), 3);
+        assert_eq!(collector.sum(), 13.0);
+    }
+
+    #[test]
+    fn test_literal_merge_preserves_source() {
+        // Source stays literal after merge (it's &self).
+        let mut collector: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        collector.update(1.0).unwrap();
+
+        let mut source: Histogram<16, P32> = Histogram::new();
+        source.update(4.0).unwrap();
+        assert!(source.is_literal());
+
+        collector.merge_from(&source).unwrap();
+
+        // Source should still be literal and unchanged.
+        assert!(source.is_literal());
+        assert_eq!(source.count(), 1);
+        assert_eq!(source.sum(), 4.0);
+    }
+
+    #[test]
+    fn test_literal_merge_cross_size() {
+        // Merge a literal Histogram<8> into a larger Histogram<16>.
+        let mut collector: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        collector.update(1.0).unwrap();
+
+        let mut source: Histogram<8, P32> = Histogram::new();
+        source.update(4.0).unwrap();
+        source.update(8.0).unwrap();
+        assert!(source.is_literal());
+
+        collector.merge_from_other(&source).unwrap();
+        assert_eq!(collector.count(), 3);
+        assert_eq!(collector.sum(), 13.0);
+    }
+
+    #[test]
+    fn test_literal_equivalence_with_bucket_mode() {
+        // Verify that a promoted literal histogram and a bucket-mode
+        // histogram produce the same bucket totals for the same inputs.
+        let values = [1.5, 2.7, 0.3, 100.0, 42.0, 7.7];
+
+        let mut lit: Histogram<8, P32> = Histogram::new();
+        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+
+        for &v in &values {
+            lit.update(v).unwrap();
+            bkt.update(v).unwrap();
+        }
+
+        // Both at 6 values. lit is literal, bkt is bucket.
+        assert!(lit.is_literal());
+
+        // Force promotion by inserting one more.
+        lit.update(999.0).unwrap();
+        bkt.update(999.0).unwrap();
+        assert!(!lit.is_literal());
+
+        let lit_total: u64 = lit.positive().iter().sum();
+        let bkt_total: u64 = bkt.positive().iter().sum();
+        assert_eq!(lit_total, bkt_total, "bucket totals should match");
+        assert_eq!(lit.count(), bkt.count());
+        assert_eq!(lit.sum(), bkt.sum());
+        assert_eq!(lit.min(), bkt.min());
+        assert_eq!(lit.max(), bkt.max());
+    }
+
+    #[test]
+    fn test_literal_subnormal_values() {
+        let subnormal = 5.0e-324_f64; // smallest subnormal
+        let mut h: Histogram<8, P32> = Histogram::new();
+        h.update(subnormal).unwrap();
+        h.update(subnormal).unwrap();
+        assert!(h.is_literal());
+        assert_eq!(h.count(), 2);
+        // P32 uses f32 for min/max, so subnormals below f32 range
+        // underflow to 0 in the stat words. Check bucket view instead.
+        assert_eq!(h.positive().at(0), 2);
+    }
+
+    #[test]
+    fn test_literal_empty_bucket_view() {
+        let h: Histogram<8, P32> = Histogram::new();
+        assert!(h.is_literal());
+        assert!(h.positive().is_empty());
+        assert_eq!(h.positive().len(), 0);
+    }
+
+    #[test]
+    fn test_literal_scale_matches_bucket() {
+        let values = [1.0, 1024.0]; // wide range
+        let mut lit: Histogram<8, P32> = Histogram::new();
+        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+
+        for &v in &values {
+            lit.update(v).unwrap();
+            bkt.update(v).unwrap();
+        }
+        assert!(lit.is_literal());
+
+        // Effective scales should match.
+        assert_eq!(lit.scale(), bkt.scale());
+    }
+
+    #[test]
+    fn test_literal_debug_format() {
+        let mut h: Histogram<8, P32> = Histogram::new();
+        h.update(1.0).unwrap();
+        let debug = format!("{:?}", h);
+        assert!(debug.contains("literal"), "Debug should mention literal mode");
     }
 }

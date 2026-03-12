@@ -26,6 +26,10 @@
 //! # Features
 //!
 //! - **Allocation-free**: Uses fixed-size arrays via const generics
+//! - **Literal mode cold-start**: New histograms store raw f64 values in the
+//!   data pool. When the pool fills, the full value range determines the
+//!   optimal scale in one shot — eliminating incremental downscale/widen
+//!   work during the first few observations.
 //! - **Auto-widening counters**: Buckets start at 1-bit and widen in-place
 //!   (1→2→4 bits → u8 → u16 → u32 → u64) via combined downscale+widen when a
 //!   counter saturates. Sub-byte transitions use parallel bit-sum (SWAR).
@@ -86,6 +90,20 @@
 //! capacity. When a counter saturates, the histogram performs an in-place
 //! widen+downscale: bucket count halves, counter width doubles, and scale
 //! decreases by 1.
+//!
+//! # Literal Mode
+//!
+//! New histograms start in **literal mode**: the first few observations are
+//! stored as raw `f64` bit patterns in the data pool (one u64 per value).
+//! When the pool fills (the `capacity+1`th non-zero value), the histogram
+//! promotes to bucket mode. At promotion time, the full min/max range of the
+//! stored values determines the optimal starting scale in a single pass,
+//! avoiding all incremental downscale/widen work during cold-start.
+//!
+//! Literal mode is transparent to readers — [`BucketView`] computes a virtual
+//! bucket view on the fly. Literal mode can be disabled via
+//! [`with_literal_mode(false)`](Histogram::with_literal_mode) for benchmarks
+//! or when the caller knows the value range upfront.
 
 pub mod exponent;
 pub mod float64;

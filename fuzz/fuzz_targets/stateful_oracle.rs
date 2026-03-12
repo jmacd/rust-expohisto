@@ -276,15 +276,22 @@ fuzz_target!(|data: &[u8]| {
     }
     let mut u = Unstructured::new(data);
 
+    // Use first byte to decide literal mode for each pool member.
+    let lit_ctl: u8 = u.arbitrary().unwrap_or(0xFF);
+
     // Pool of histograms — small N to maximize pressure on downscale/widen.
-    let mut p32: [Histogram<8, P32>; P32_POOL] = core::array::from_fn(|_| Histogram::new());
+    let mut p32: [Histogram<8, P32>; P32_POOL] = core::array::from_fn(|i| {
+        Histogram::new().with_literal_mode(lit_ctl & (1 << i) != 0)
+    });
     let mut sp32: [Shadow; P32_POOL] = core::array::from_fn(|_| Shadow::default());
 
-    let mut p64: [Histogram<8, P64>; P64_POOL] = core::array::from_fn(|_| Histogram::new());
+    let mut p64: [Histogram<8, P64>; P64_POOL] = core::array::from_fn(|i| {
+        Histogram::new().with_literal_mode(lit_ctl & (1 << (P32_POOL + i)) != 0)
+    });
     let mut sp64: [Shadow; P64_POOL] = core::array::from_fn(|_| Shadow::default());
 
     // Also keep one Histogram<16> for cross-size merges.
-    let mut big: Histogram<16, P32> = Histogram::new();
+    let mut big: Histogram<16, P32> = Histogram::new().with_literal_mode(lit_ctl & 0x80 != 0);
     let mut sbig: Shadow = Shadow::default();
 
     // Cap operations to keep memory bounded.

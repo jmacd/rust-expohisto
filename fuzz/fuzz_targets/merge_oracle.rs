@@ -60,10 +60,16 @@ fuzz_target!(|data: &[u8]| {
     let split = (partition_byte as usize) % (ops.len() + 1);
     let (left, right) = ops.split_at(split);
 
-    check_merge_same::<8>(left, right);
-    check_merge_same::<16>(left, right);
-    check_merge_different::<8, 16>(left, right);
-    check_merge_different::<16, 8>(left, right);
+    check_merge_same::<8>(left, right, true);
+    check_merge_same::<16>(left, right, true);
+    check_merge_different::<8, 16>(left, right, true);
+    check_merge_different::<16, 8>(left, right, true);
+
+    // Also test with literal mode disabled.
+    check_merge_same::<8>(left, right, false);
+    check_merge_same::<16>(left, right, false);
+    check_merge_different::<8, 16>(left, right, false);
+    check_merge_different::<16, 8>(left, right, false);
 });
 
 /// Map a selector byte into an increment that exercises different
@@ -107,8 +113,8 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 // Merge checks
 // ---------------------------------------------------------------------------
 
-fn check_merge_same<const N: usize>(left: &[Op], right: &[Op]) {
-    let mut h1 = Histogram::<N, P32>::new();
+fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: bool) {
+    let mut h1 = Histogram::<N, P32>::new().with_literal_mode(literal_mode);
     let mut ok_left: Vec<Op> = Vec::new();
     for &op in left {
         if h1.update_by_incr(op.value, op.incr).is_ok() {
@@ -116,7 +122,7 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op]) {
         }
     }
 
-    let mut h2 = Histogram::<N, P32>::new();
+    let mut h2 = Histogram::<N, P32>::new().with_literal_mode(literal_mode);
     let mut ok_right: Vec<Op> = Vec::new();
     for &op in right {
         if h2.update_by_incr(op.value, op.incr).is_ok() {
@@ -132,8 +138,8 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op]) {
     verify_histogram(&h1, &ok_left);
 }
 
-fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[Op]) {
-    let mut h1 = Histogram::<N, P32>::new();
+fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[Op], literal_mode: bool) {
+    let mut h1 = Histogram::<N, P32>::new().with_literal_mode(literal_mode);
     let mut ok_left: Vec<Op> = Vec::new();
     for &op in left {
         if h1.update_by_incr(op.value, op.incr).is_ok() {
@@ -141,7 +147,7 @@ fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[O
         }
     }
 
-    let mut h2 = Histogram::<M, P32>::new();
+    let mut h2 = Histogram::<M, P32>::new().with_literal_mode(literal_mode);
     let mut ok_right: Vec<Op> = Vec::new();
     for &op in right {
         if h2.update_by_incr(op.value, op.incr).is_ok() {
