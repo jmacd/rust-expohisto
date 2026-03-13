@@ -100,6 +100,20 @@ impl BucketWidth {
         self as usize
     }
 
+    /// Returns the index into [`SWAR_TABLE`] for this width.
+    #[inline]
+    const fn level(self) -> usize {
+        match self {
+            Self::B1 => 0,
+            Self::B2 => 1,
+            Self::B4 => 2,
+            Self::U8 => 3,
+            Self::U16 => 4,
+            Self::U32 => 5,
+            Self::U64 => 6,
+        }
+    }
+
     /// Returns the number of buckets that fit in `word_count` u64 words.
     #[inline]
     const fn capacity(self, word_count: usize) -> usize {
@@ -739,11 +753,6 @@ impl<const N: usize> Histogram<N> {
     /// `[index_base, index_base + cap)`), so SWAR operates on a
     /// contiguous linear layout.
     ///
-    /// If `index_base` is odd, shifts data up by one slot to restore
-    /// even alignment before the SWAR step. When the top slot is
-    /// occupied (live range fills capacity), falls back to a scalar
-    /// gather-scatter for that one step.
-    ///
     /// Returns `None` if already at U64 or `steps` would exceed U64.
     /// Returns `Some(steps)` on success (= the scale decrease applied).
     fn bucket_widen(&mut self, steps: i32) -> Option<i32> {
@@ -769,33 +778,55 @@ impl<const N: usize> Histogram<N> {
 
         let mut done = 0;
         while done < steps {
-            let width = self.bucket_width;
-            if width == BucketWidth::U64 {
-                return None; // would exceed U64
-            }
-
-            let shifted = self.index_base & 1 != 0;
-
-            if shifted {
-                if self.top_slot_occupied() {
-                    done += self.scalar_merge_step(true)?;
-                    continue;
-                }
-                swar_shift_up_one(self.bucket_data_mut(), width);
-            }
-
-            swar_step(self.bucket_data_mut(), width);
-            self.bucket_width = width.wider().unwrap();
-            self.shift_indices(1);
-
-            if shifted {
-                self.clamp_index_end();
-            }
-
-            done += 1;
+            done += self.swar_merge_step(true)?;
         }
 
         Some(done)
+    }
+
+    /// Performs one SWAR pairwise-merge step.
+    ///
+    /// If `index_base` is odd, shifts data up by one slot to restore
+    /// even alignment. When the top slot is occupied, falls back to
+    /// [`scalar_merge_step`](Self::scalar_merge_step).
+    ///
+    /// When `force_widen` is true, always accepts the wider format
+    /// (used by `bucket_widen`). Otherwise checks for overflow and
+    /// narrows back to the original width when possible (used by
+    /// `do_downscale` to preserve bucket capacity).
+    ///
+    /// Returns the number of scale levels consumed, or `None` if
+    /// already at U64.
+    fn swar_merge_step(&mut self, force_widen: bool) -> Option<i32> {
+        let width = self.bucket_width;
+        if width == BucketWidth::U64 {
+            return None;
+        }
+
+        let shifted = self.index_base & 1 != 0;
+
+        if shifted {
+            if self.top_slot_occupied() {
+                return self.scalar_merge_step(force_widen);
+            }
+            swar_shift_up_one(self.bucket_data_mut(), width);
+        }
+
+        swar_step(self.bucket_data_mut(), width);
+
+        if force_widen || swar_has_overflow(self.bucket_data(), width) {
+            self.bucket_width = width.wider().unwrap();
+        } else {
+            swar_narrow_compact(self.bucket_data_mut(), width);
+        }
+
+        self.shift_indices(1);
+
+        if shifted {
+            self.clamp_index_end();
+        }
+
+        Some(1)
     }
 
     /// Scalar gather-scatter merge. Used when SWAR cannot operate
@@ -920,57 +951,44 @@ impl<const N: usize> Histogram<N> {
 // SWAR — per-word parallel pairwise summation
 // ---------------------------------------------------------------------------
 
-/// Applies a single SWAR pairwise-sum step: for each word, adds the
-/// upper half-slots to the lower half-slots, producing sums in the
-/// next-wider format.
+/// Per-width SWAR parameters: `(shift, lane_mask)`.
+///
+/// - `shift`: number of bits to shift the upper half-slots down.
+/// - `lane_mask`: keeps only the lower half-slot in each pair.
+/// - `!lane_mask`: overflow mask — bits set here after a step mean the
+///   pair-sum overflowed the original width.
+///
+/// Indexed by [`BucketWidth::level()`] (0=B1 … 5=U32).
+const SWAR_TABLE: [(u32, u64); 6] = [
+    (1, 0x5555_5555_5555_5555),  // B1
+    (2, 0x3333_3333_3333_3333),  // B2
+    (4, 0x0F0F_0F0F_0F0F_0F0F), // B4
+    (8, 0x00FF_00FF_00FF_00FF),  // U8
+    (16, 0x0000_FFFF_0000_FFFF), // U16
+    (32, 0x0000_0000_FFFF_FFFF), // U32
+];
+
+/// Single SWAR step: sum adjacent counters at the current width into
+/// the next wider width, in place.
 #[inline]
-fn swar_masked_step(data: &mut [u64], shift: u32, mask: u64) {
+fn swar_step(data: &mut [u64], width: BucketWidth) {
+    debug_assert_ne!(width, BucketWidth::U64, "cannot widen past U64");
+    let (shift, mask) = SWAR_TABLE[width.level()];
     for w in data.iter_mut() {
         let x = *w;
         *w = ((x >> shift) & mask) + (x & mask);
     }
 }
 
-/// Single SWAR step: sum adjacent counters at the current width into
-/// the next wider width, in place.
-#[inline]
-fn swar_step(data: &mut [u64], width: BucketWidth) {
-    match width {
-        BucketWidth::B1 => swar_masked_step(data, 1, 0x5555_5555_5555_5555),
-        BucketWidth::B2 => swar_masked_step(data, 2, 0x3333_3333_3333_3333),
-        BucketWidth::B4 => swar_masked_step(data, 4, 0x0F0F_0F0F_0F0F_0F0F),
-        BucketWidth::U8 => swar_masked_step(data, 8, 0x00FF_00FF_00FF_00FF),
-        BucketWidth::U16 => swar_masked_step(data, 16, 0x0000_FFFF_0000_FFFF),
-        BucketWidth::U32 => {
-            // 2 ints → 1 long (no mask needed, full 32-bit halves)
-            for w in data.iter_mut() {
-                let x = *w;
-                *w = (x >> 32) + (x & 0xFFFF_FFFF);
-            }
-        }
-        BucketWidth::U64 => unreachable!("cannot widen past U64"),
-    }
-}
-
-/// Checks whether any word has bits set in the given overflow mask.
-#[inline]
-fn any_masked(data: &[u64], mask: u64) -> bool {
-    data.iter().any(|&w| w & mask != 0)
-}
-
 /// Checks whether any widened pair-sum overflows the original width.
 /// Called after `swar_step` has already written the wider sums.
 #[inline]
 fn swar_has_overflow(data: &[u64], original_width: BucketWidth) -> bool {
-    match original_width {
-        BucketWidth::B1 => any_masked(data, 0xAAAA_AAAA_AAAA_AAAA),
-        BucketWidth::B2 => any_masked(data, 0xCCCC_CCCC_CCCC_CCCC),
-        BucketWidth::B4 => any_masked(data, 0xF0F0_F0F0_F0F0_F0F0),
-        BucketWidth::U8 => any_masked(data, 0xFF00_FF00_FF00_FF00),
-        BucketWidth::U16 => any_masked(data, 0xFFFF_0000_FFFF_0000),
-        BucketWidth::U32 => data.iter().any(|&w| w > u32::MAX as u64),
-        BucketWidth::U64 => false,
+    if original_width == BucketWidth::U64 {
+        return false;
     }
+    let (_, mask) = SWAR_TABLE[original_width.level()];
+    data.iter().any(|&w| w & !mask != 0)
 }
 
 /// Compacts narrowed half-words into full words, pairing two source
@@ -1486,35 +1504,9 @@ impl<const N: usize> Histogram<N> {
 
         // Phase 1: Adaptive SWAR merge at sub-U64 widths.
         while remaining > 0 && self.bucket_width != BucketWidth::U64 {
-            let shifted = self.index_base & 1 != 0;
-            if shifted {
-                if self.top_slot_occupied() {
-                    let steps = self.scalar_merge_step(false).ok_or(Overflow)?;
-                    self.adjust_scale(steps)?;
-                    remaining -= steps;
-                    continue;
-                }
-                let width = self.bucket_width;
-                swar_shift_up_one(self.bucket_data_mut(), width);
-            }
-
-            let width = self.bucket_width;
-            swar_step(self.bucket_data_mut(), width);
-
-            if swar_has_overflow(self.bucket_data(), width) {
-                self.bucket_width = width.wider().unwrap();
-            } else {
-                swar_narrow_compact(self.bucket_data_mut(), width);
-            }
-
-            self.shift_indices(1);
-
-            if shifted {
-                self.clamp_index_end();
-            }
-
-            self.adjust_scale(1)?;
-            remaining -= 1;
+            let steps = self.swar_merge_step(false).ok_or(Overflow)?;
+            self.adjust_scale(steps)?;
+            remaining -= steps;
         }
 
         // Phase 2: At U64, scatter-write for remaining steps.
@@ -3135,7 +3127,7 @@ mod tests {
         h.update_by_incr(2.0, 3).unwrap(); // index 0
         h.update_by_incr(4.0, 5).unwrap(); // index 1
 
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
         let width_before = h.bucket_width();
 
         // Drive to odd base by doing SWAR merges until base is odd.
@@ -3148,7 +3140,7 @@ mod tests {
         // Instead, test via do_downscale which will route to SWAR or scalar.
         h.do_downscale(1).unwrap();
 
-        let total_after: u64 = h.positive().iter().sum();
+        let total_after = bucket_total(&mut h);
         assert_eq!(
             total_before, total_after,
             "bucket total changed: {total_before} → {total_after}"
@@ -3164,11 +3156,11 @@ mod tests {
         h.update_by_incr(2.0, 10).unwrap(); // index 0, count 10
         h.update_by_incr(4.0, 10).unwrap(); // index 1, count 10
 
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
 
         h.do_downscale(1).unwrap();
 
-        let total_after: u64 = h.positive().iter().sum();
+        let total_after = bucket_total(&mut h);
         assert_eq!(total_before, total_after);
         // 10+10=20 > 15 → must widen to U8.
         assert_eq!(h.bucket_width(), BucketWidth::U8);
@@ -3183,13 +3175,13 @@ mod tests {
         for i in 0..4 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
         assert_eq!(total_before, 4);
         assert_eq!(h.bucket_width(), BucketWidth::B4);
 
         h.do_downscale(3).unwrap();
 
-        let total_after: u64 = h.positive().iter().sum();
+        let total_after = bucket_total(&mut h);
         assert_eq!(total_after, 4, "total changed after 3-step downscale");
         // All counts are 1, pair sums ≤ 2 → should stay at B4.
         assert_eq!(h.bucket_width(), BucketWidth::B4);
@@ -3203,14 +3195,14 @@ mod tests {
         for i in 0..8 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
         assert_eq!(total_before, 8);
 
         // 5 steps: base starts at e.g. -16 >> 5 = -1 (odd), so the
         // 5th step must use scalar fallback.
         h.do_downscale(5).unwrap();
 
-        let total_after: u64 = h.positive().iter().sum();
+        let total_after = bucket_total(&mut h);
         assert_eq!(total_after, 8, "total changed after 5-step downscale");
     }
 
@@ -3221,7 +3213,7 @@ mod tests {
         for i in 0..4 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
 
         // At B1, base = -64. After 6 steps: base = -64 >> 6 = -1 (odd).
         // Step 7 uses the odd SWAR-shift merge.
@@ -3229,7 +3221,7 @@ mod tests {
             h.do_downscale(1).unwrap();
         }
 
-        let total_after: u64 = h.positive().iter().sum();
+        let total_after = bucket_total(&mut h);
         assert_eq!(
             total_before, total_after,
             "total changed after 7-step downscale through odd base"
@@ -3248,7 +3240,7 @@ mod tests {
         h.update_by_incr(1.5, 5).unwrap();
         h.update_by_incr(1.6, 7).unwrap();
 
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
 
         // Downscale until base is odd (at most 15 steps to stay above MIN_SCALE).
         let mut tries = 0;
@@ -3269,7 +3261,7 @@ mod tests {
                     h.bucket_width()
                 );
 
-                let total_after: u64 = h.positive().iter().sum();
+                let total_after = bucket_total(&mut h);
                 assert_eq!(
                     total_before, total_after,
                     "bucket total changed on odd-base widen"
@@ -3324,10 +3316,10 @@ mod tests {
 
         h.update_by_incr(4.0, 200).unwrap();
         // Now at U8, do a merge: 200+200=400 > 255 → must widen to U16.
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
         h.do_downscale(1).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U16);
-        let total_after: u64 = h.positive().iter().sum();
+        let total_after = bucket_total(&mut h);
         assert_eq!(total_before, total_after);
     }
 
@@ -3341,10 +3333,10 @@ mod tests {
 
         h.update_by_incr(4.0, 50).unwrap();
         // 100+50=150 ≤ 255 → should stay at U8.
-        let total_before: u64 = h.positive().iter().sum();
+        let total_before = bucket_total(&mut h);
         h.do_downscale(1).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
-        let total_after: u64 = h.positive().iter().sum();
+        let total_after = bucket_total(&mut h);
         assert_eq!(total_before, total_after);
     }
 
@@ -3361,18 +3353,18 @@ mod tests {
         h.update_by_incr(1.5, 500).unwrap();
         h.update_by_incr(1.6, 500).unwrap();
         // Start at U16 (500 > 255).
-        let total: u64 = h.positive().iter().sum();
+        let total = bucket_total(&mut h);
         assert_eq!(total, 1000);
 
         // Add more to push into U32 territory.
         h.update_by_incr(1.7, 65000).unwrap();
         h.update_by_incr(1.8, 65000).unwrap();
-        let total: u64 = h.positive().iter().sum();
+        let total = bucket_total(&mut h);
 
         // Downscale up to 10 steps, verify total at each.
         for step in 1..=10 {
             h.do_downscale(1).unwrap();
-            let current: u64 = h.positive().iter().sum();
+            let current = bucket_total(&mut h);
             assert_eq!(
                 current,
                 total,
@@ -3398,7 +3390,7 @@ mod tests {
         // multiple times, exercising scalar and SWAR paths alternately.
         for step in 1..=8 {
             h.do_downscale(1).unwrap();
-            let current: u64 = h.positive().iter().sum();
+            let current = bucket_total(&mut h);
             assert_eq!(
                 current,
                 total,
@@ -3418,12 +3410,12 @@ mod tests {
         h.update_by_incr(4.0, 15).unwrap();
         h.update_by_incr(8.0, 15).unwrap();
         h.update_by_incr(16.0, 15).unwrap();
-        let total: u64 = h.positive().iter().sum();
+        let total = bucket_total(&mut h);
         assert_eq!(total, 60);
 
         for step in 1..=6 {
             h.do_downscale(1).unwrap();
-            let current: u64 = h.positive().iter().sum();
+            let current = bucket_total(&mut h);
             assert_eq!(
                 current,
                 total,
@@ -3528,22 +3520,15 @@ mod tests {
         for i in 1..=8 {
             let v = i as f64;
             h.update(v).unwrap();
-            let (total, b_width, b_offset, b_len, b_cap) = {
-                let b = h.positive();
-                let t: u64 = (0..b.len()).map(|k| b.at(k)).sum();
-                (t, b.width(), b.offset(), b.len(), b.capacity())
-            };
+            let total = bucket_total(&mut h);
             assert_eq!(
                 total,
                 h.count(),
                 "After inserting {v}: bucket total ({total}) != count ({})\n  \
-                 scale={} width={:?} offset={} len={} cap={}",
+                 scale={} width={:?}",
                 h.count(),
                 h.scale(),
-                b_width,
-                b_offset,
-                b_len,
-                b_cap
+                h.bucket_width()
             );
         }
     }
@@ -3555,11 +3540,7 @@ mod tests {
         let values = [0.001, 1.0, 1000.0, 0.5, 50.0, 0.01, 100.0, 10.0];
         for (vi, &v) in values.iter().enumerate() {
             h.update(v).unwrap();
-            let (total, b_width) = {
-                let b = h.positive();
-                let t: u64 = (0..b.len()).map(|k| b.at(k)).sum();
-                (t, b.width())
-            };
+            let total = bucket_total(&mut h);
             assert_eq!(
                 total,
                 h.count(),
@@ -3567,7 +3548,7 @@ mod tests {
                  scale={} width={:?}",
                 h.count(),
                 h.scale(),
-                b_width
+                h.bucket_width()
             );
         }
     }
@@ -3578,8 +3559,7 @@ mod tests {
 
     /// Helper: count total across all positive buckets.
     fn bucket_total<const N: usize>(h: &mut Histogram<N>) -> u64 {
-        let b = h.positive();
-        (0..b.len()).map(|i| b.at(i)).sum()
+        h.positive().iter().sum()
     }
 
     /// Helper: build two same-size histograms from ops, merge, and
@@ -3714,8 +3694,7 @@ mod tests {
         // Step 4: merge h1 into h0
         if h0.merge_from(&h1).is_ok() {
             let count = h0.count();
-            let b = h0.positive();
-            let bt: u64 = (0..b.len()).map(|i| b.at(i)).sum();
+            let bt = bucket_total(&mut h0);
             assert!(bt <= count, "bucket total ({bt}) exceeds count ({count})");
         }
     }
@@ -3925,8 +3904,8 @@ mod tests {
         bkt.update(256.0).unwrap();
 
         // The total counts should match.
-        let lit_total: u64 = h.positive().iter().sum();
-        let bkt_total: u64 = bkt.positive().iter().sum();
+        let lit_total = bucket_total(&mut h);
+        let bkt_total = bucket_total(&mut bkt);
         assert_eq!(lit_total, bkt_total);
         assert_eq!(h.count(), bkt.count());
         assert_eq!(h.sum(), bkt.sum());
@@ -4104,7 +4083,7 @@ mod tests {
         assert_eq!(dest2.count(), 3);
 
         // Verify bucket totals match count minus zeros.
-        let total: u64 = dest2.positive().iter().sum();
+        let total = bucket_total(&mut dest2);
         assert_eq!(total, 3, "all three non-zero values should be in buckets");
     }
 
@@ -4130,8 +4109,8 @@ mod tests {
         bkt.update(999.0).unwrap();
         assert!(!lit.is_literal());
 
-        let lit_total: u64 = lit.positive().iter().sum();
-        let bkt_total: u64 = bkt.positive().iter().sum();
+        let lit_total = bucket_total(&mut lit);
+        let bkt_total = bucket_total(&mut bkt);
         assert_eq!(lit_total, bkt_total, "bucket totals should match");
         assert_eq!(lit.count(), bkt.count());
         assert_eq!(lit.sum(), bkt.sum());
