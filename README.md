@@ -20,12 +20,12 @@ Exponential histograms provide a compact, high-resolution representation of valu
 ## Quick Start
 
 ```rust
-use otel_expohisto::{Histogram, P32};
+use otel_expohisto::Histogram;
 
 // Create a histogram with 16 u64 words (128 bytes) of data pool.
-// P32 uses 2 words for MMSC stats (f32/u32), leaving 14 words for
-// bucket data: 896 one-bit buckets at the default B1 width.
-let mut hist: Histogram<16, P32> = Histogram::new();
+// All 16 words are available for bucket data: 1024 one-bit buckets
+// at the default B1 width.
+let mut hist: Histogram<16> = Histogram::new();
 
 // Record observations
 hist.update(1.5).unwrap();
@@ -322,7 +322,7 @@ observed range in a single pass.
 ```text
 Literal Mode Lifecycle:
 
-  new()                    update(v)                 (N-STAT_WORDS+1)th value
+  new()                    update(v)                      (N+1)th value
     │                         │                              │
     ▼                         ▼                              ▼
 ┌────────┐   non-zero    ┌────────────┐    pool full    ┌──────────┐
@@ -346,7 +346,7 @@ triggering repeated downscale+widen operations that are immediately discarded as
 values refine the range. Literal mode eliminates all that incremental work — the optimal
 scale and bucket width are determined from the full initial set in one shot.
 
-For `Histogram<16, P32>`, literal capacity is 14 values (= 16 − 2 stat words).
+For `Histogram<16>`, literal capacity is 16 values (= `N`).
 Literal mode can be disabled via `.with_literal_mode(false)` for benchmarks or when the
 caller already knows the value range.
 
@@ -356,66 +356,62 @@ Bucket counters start at 1 bit per counter, maximizing the initial bucket count 
 
 ### Memory layout
 
-`Histogram<N, P>` stores everything in struct fields plus a flat `[u64; N]` data pool.
-The pool is split between MMSC statistics at the front and bucket data (or literals) after:
+`Histogram<N>` stores aggregate statistics in separate struct fields plus a flat
+`[u64; N]` data pool. Because stats live outside the pool, all `N` words are
+available for bucket data (or literals):
 
 ```text
-Histogram<16, P32>                    128 bytes total
-┌─────────────────────────────────────────────────────────────────┐
-│ data[0]          │ data[1]          │ data[2] ... data[15]      │
-│ ┌──────┬───────┐ │ ┌──────┬──────┐ │                            │
-│ │sum   │count  │ │ │min   │max   │ │   14 words: bucket data    │
-│ │(f32) │(u32)  │ │ │(f32) │(f32) │ │   or literal f64 values   │
-│ └──────┴───────┘ │ └──────┴──────┘ │                            │
-│    MMSC word 0   │   MMSC word 1   │                            │
-└─────────────────────────────────────────────────────────────────┘
- ◄── P32: 2 words ─►◄──────── bucket pool: N-2 = 14 words ──────►
+Histogram<16>                     128 bytes data pool + 32 bytes stats
 
-Histogram<16, P64>                    128 bytes total
 ┌─────────────────────────────────────────────────────────────────┐
-│ data[0] │ data[1] │ data[2] │ data[3] │ data[4] ... data[15]   │
-│ sum     │ count   │ min     │ max     │                         │
-│ (f64)   │ (u64)   │ (f64)   │ (f64)   │  12 words: buckets     │
+│ stats.count (u64) │ stats.sum (f64) │ stats.min/max (f64, f64) │
+│ separate struct fields; not stored in `data`                   │
 └─────────────────────────────────────────────────────────────────┘
- ◄────── P64: 4 words ────────►◄──── bucket pool: N-4 = 12 ────►
+
+┌─────────────────────────────────────────────────────────────────┐
+│ data[0] │ data[1] │ data[2] │ ... │ data[15]                   │
+│ 16 words: bucket data or literal f64 values                    │
+└─────────────────────────────────────────────────────────────────┘
+ ◄───────────── stats overhead: 32 bytes ─────────────►
+ ◄──────────── data pool: N = 16 words = 128 bytes ───►
 ```
 
-In **literal mode** (cold start), the bucket pool stores raw `f64` bit patterns
+In **literal mode** (cold start), the data pool stores raw `f64` bit patterns
 — one per non-zero observation — until the pool fills and promotes to bucket mode.
 
-In **bucket mode**, the bucket pool is reinterpreted at the current counter width.
+In **bucket mode**, the data pool is reinterpreted at the current counter width.
 All widths use the same physical `[u64; N]` backing array — the histogram just
 interprets the same bits differently:
 
 ```text
-14 bucket words at each width (Histogram<16, P32>):
+16 bucket words at each width (Histogram<16>):
 
-B1  ┌──────────────────────────────────────────────┐  896 slots
-    │ 64 bits per word × 14 words = 896 1-bit slots│  max count: 1
+B1  ┌──────────────────────────────────────────────┐  1024 slots
+    │ 64 bits per word × 16 words = 1024 1-bit slots│  max count: 1
     └──────────────────────────────────────────────┘
 
-B2  ┌──────────────────────────────────────────────┐  448 slots
-    │ 32 × 2-bit slots per word × 14 words         │  max count: 3
+B2  ┌──────────────────────────────────────────────┐   512 slots
+    │ 32 × 2-bit slots per word × 16 words         │  max count: 3
     └──────────────────────────────────────────────┘
 
-B4  ┌──────────────────────────────────────────────┐  224 slots
-    │ 16 nibbles per word × 14 words                │  max count: 15
+B4  ┌──────────────────────────────────────────────┐   256 slots
+    │ 16 nibbles per word × 16 words               │  max count: 15
     └──────────────────────────────────────────────┘
 
-U8  ┌──────────────────────────────────────────────┐  112 slots
-    │ 8 bytes per word × 14 words                   │  max count: 255
+U8  ┌──────────────────────────────────────────────┐   128 slots
+    │ 8 bytes per word × 16 words                  │  max count: 255
     └──────────────────────────────────────────────┘
 
-U16 ┌──────────────────────────────────────────────┐   56 slots
-    │ 4 u16s per word × 14 words                    │  max count: 65,535
+U16 ┌──────────────────────────────────────────────┐    64 slots
+    │ 4 u16s per word × 16 words                   │  max count: 65,535
     └──────────────────────────────────────────────┘
 
-U32 ┌──────────────────────────────────────────────┐   28 slots
-    │ 2 u32s per word × 14 words                    │  max count: ~4.3 billion
+U32 ┌──────────────────────────────────────────────┐    32 slots
+    │ 2 u32s per word × 16 words                   │  max count: ~4.3 billion
     └──────────────────────────────────────────────┘
 
-U64 ┌──────────────────────────────────────────────┐   14 slots
-    │ 1 u64 per word × 14 words                     │  max count: ~1.8 × 10¹⁹
+U64 ┌──────────────────────────────────────────────┐    16 slots
+    │ 1 u64 per word × 16 words                    │  max count: ~1.8 × 10¹⁹
     └──────────────────────────────────────────────┘
 ```
 
@@ -526,11 +522,11 @@ Once counters have reached U64, further downscale steps use a different path (`b
 When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to record another observation), the histogram must widen all counters. This is done via `bucket_widen(steps)`:
 
 ```text
-Widening cascade for Histogram<16, P32> (14 bucket words):
+Widening cascade for Histogram<16> (16 bucket words):
 
 B1 ──saturate──► B2 ──saturate──► B4 ──saturate──► U8 ──► U16 ──► U32 ──► U64
 │                │                │                │       │       │       │
-896 slots        448 slots        224 slots        112     56      28      14
+1024 slots       512 slots        256 slots        128     64      32      16
 max=1            max=3            max=15           max=255 max=64K max=4G  max=2⁶⁴
 
 Each transition: counters merge pairwise, scale decreases by 1.
@@ -548,37 +544,24 @@ The transition preserves the total count across all buckets: the sum of all coun
 
 ## Choosing Your Parameters
 
-`Histogram<N, P>` has two compile-time parameters:
+`Histogram<N>` has one compile-time parameter:
 
 ### Pool size `N` (u64 words)
 
-`N` controls total memory: each histogram uses exactly `N × 8` bytes of data pool.
-After `P`'s stat words are subtracted, the remaining words hold bucket counters.
+`N` controls data-pool size: each histogram uses exactly `N × 8` bytes of
+bucket/literal storage. Aggregate stats are stored separately as `count: u64`
+and `sum/min/max: f64` (32 bytes total).
 Larger `N` means more buckets, which means finer resolution before downscaling.
 
-| N | Total bytes | Bucket words (P32) | B1 slots | U64 slots |
+| N | Data pool bytes | Bucket words | B1 slots | U64 slots |
 |---:|---:|---:|---:|---:|
-| 8 | 64 | 6 | 384 | 6 |
-| 16 | 128 | 14 | 896 | 14 |
-| 32 | 256 | 30 | 1920 | 30 |
+| 8 | 64 | 8 | 512 | 8 |
+| 16 | 128 | 16 | 1024 | 16 |
+| 32 | 256 | 32 | 2048 | 32 |
 
-**Rule of thumb**: For typical latency distributions (0.1ms–10s), `N=16` with
-P32 provides 896 B1 buckets — enough for scale 4 (16 buckets/octave, ~2.2%
+**Rule of thumb**: For typical latency distributions (0.1ms–10s), `N=16`
+provides 1024 B1 buckets — enough for scale 4 (16 buckets/octave, ~2.2%
 relative error) across the full range.
-
-### Precision `P` (P32 or P64)
-
-The precision tier controls how MMSC (min, max, sum, count) statistics are stored:
-
-| Precision | Stat words | Sum type | Count type | Min/Max type |
-|-----------|---:|----------|-----------|-------------|
-| `P32` | 2 | `f32` | `u32` | `f32` |
-| `P64` | 4 | `f64` | `u64` | `f64` |
-
-Use `P32` (default recommendation) unless you need:
-- Per-bucket counts above 4 billion → `P64`
-- Sum precision beyond f32 (~7 digits) → `P64`
-- Min/max precision beyond f32 → `P64`
 
 ### Other configuration
 
@@ -609,7 +592,7 @@ The spec defines three configuration parameters:
 
 | Parameter | Spec Default | This Implementation | Notes |
 |-----------|-------------|---------------------|-------|
-| **MaxSize** | 160 | Any compile-time `N` via `Histogram<N, P>` | `N` is the total pool size in u64 words. Bucket capacity depends on the current counter width and precision tier `P`. |
+| **MaxSize** | 160 | Any compile-time `N` via `Histogram<N>` | `N` is the data pool size in u64 words. Bucket capacity depends on the current counter width. |
 | **MaxScale** | 20 | 20 (`MAX_SCALE`) | Effective max depends on the mapping feature: table-based features cap at `TABLE_SCALE` (e.g. 8 for `scale-8`); the `logarithm` feature reaches 20. `Histogram::with_max_scale()` lets the user set a lower cap. |
 | **RecordMinMax** | true | Always on | `min` and `max` are tracked on every update. There is no option to disable them. |
 

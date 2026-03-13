@@ -7,7 +7,6 @@ pub(crate) mod exponent;
 pub(crate) mod float64;
 pub mod histogram;
 pub mod mapping;
-pub mod precision;
 
 // Algorithm modules - conditionally compiled.
 // These are public for benchmark access but hidden from docs since users
@@ -35,6 +34,7 @@ pub mod newrelic;
 #[doc(hidden)]
 pub mod dynatrace;
 
-pub use histogram::{BucketDescriptor, BucketView, BucketWidth, BucketsIter, Histogram, Overflow, Stats};
-pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
-pub use precision::{P32, P64, Precision};
+pub use histogram::{
+    BucketDescriptor, BucketView, BucketWidth, BucketsIter, Histogram, Overflow, Stats,
+};
+pub use mapping::{max_scale, Mapping, MappingError, MAX_SCALE, MIN_SCALE};

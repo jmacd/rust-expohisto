@@ -20,7 +20,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::{Histogram, Mapping, P32, P64};
+use otel_expohisto::{Histogram, Mapping};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -79,7 +79,6 @@ struct DistConfig {
 #[derive(Debug, Arbitrary)]
 struct Config {
     seed: u64,
-    use_p64: bool,
     /// Primary distribution.
     primary: DistConfig,
     /// Optional secondary distribution mixed in.
@@ -188,11 +187,11 @@ fn decode_count(sel: u8) -> usize {
 // Two-pass test runner
 // ---------------------------------------------------------------------------
 
-fn run<const N: usize, const M: usize, P: otel_expohisto::Precision>(cfg: &Config, is_p32: bool) {
+fn run<const N: usize, const M: usize>(cfg: &Config) {
     let count = decode_count(cfg.count_sel);
 
     // ===== PASS 1: INSERT =====
-    let mut hist: Histogram<N, P> = Histogram::new();
+    let mut hist: Histogram<N> = Histogram::new();
     let mut rng = Rng::new(cfg.seed);
     let mut n_inserted = 0u64;
 
@@ -215,7 +214,7 @@ fn run<const N: usize, const M: usize, P: otel_expohisto::Precision>(cfg: &Confi
     let mut merge_inserted = 0u64;
 
     if merge_count > 0 {
-        let mut src: Histogram<M, P> = Histogram::new();
+        let mut src: Histogram<M> = Histogram::new();
         let mut mrng = Rng::new(cfg.merge_seed);
 
         for _ in 0..merge_count {
@@ -298,22 +297,16 @@ fn run<const N: usize, const M: usize, P: otel_expohisto::Precision>(cfg: &Confi
         return;
     }
 
-    // Min / max (f32 precision for P32).
-    if is_p32 {
-        assert_eq!(
-            hist.min() as f32, exp_min as f32,
-            "min mismatch (P32): hist={} oracle={}",
-            hist.min(), exp_min,
-        );
-        assert_eq!(
-            hist.max() as f32, exp_max as f32,
-            "max mismatch (P32): hist={} oracle={}",
-            hist.max(), exp_max,
-        );
-    } else {
-        assert_eq!(hist.min(), exp_min, "min mismatch (P64)");
-        assert_eq!(hist.max(), exp_max, "max mismatch (P64)");
-    }
+    assert_eq!(
+        hist.min(), exp_min,
+        "min mismatch: hist={} oracle={}",
+        hist.min(), exp_min,
+    );
+    assert_eq!(
+        hist.max(), exp_max,
+        "max mismatch: hist={} oracle={}",
+        hist.max(), exp_max,
+    );
 
     // Bucket totals.
     let count = hist.count();
@@ -361,7 +354,8 @@ fn run<const N: usize, const M: usize, P: otel_expohisto::Precision>(cfg: &Confi
         assert!(buckets.at(0) > 0, "leading zero bucket at scale={}", scale);
         assert!(
             buckets.at(buckets.len() - 1) > 0,
-            "trailing zero bucket at scale={}", scale,
+            "trailing zero bucket at scale={}",
+            scale,
         );
     }
 
@@ -372,8 +366,7 @@ fn run<const N: usize, const M: usize, P: otel_expohisto::Precision>(cfg: &Confi
         let act = buckets.at(pos);
         assert_eq!(
             act, exp,
-            "bucket[{pos}] (idx {idx}): hist={act} oracle={exp} \
-             (scale={scale}, width={:?})",
+            "bucket[{pos}] (idx {idx}): hist={act} oracle={exp}                      (scale={scale}, width={:?})",
             buckets.width(),
         );
     }
@@ -395,9 +388,5 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    if config.use_p64 {
-        run::<160, 32, P64>(&config, false);
-    } else {
-        run::<160, 32, P32>(&config, true);
-    }
+    run::<160, 32>(&config);
 });

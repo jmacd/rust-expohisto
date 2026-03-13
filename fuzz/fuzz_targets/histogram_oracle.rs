@@ -2,7 +2,6 @@
 
 use libfuzzer_sys::fuzz_target;
 use otel_expohisto::{Histogram, Mapping, max_scale};
-use otel_expohisto::{P32, P64, Precision};
 use std::collections::BTreeMap;
 
 fuzz_target!(|data: &[u8]| {
@@ -21,22 +20,18 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test with literal mode (default).
-    check_histogram::<8, P32>(&values, true);
-    check_histogram::<16, P32>(&values, true);
-    check_histogram::<8, P64>(&values, true);
-    check_histogram::<16, P64>(&values, true);
+    check_histogram::<8>(&values, true);
+    check_histogram::<16>(&values, true);
 
     // Test with literal mode disabled (bucket mode from start).
-    check_histogram::<8, P32>(&values, false);
-    check_histogram::<16, P32>(&values, false);
-    check_histogram::<8, P64>(&values, false);
-    check_histogram::<16, P64>(&values, false);
+    check_histogram::<8>(&values, false);
+    check_histogram::<16>(&values, false);
 });
 
 /// Reference-oracle test: insert every value, then verify the histogram
 /// state matches an independently-computed expectation.
-fn check_histogram<const N: usize, P: Precision>(values: &[f64], literal_mode: bool) {
-    let mut hist = Histogram::<N, P>::new().with_literal_mode(literal_mode);
+fn check_histogram<const N: usize>(values: &[f64], literal_mode: bool) {
+    let mut hist = Histogram::<N>::new().with_literal_mode(literal_mode);
     let mut inserted: Vec<f64> = Vec::new();
 
     for &v in values {
@@ -62,21 +57,8 @@ fn check_histogram<const N: usize, P: Precision>(values: &[f64], literal_mode: b
     let expected_min = inserted.iter().copied().fold(f64::INFINITY, f64::min);
     let expected_max = inserted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
-    if P::STAT_WORDS == 2 {
-        assert_eq!(
-            hist.min() as f32,
-            expected_min as f32,
-            "min mismatch (P32)",
-        );
-        assert_eq!(
-            hist.max() as f32,
-            expected_max as f32,
-            "max mismatch (P32)",
-        );
-    } else {
-        assert_eq!(hist.min(), expected_min, "min mismatch");
-        assert_eq!(hist.max(), expected_max, "max mismatch");
-    }
+    assert_eq!(hist.min(), expected_min, "min mismatch");
+    assert_eq!(hist.max(), expected_max, "max mismatch");
 
     // ── 3. zero count ─────────────────────────────────────────────────
     let non_zero: Vec<f64> = inserted.iter().copied().filter(|&v| v != 0.0).collect();
@@ -159,8 +141,7 @@ fn check_histogram<const N: usize, P: Precision>(values: &[f64], literal_mode: b
     //
     // Counter overflow can force widen-steps (each costs 1 scale),
     // so we only assert scale <= span-optimal-scale.
-    let stat_words = P::STAT_WORDS;
-    let b1_cap = ((N - stat_words) * 64) as i32;
+    let b1_cap = (N * 64) as i32;
 
     // Find the highest scale where span fits at B1 capacity.
     let mut optimal = max_scale();

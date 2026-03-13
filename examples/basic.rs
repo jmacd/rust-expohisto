@@ -5,13 +5,13 @@
 //!
 //! Run with: `cargo run --example basic`
 
-use otel_expohisto::{Histogram, P32};
+use otel_expohisto::Histogram;
 
 fn main() {
-    // Create a histogram with 16 u64 words (128 bytes) of data pool.
-    // P32 uses 2 words for MMSC stats (f32/u32), leaving 14 words
-    // for bucket data: up to 896 one-bit buckets at the default B1 width.
-    let mut hist: Histogram<16, P32> = Histogram::new();
+    // Create a histogram with 16 u64 words (128 bytes) of bucket/literal data.
+    // In bucket mode that gives 16 bucket words: up to 1024 one-bit buckets
+    // at the default B1 width.
+    let mut hist: Histogram<16> = Histogram::new();
 
     // Record some latency observations (in milliseconds)
     let latencies = [1.2, 2.5, 1.8, 3.1, 2.0, 1.5, 4.7, 2.3, 1.9, 2.8];
@@ -35,7 +35,11 @@ fn main() {
     println!("  count:  {}", buckets.len());
     for i in 0..buckets.len() {
         if buckets.at(i) > 0 {
-            println!("  bucket[{}]: {}", buckets.offset() as u32 + i, buckets.at(i));
+            println!(
+                "  bucket[{}]: {}",
+                buckets.offset() as u32 + i,
+                buckets.at(i)
+            );
         }
     }
 }

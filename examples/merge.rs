@@ -5,23 +5,33 @@
 //!
 //! Run with: `cargo run --example merge`
 
-use otel_expohisto::{Histogram, P32};
+use otel_expohisto::Histogram;
 
-fn print_histogram<const N: usize>(label: &str, h: &mut Histogram<N, P32>) {
+fn print_histogram<const N: usize>(label: &str, h: &mut Histogram<N>) {
     println!("{label}:");
-    println!("  count={}, sum={:.1}, min={:.1}, max={:.1}, scale={}",
-        h.count(), h.sum(), h.min(), h.max(), h.scale());
+    println!(
+        "  count={}, sum={:.1}, min={:.1}, max={:.1}, scale={}",
+        h.count(),
+        h.sum(),
+        h.min(),
+        h.max(),
+        h.scale()
+    );
     let b = h.positive();
-    println!("  buckets: {} slots at {:?}, offset={}",
-        b.len(), b.width(), b.offset());
+    println!(
+        "  buckets: {} slots at {:?}, offset={}",
+        b.len(),
+        b.width(),
+        b.offset()
+    );
 }
 
 fn main() {
     // --- Same-size merge ---
     println!("=== Same-Size Merge ===\n");
 
-    let mut server_a: Histogram<16, P32> = Histogram::new();
-    let mut server_b: Histogram<16, P32> = Histogram::new();
+    let mut server_a: Histogram<16> = Histogram::new();
+    let mut server_b: Histogram<16> = Histogram::new();
 
     // Simulate latencies from two servers
     for &v in &[1.2, 1.5, 2.0, 2.3, 3.1] {
@@ -42,8 +52,8 @@ fn main() {
     println!("\n=== Cross-Size Merge ===\n");
 
     // A small edge histogram and a larger aggregator
-    let mut edge: Histogram<8, P32> = Histogram::new();
-    let mut aggregator: Histogram<32, P32> = Histogram::new();
+    let mut edge: Histogram<8> = Histogram::new();
+    let mut aggregator: Histogram<32> = Histogram::new();
 
     for &v in &[1.0, 2.0, 4.0, 8.0] {
         edge.update(v).unwrap();

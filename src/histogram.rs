@@ -3,10 +3,9 @@
 
 //! Allocation-free exponential histogram with a unified flat memory layout.
 //!
-//! `Histogram<N, P>` stores everything in fixed struct fields plus a `[u64; N]`
-//! data pool. The pool is split between MMSC fields (min/max/sum/count) at the
-//! front — whose width is controlled by the precision tier `P` — and bucket
-//! counters in the remainder.
+//! `Histogram<N>` stores everything in fixed struct fields plus a `[u64; N]`
+//! data pool used for bucket counters (or raw literal values before
+//! promotion).
 //!
 //! Bucket counters start at 1-bit and widen through the chain
 //! 1→2→4→8→16→32→64 bits via combined downscale+widen when a counter
@@ -14,10 +13,8 @@
 //! popcount algorithm's building blocks.
 
 use core::fmt;
-use core::marker::PhantomData;
 
-use crate::mapping::{Mapping, max_scale};
-use crate::precision::Precision;
+use crate::mapping::{max_scale, Mapping};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -161,33 +158,6 @@ impl BucketWidth {
 }
 
 // ---------------------------------------------------------------------------
-// MMSC accessor helpers — read/write stats from the data pool
-// ---------------------------------------------------------------------------
-
-/// S32 layout (2 words):
-///   word 0: [sum:f32 (lo32)] [count:u32 (hi32)]
-///   word 1: [min:f32 (lo32)] [max:f32 (hi32)]
-#[inline]
-fn read_lo32(word: u64) -> u32 {
-    word as u32
-}
-
-#[inline]
-fn read_hi32(word: u64) -> u32 {
-    (word >> 32) as u32
-}
-
-#[inline]
-fn write_lo32(word: &mut u64, val: u32) {
-    *word = (*word & 0xFFFF_FFFF_0000_0000) | val as u64;
-}
-
-#[inline]
-fn write_hi32(word: &mut u64, val: u32) {
-    *word = (*word & 0x0000_0000_FFFF_FFFF) | ((val as u64) << 32);
-}
-
-// ---------------------------------------------------------------------------
 // High-low range helpers
 // ---------------------------------------------------------------------------
 
@@ -246,19 +216,16 @@ fn change_scale(mut hl: HighLow, size: i32) -> i32 {
 
 /// An allocation-free exponential histogram for non-negative values.
 ///
-/// `N` is the number of `u64` words in the data pool. The pool holds
-/// MMSC fields (min/max/sum/count) at the front — whose width is
-/// controlled by the precision tier `P` — and bucket counter data in
-/// the remainder.
-///
-/// `P` selects the precision tier: [`P32`](crate::P32) uses 2 words
-/// for MMSC (f32/u32), [`P64`](crate::P64) uses 4 words (f64/u64).
+/// `N` is the number of `u64` words in the data pool. The entire pool is
+/// used for bucket counter data (or literal values before promotion).
+/// Aggregate statistics (count, sum, min, max) are stored in separate
+/// struct fields.
 ///
 /// # Literal Mode
 ///
 /// New histograms start in **literal mode**, where the data pool stores
 /// raw `f64` bit patterns instead of bucket counters. This holds up to
-/// `N - STAT_WORDS` values (e.g. 6 values for `Histogram<8, P32>`).
+/// `N` values (e.g. 8 values for `Histogram<8>`).
 /// When the next non-zero observation would exceed capacity, the
 /// histogram **promotes** to bucket mode: all stored literals are
 /// replayed through `update_buckets` at the configured max scale.
@@ -273,17 +240,17 @@ fn change_scale(mut hl: HighLow, size: i32) -> i32 {
 /// (1→2→4 bits → u8 → u16 → u32 → u64) via combined downscale+widen
 /// when a counter saturates.
 ///
-/// At minimum, `N` should be 8 (64 bytes of pool), giving 6 bucket words
-/// at P32 (96 B4 buckets) down to 4 bucket words at P64 (4 U64 buckets).
-pub struct Histogram<const N: usize, P: Precision> {
+/// At minimum, `N` should be 8 (64 bytes of pool), giving 8 bucket words
+/// (128 B4 buckets or 8 U64 buckets).
+pub struct Histogram<const N: usize> {
     // -- Fixed metadata (never relocates) --
     mapping: Mapping,
     limit_scale: i8,
     min_bucket_width: BucketWidth,
     bucket_width: BucketWidth,
-    /// When true, `data[STAT_WORDS..]` holds raw f64 bit patterns (literals)
+    /// When true, `data[..]` holds raw f64 bit patterns (literals)
     /// instead of bucket counters. `index_end` is repurposed as the literal
-    /// count. Fits in the existing 1-byte alignment gap before `index_base`.
+    /// count.
     literal: bool,
     /// Whether literal mode is enabled (persists across `clear()`).
     literal_enabled: bool,
@@ -291,13 +258,14 @@ pub struct Histogram<const N: usize, P: Precision> {
     index_start: i32,
     index_end: i32,
 
-    // -- Data pool: MMSC at front, buckets/literals after --
-    data: [u64; N],
+    // -- Aggregate statistics (min/max/sum/count) --
+    stats: Stats,
 
-    _precision: PhantomData<P>,
+    // -- Data pool: bucket counters or literal values --
+    data: [u64; N],
 }
 
-impl<const N: usize, P: Precision> Clone for Histogram<N, P> {
+impl<const N: usize> Clone for Histogram<N> {
     fn clone(&self) -> Self {
         Self {
             mapping: self.mapping,
@@ -309,13 +277,13 @@ impl<const N: usize, P: Precision> Clone for Histogram<N, P> {
             index_base: self.index_base,
             index_start: self.index_start,
             index_end: self.index_end,
+            stats: self.stats,
             data: self.data,
-            _precision: PhantomData,
         }
     }
 }
 
-impl<const N: usize, P: Precision> fmt::Debug for Histogram<N, P> {
+impl<const N: usize> fmt::Debug for Histogram<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = f.debug_struct("Histogram");
         s.field("bucket_width", &self.bucket_width)
@@ -335,7 +303,7 @@ impl<const N: usize, P: Precision> fmt::Debug for Histogram<N, P> {
     }
 }
 
-impl<const N: usize, P: Precision> Default for Histogram<N, P> {
+impl<const N: usize> Default for Histogram<N> {
     fn default() -> Self {
         Self::new()
     }
@@ -345,185 +313,35 @@ impl<const N: usize, P: Precision> Default for Histogram<N, P> {
 // MMSC read/write methods
 // ---------------------------------------------------------------------------
 
-impl<const N: usize, P: Precision> Histogram<N, P> {
-    // -- S32 readers --
-
-    #[inline]
-    fn sum_s32(&self) -> f32 {
-        f32::from_bits(read_lo32(self.data[0]))
-    }
-
-    #[inline]
-    fn count_s32(&self) -> u32 {
-        read_hi32(self.data[0])
-    }
-
-    #[inline]
-    fn min_s32(&self) -> f32 {
-        f32::from_bits(read_lo32(self.data[1]))
-    }
-
-    #[inline]
-    fn max_s32(&self) -> f32 {
-        f32::from_bits(read_hi32(self.data[1]))
-    }
-
-    // -- S32 writers --
-
-    #[inline]
-    fn set_sum_s32(&mut self, v: f32) {
-        write_lo32(&mut self.data[0], v.to_bits());
-    }
-
-    #[inline]
-    fn set_count_s32(&mut self, v: u32) {
-        write_hi32(&mut self.data[0], v);
-    }
-
-    #[inline]
-    fn set_min_s32(&mut self, v: f32) {
-        write_lo32(&mut self.data[1], v.to_bits());
-    }
-
-    #[inline]
-    fn set_max_s32(&mut self, v: f32) {
-        write_hi32(&mut self.data[1], v.to_bits());
-    }
-
-    // -- S64 readers --
-
-    #[inline]
-    fn sum_s64(&self) -> f64 {
-        f64::from_bits(self.data[0])
-    }
-
-    #[inline]
-    fn count_s64(&self) -> u64 {
-        self.data[1]
-    }
-
-    #[inline]
-    fn min_s64(&self) -> f64 {
-        f64::from_bits(self.data[2])
-    }
-
-    #[inline]
-    fn max_s64(&self) -> f64 {
-        f64::from_bits(self.data[3])
-    }
-
-    // -- S64 writers --
-
-    #[inline]
-    fn set_sum_s64(&mut self, v: f64) {
-        self.data[0] = v.to_bits();
-    }
-
-    #[inline]
-    fn set_count_s64(&mut self, v: u64) {
-        self.data[1] = v;
-    }
-
-    #[inline]
-    fn set_min_s64(&mut self, v: f64) {
-        self.data[2] = v.to_bits();
-    }
-
-    #[inline]
-    fn set_max_s64(&mut self, v: f64) {
-        self.data[3] = v.to_bits();
-    }
-
-    // -- Width-dispatched public readers --
-
+impl<const N: usize> Histogram<N> {
     /// Returns the sum of all recorded values as `f64`.
     #[inline]
     pub fn sum(&self) -> f64 {
-        if P::STAT_WORDS == 2 {
-            self.sum_s32() as f64
-        } else {
-            self.sum_s64()
-        }
+        self.stats.sum
     }
 
     /// Returns the count of all recorded values.
     #[inline]
     pub fn count(&self) -> u64 {
-        if P::STAT_WORDS == 2 {
-            self.count_s32() as u64
-        } else {
-            self.count_s64()
-        }
+        self.stats.count
     }
 
     /// Returns the minimum recorded value, or 0.0 if empty.
     #[inline]
     pub fn min(&self) -> f64 {
-        if P::STAT_WORDS == 2 {
-            self.min_s32() as f64
-        } else {
-            self.min_s64()
-        }
+        self.stats.min
     }
 
     /// Returns the maximum recorded value, or 0.0 if empty.
     #[inline]
     pub fn max(&self) -> f64 {
-        if P::STAT_WORDS == 2 {
-            self.max_s32() as f64
-        } else {
-            self.max_s64()
-        }
-    }
-
-    // -- Width-dispatched internal writers --
-
-    #[inline]
-    fn set_sum(&mut self, v: f64) {
-        if P::STAT_WORDS == 2 {
-            self.set_sum_s32(v as f32);
-        } else {
-            self.set_sum_s64(v);
-        }
-    }
-
-    #[inline]
-    fn set_count(&mut self, v: u64) {
-        if P::STAT_WORDS == 2 {
-            self.set_count_s32(v as u32);
-        } else {
-            self.set_count_s64(v);
-        }
-    }
-
-    #[inline]
-    fn set_min(&mut self, v: f64) {
-        if P::STAT_WORDS == 2 {
-            self.set_min_s32(v as f32);
-        } else {
-            self.set_min_s64(v);
-        }
-    }
-
-    #[inline]
-    fn set_max(&mut self, v: f64) {
-        if P::STAT_WORDS == 2 {
-            self.set_max_s32(v as f32);
-        } else {
-            self.set_max_s64(v);
-        }
+        self.stats.max
     }
 
     /// Checked increment of count by `incr`. Returns `None` on overflow.
     #[inline]
     fn checked_add_count(&self, incr: u64) -> Option<u64> {
-        if P::STAT_WORDS == 2 {
-            let c = self.count_s32();
-            let i = u32::try_from(incr).ok()?;
-            c.checked_add(i).map(|v| v as u64)
-        } else {
-            self.count_s64().checked_add(incr)
-        }
+        self.stats.count.checked_add(incr)
     }
 
     /// Commits sum, count, min, and max from incoming values.
@@ -532,19 +350,19 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// are set directly.  Otherwise min and max are merged via the
     /// respective comparison.
     fn commit_stats(&mut self, sum: f64, count: u64, min: f64, max: f64) {
-        self.set_sum(sum);
-        if self.count() == 0 {
-            self.set_min(min);
-            self.set_max(max);
+        self.stats.sum = sum;
+        if self.stats.count == 0 {
+            self.stats.min = min;
+            self.stats.max = max;
         } else {
-            if min < self.min() {
-                self.set_min(min);
+            if min < self.stats.min {
+                self.stats.min = min;
             }
-            if max > self.max() {
-                self.set_max(max);
+            if max > self.stats.max {
+                self.stats.max = max;
             }
         }
-        self.set_count(count);
+        self.stats.count = count;
     }
 
     /// Returns the total count stored across all positive buckets.
@@ -611,30 +429,23 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 // Bucket data access — operates on the bucket slice of the data pool
 // ---------------------------------------------------------------------------
 
-impl<const N: usize, P: Precision> Histogram<N, P> {
-    /// Returns the start index of bucket data within the data pool.
-    #[inline]
-    fn bucket_data_start(&self) -> usize {
-        P::STAT_WORDS
-    }
-
+impl<const N: usize> Histogram<N> {
     /// Returns the number of u64 words available for bucket data.
     #[inline]
     fn bucket_word_count(&self) -> usize {
-        N - self.bucket_data_start()
+        N
     }
 
     /// Returns the bucket data as a slice.
     #[inline]
     fn bucket_data(&self) -> &[u64] {
-        &self.data[self.bucket_data_start()..]
+        &self.data
     }
 
     /// Returns the bucket data as a mutable slice.
     #[inline]
     fn bucket_data_mut(&mut self) -> &mut [u64] {
-        let start = self.bucket_data_start();
-        &mut self.data[start..]
+        &mut self.data
     }
 
     /// Number of logical buckets available at the current width.
@@ -766,7 +577,12 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     pub fn bucket_at(&mut self, pos: u32) -> u64 {
         self.ensure_promoted();
         let len = self.bucket_range_len();
-        assert!(pos < len, "bucket_at: pos {} out of range (len {})", pos, len);
+        assert!(
+            pos < len,
+            "bucket_at: pos {} out of range (len {})",
+            pos,
+            len
+        );
         let index = self.index_start + pos as i32;
         self.bucket_get(self.slot_for(index))
     }
@@ -804,11 +620,11 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 /// promoted to bucket mode on first read. After promotion, subsequent
 /// reads are normal bucket lookups with no extra cost.
 #[derive(Debug)]
-pub struct BucketView<'a, const N: usize, P: Precision> {
-    hist: &'a Histogram<N, P>,
+pub struct BucketView<'a, const N: usize> {
+    hist: &'a Histogram<N>,
 }
 
-impl<const N: usize, P: Precision> BucketView<'_, N, P> {
+impl<const N: usize> BucketView<'_, N> {
     /// Returns the offset (smallest index).
     #[inline]
     pub fn offset(&self) -> i32 {
@@ -848,14 +664,19 @@ impl<const N: usize, P: Precision> BucketView<'_, N, P> {
     #[inline]
     pub fn at(&self, pos: u32) -> u64 {
         let len = self.len();
-        assert!(pos < len, "BucketView::at: pos {} out of range (len {})", pos, len);
+        assert!(
+            pos < len,
+            "BucketView::at: pos {} out of range (len {})",
+            pos,
+            len
+        );
         let index = self.hist.index_start + pos as i32;
         self.hist.bucket_get(self.hist.slot_for(index))
     }
 
     /// Returns an iterator over bucket counts.
     #[inline]
-    pub fn iter(&self) -> BucketsIter<'_, N, P> {
+    pub fn iter(&self) -> BucketsIter<'_, N> {
         BucketsIter {
             hist: self.hist,
             pos: 0,
@@ -864,9 +685,9 @@ impl<const N: usize, P: Precision> BucketView<'_, N, P> {
     }
 }
 
-impl<'a, const N: usize, P: Precision> IntoIterator for &'a BucketView<'a, N, P> {
+impl<'a, const N: usize> IntoIterator for &'a BucketView<'a, N> {
     type Item = u64;
-    type IntoIter = BucketsIter<'a, N, P>;
+    type IntoIter = BucketsIter<'a, N>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -876,13 +697,13 @@ impl<'a, const N: usize, P: Precision> IntoIterator for &'a BucketView<'a, N, P>
 
 /// Iterator over bucket counts.
 #[derive(Debug)]
-pub struct BucketsIter<'a, const N: usize, P: Precision> {
-    hist: &'a Histogram<N, P>,
+pub struct BucketsIter<'a, const N: usize> {
+    hist: &'a Histogram<N>,
     pos: u32,
     len: u32,
 }
 
-impl<const N: usize, P: Precision> Iterator for BucketsIter<'_, N, P> {
+impl<const N: usize> Iterator for BucketsIter<'_, N> {
     type Item = u64;
 
     #[inline]
@@ -903,13 +724,13 @@ impl<const N: usize, P: Precision> Iterator for BucketsIter<'_, N, P> {
     }
 }
 
-impl<const N: usize, P: Precision> ExactSizeIterator for BucketsIter<'_, N, P> {}
+impl<const N: usize> ExactSizeIterator for BucketsIter<'_, N> {}
 
 // ---------------------------------------------------------------------------
 // Bucket operations — widen (SWAR) and downscale
 // ---------------------------------------------------------------------------
 
-impl<const N: usize, P: Precision> Histogram<N, P> {
+impl<const N: usize> Histogram<N> {
     /// Widens bucket counters from the current width by `steps` scale-steps,
     /// using SWAR pairwise summation. Each step doubles the counter width
     /// and halves the index range (equivalent to a 1-step downscale).
@@ -1012,11 +833,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             }
         }
 
-        let mut target_width = if needs_widen {
-            width.wider()?
-        } else {
-            width
-        };
+        let mut target_width = if needs_widen { width.wider()? } else { width };
 
         let mut scale_steps = 1i32;
 
@@ -1119,10 +936,10 @@ fn swar_masked_step(data: &mut [u64], shift: u32, mask: u64) {
 #[inline]
 fn swar_step(data: &mut [u64], width: BucketWidth) {
     match width {
-        BucketWidth::B1  => swar_masked_step(data, 1,  0x5555_5555_5555_5555),
-        BucketWidth::B2  => swar_masked_step(data, 2,  0x3333_3333_3333_3333),
-        BucketWidth::B4  => swar_masked_step(data, 4,  0x0F0F_0F0F_0F0F_0F0F),
-        BucketWidth::U8  => swar_masked_step(data, 8,  0x00FF_00FF_00FF_00FF),
+        BucketWidth::B1 => swar_masked_step(data, 1, 0x5555_5555_5555_5555),
+        BucketWidth::B2 => swar_masked_step(data, 2, 0x3333_3333_3333_3333),
+        BucketWidth::B4 => swar_masked_step(data, 4, 0x0F0F_0F0F_0F0F_0F0F),
+        BucketWidth::U8 => swar_masked_step(data, 8, 0x00FF_00FF_00FF_00FF),
         BucketWidth::U16 => swar_masked_step(data, 16, 0x0000_FFFF_0000_FFFF),
         BucketWidth::U32 => {
             // 2 ints → 1 long (no mask needed, full 32-bit halves)
@@ -1146,10 +963,10 @@ fn any_masked(data: &[u64], mask: u64) -> bool {
 #[inline]
 fn swar_has_overflow(data: &[u64], original_width: BucketWidth) -> bool {
     match original_width {
-        BucketWidth::B1  => any_masked(data, 0xAAAA_AAAA_AAAA_AAAA),
-        BucketWidth::B2  => any_masked(data, 0xCCCC_CCCC_CCCC_CCCC),
-        BucketWidth::B4  => any_masked(data, 0xF0F0_F0F0_F0F0_F0F0),
-        BucketWidth::U8  => any_masked(data, 0xFF00_FF00_FF00_FF00),
+        BucketWidth::B1 => any_masked(data, 0xAAAA_AAAA_AAAA_AAAA),
+        BucketWidth::B2 => any_masked(data, 0xCCCC_CCCC_CCCC_CCCC),
+        BucketWidth::B4 => any_masked(data, 0xF0F0_F0F0_F0F0_F0F0),
+        BucketWidth::U8 => any_masked(data, 0xFF00_FF00_FF00_FF00),
         BucketWidth::U16 => any_masked(data, 0xFFFF_0000_FFFF_0000),
         BucketWidth::U32 => data.iter().any(|&w| w > u32::MAX as u64),
         BucketWidth::U64 => false,
@@ -1230,62 +1047,68 @@ fn compact_lanes(mut x: u64, stages: &[(u32, u64)]) -> u64 {
 /// Compress 32 crumbs (each ≤ 1) into 32 bits in the low 32 bits.
 #[inline]
 fn narrow_b2_to_b1(w: u64) -> u64 {
-    compact_lanes(w & 0x5555_5555_5555_5555, &[
-        (1,  0x3333_3333_3333_3333),
-        (2,  0x0F0F_0F0F_0F0F_0F0F),
-        (4,  0x00FF_00FF_00FF_00FF),
-        (8,  0x0000_FFFF_0000_FFFF),
-        (16, 0x0000_0000_FFFF_FFFF),
-    ])
+    compact_lanes(
+        w & 0x5555_5555_5555_5555,
+        &[
+            (1, 0x3333_3333_3333_3333),
+            (2, 0x0F0F_0F0F_0F0F_0F0F),
+            (4, 0x00FF_00FF_00FF_00FF),
+            (8, 0x0000_FFFF_0000_FFFF),
+            (16, 0x0000_0000_FFFF_FFFF),
+        ],
+    )
 }
 
 /// Compress 16 nibbles (each ≤ 3) into 16 crumbs in the low 32 bits.
 #[inline]
 fn narrow_b4_to_b2(w: u64) -> u64 {
-    compact_lanes(w & 0x3333_3333_3333_3333, &[
-        (2,  0x0F0F_0F0F_0F0F_0F0F),
-        (4,  0x00FF_00FF_00FF_00FF),
-        (8,  0x0000_FFFF_0000_FFFF),
-        (16, 0x0000_0000_FFFF_FFFF),
-    ])
+    compact_lanes(
+        w & 0x3333_3333_3333_3333,
+        &[
+            (2, 0x0F0F_0F0F_0F0F_0F0F),
+            (4, 0x00FF_00FF_00FF_00FF),
+            (8, 0x0000_FFFF_0000_FFFF),
+            (16, 0x0000_0000_FFFF_FFFF),
+        ],
+    )
 }
 
 /// Compress 8 bytes (each ≤ 15) into 8 nibbles in the low 32 bits.
 #[inline]
 fn narrow_u8_to_b4(w: u64) -> u64 {
-    compact_lanes(w & 0x0F0F_0F0F_0F0F_0F0F, &[
-        (4,  0x00FF_00FF_00FF_00FF),
-        (8,  0x0000_FFFF_0000_FFFF),
-        (16, 0x0000_0000_FFFF_FFFF),
-    ])
+    compact_lanes(
+        w & 0x0F0F_0F0F_0F0F_0F0F,
+        &[
+            (4, 0x00FF_00FF_00FF_00FF),
+            (8, 0x0000_FFFF_0000_FFFF),
+            (16, 0x0000_0000_FFFF_FFFF),
+        ],
+    )
 }
 
 /// Compress 4 shorts (each ≤ 255) into 4 bytes in the low 32 bits.
 #[inline]
 fn narrow_u16_to_u8(w: u64) -> u64 {
-    compact_lanes(w & 0x00FF_00FF_00FF_00FF, &[
-        (8,  0x0000_FFFF_0000_FFFF),
-        (16, 0x0000_0000_FFFF_FFFF),
-    ])
+    compact_lanes(
+        w & 0x00FF_00FF_00FF_00FF,
+        &[(8, 0x0000_FFFF_0000_FFFF), (16, 0x0000_0000_FFFF_FFFF)],
+    )
 }
 
 /// Compress 2 ints (each ≤ 65535) into 2 shorts in the low 32 bits.
 #[inline]
 fn narrow_u32_to_u16(w: u64) -> u64 {
-    compact_lanes(w & 0x0000_FFFF_0000_FFFF, &[
-        (16, 0x0000_0000_FFFF_FFFF),
-    ])
+    compact_lanes(w & 0x0000_FFFF_0000_FFFF, &[(16, 0x0000_0000_FFFF_FFFF)])
 }
 
 // ---------------------------------------------------------------------------
-// Histogram<N, P> — construction and public API
+// Histogram<N> — construction and public API
 // ---------------------------------------------------------------------------
 
-impl<const N: usize, P: Precision> Histogram<N, P> {
+impl<const N: usize> Histogram<N> {
     // Shared constructor — all public constructors delegate here.
     fn new_at_scale(scale: i32) -> Self {
-        // Ensure the data pool has room for stats + at least 1 bucket word.
-        const { assert!(N >= 3, "N must be large enough to hold stats plus bucket data") };
+        const { assert!(N >= 1, "N must be >= 1 for at least 1 bucket word") };
         Self {
             mapping: Mapping::new(scale).expect("invalid scale"),
             limit_scale: scale as i8,
@@ -1296,8 +1119,13 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             index_base: 0,
             index_start: 0,
             index_end: 0,
+            stats: Stats {
+                count: 0,
+                sum: 0.0,
+                min: 0.0,
+                max: 0.0,
+            },
             data: [0u64; N],
-            _precision: PhantomData,
         }
     }
 
@@ -1378,7 +1206,11 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Returns the number of literal values stored (0 if not in literal mode).
     #[inline]
     fn literal_count(&self) -> usize {
-        if self.literal { self.index_end as usize } else { 0 }
+        if self.literal {
+            self.index_end as usize
+        } else {
+            0
+        }
     }
 
     /// Maximum number of literals that can be stored.
@@ -1390,8 +1222,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Returns the stored literal values as a slice.
     #[inline]
     fn literal_values(&self) -> &[u64] {
-        let start = self.bucket_data_start();
-        &self.data[start..start + self.literal_count()]
+        &self.data[..self.literal_count()]
     }
 
     /// Returns the current scale.
@@ -1437,7 +1268,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// histogram stays in bucket mode, so subsequent reads pay no
     /// extra cost.
     #[inline]
-    pub fn positive(&mut self) -> BucketView<'_, N, P> {
+    pub fn positive(&mut self) -> BucketView<'_, N> {
         // promote() cannot fail here — if it could (which requires
         // an invalid limit_scale), we'd have failed at construction.
         self.ensure_promoted();
@@ -1447,6 +1278,12 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Clears the histogram, resetting to initial state.
     pub fn clear(&mut self) {
         self.data.fill(0);
+        self.stats = Stats {
+            count: 0,
+            sum: 0.0,
+            min: 0.0,
+            max: 0.0,
+        };
         self.bucket_width = self.min_bucket_width;
         self.literal = self.literal_enabled;
         self.index_start = 0;
@@ -1526,7 +1363,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
         if count + needed <= cap {
             // Fits — store `incr` copies of the value's bit pattern.
-            let start = self.bucket_data_start() + count;
+            let start = count;
             let bits = value.to_bits();
             for i in 0..needed {
                 self.data[start + i] = bits;
@@ -1541,10 +1378,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
     /// Promotes from literal mode to bucket mode, optionally including
     /// a trigger value that caused overflow of literal capacity.
-    fn promote_impl(
-        &mut self,
-        trigger: Option<(f64, u64)>,
-    ) -> Result<(), Overflow> {
+    fn promote_impl(&mut self, trigger: Option<(f64, u64)>) -> Result<(), Overflow> {
         debug_assert!(self.literal);
 
         let count = self.literal_count();
@@ -1564,10 +1398,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         self.literal = false;
         self.bucket_width = self.min_bucket_width;
         self.mapping = Mapping::new(self.limit_scale as i32).map_err(|_| Overflow)?;
-        let start = self.bucket_data_start();
-        for w in &mut self.data[start..] {
-            *w = 0;
-        }
+        self.data.fill(0);
         self.index_base = 0;
         self.index_start = 0;
         self.index_end = 0;
@@ -1889,7 +1720,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Merges a histogram of a different size into this one.
     pub fn merge_from_other<const M: usize>(
         &mut self,
-        other: &Histogram<M, P>,
+        other: &Histogram<M>,
     ) -> Result<(), Overflow> {
         if other.literal {
             return self.merge_literal_from(other);
@@ -1898,10 +1729,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     }
 
     /// Merges literal values from another histogram into this one.
-    fn merge_literal_from<const M: usize>(
-        &mut self,
-        other: &Histogram<M, P>,
-    ) -> Result<(), Overflow> {
+    fn merge_literal_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
         debug_assert!(other.literal);
         if other.count() == 0 {
             return Ok(());
@@ -1924,7 +1752,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// delegates to [`merge_from_raw`](Self::merge_from_raw).
     fn merge_from_histogram<const M: usize>(
         &mut self,
-        other: &Histogram<M, P>,
+        other: &Histogram<M>,
     ) -> Result<(), Overflow> {
         self.merge_from_raw(
             &Stats {
@@ -1955,7 +1783,6 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             high: self.index_end >> shift,
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1965,9 +1792,8 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::precision::{P32, P64, Precision};
 
-    fn derived_zero_count<const N: usize, P: Precision>(h: &mut Histogram<N, P>) -> u64 {
+    fn derived_zero_count<const N: usize>(h: &mut Histogram<N>) -> u64 {
         let non_zero: u64 = {
             let buckets = h.positive();
             (0..buckets.len()).map(|i| buckets.at(i)).sum()
@@ -1977,7 +1803,7 @@ mod tests {
 
     #[test]
     fn test_histogram_basic() {
-        let mut h: Histogram<16, P32> = Histogram::new();
+        let mut h: Histogram<16> = Histogram::new();
         h.update(1.0).unwrap();
         assert_eq!(h.count(), 1);
         assert_eq!(h.sum(), 1.0);
@@ -1989,7 +1815,7 @@ mod tests {
 
     #[test]
     fn test_histogram_zero() {
-        let mut h: Histogram<16, P32> = Histogram::new();
+        let mut h: Histogram<16> = Histogram::new();
         h.update(0.0).unwrap();
         assert_eq!(h.count(), 1);
         assert_eq!(derived_zero_count(&mut h), 1);
@@ -1998,7 +1824,7 @@ mod tests {
 
     #[test]
     fn test_histogram_multiple() {
-        let mut h: Histogram<16, P32> = Histogram::new();
+        let mut h: Histogram<16> = Histogram::new();
         h.update(1.0).unwrap();
         h.update(2.0).unwrap();
         h.update(4.0).unwrap();
@@ -2010,7 +1836,7 @@ mod tests {
 
     #[test]
     fn test_histogram_downscale() {
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         h.update(1.0).unwrap();
         h.update(1000.0).unwrap();
         assert_eq!(h.count(), 2);
@@ -2019,8 +1845,8 @@ mod tests {
 
     #[test]
     fn test_histogram_merge() {
-        let mut h1: Histogram<16, P32> = Histogram::new();
-        let mut h2: Histogram<16, P32> = Histogram::new();
+        let mut h1: Histogram<16> = Histogram::new();
+        let mut h2: Histogram<16> = Histogram::new();
         h1.update(1.0).unwrap();
         h1.update(2.0).unwrap();
         h2.update(3.0).unwrap();
@@ -2034,7 +1860,7 @@ mod tests {
 
     #[test]
     fn test_histogram_clear() {
-        let mut h: Histogram<16, P32> = Histogram::new();
+        let mut h: Histogram<16> = Histogram::new();
         h.update(1.0).unwrap();
         h.update(2.0).unwrap();
         h.clear();
@@ -2046,20 +1872,25 @@ mod tests {
 
     #[test]
     fn test_buckets_at() {
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16> = Histogram::with_scale(0);
         h.update(1.5).unwrap();
         h.update(100.0).unwrap();
         h.update(1e10).unwrap();
 
         let buckets = h.positive();
-        assert!(buckets.len() >= 2,
+        assert!(
+            buckets.len() >= 2,
             "expected at least 2 buckets, got {} at scale {}",
-            buckets.len(), h.scale());
+            buckets.len(),
+            h.scale()
+        );
     }
 
     #[test]
     fn test_auto_widen_b4_to_u8() {
-        let mut h: Histogram<16, P32> = Histogram::new().with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::new()
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         assert_eq!(h.bucket_width(), BucketWidth::B4);
         h.update_by_incr(1.0, 15).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::B4);
@@ -2070,7 +1901,9 @@ mod tests {
 
     #[test]
     fn test_auto_widen_b4_to_u8_from_b4_start() {
-        let mut h: Histogram<16, P32> = Histogram::new().with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::new()
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         h.update_by_incr(1.0, 4).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::B4);
         h.update_by_incr(1.0, 11).unwrap();
@@ -2082,7 +1915,8 @@ mod tests {
 
     #[test]
     fn test_auto_widen_u8_to_u16() {
-        let mut h: Histogram<16, P32> = Histogram::new();
+        let mut h: Histogram<16> = Histogram::new()
+            .with_literal_mode(false);
         h.update_by_incr(1.0, 16).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
         h.update_by_incr(1.0, 239).unwrap();
@@ -2094,7 +1928,7 @@ mod tests {
 
     #[test]
     fn test_auto_widen_u16_to_u32() {
-        let mut h: Histogram<16, P32> = Histogram::new();
+        let mut h: Histogram<16> = Histogram::new();
         h.update_by_incr(1.0, 16).unwrap();
         h.update_by_incr(1.0, 239).unwrap();
         h.update(1.0).unwrap();
@@ -2108,15 +1942,16 @@ mod tests {
 
     #[test]
     fn test_auto_widen_u32_to_u64() {
-        // Use P64 because this test needs count > u32::MAX.
-        let mut h: Histogram<16, P64> = Histogram::new();
+        // This test needs count > u32::MAX to trigger U32→U64 widening.
+        let mut h: Histogram<16> = Histogram::new();
         h.update_by_incr(1.0, 16).unwrap();
         h.update_by_incr(1.0, 239).unwrap();
         h.update(1.0).unwrap(); // U8→U16
         h.update_by_incr(1.0, u16::MAX as u64 - 256).unwrap();
         h.update(1.0).unwrap(); // U16→U32
         assert_eq!(h.bucket_width(), BucketWidth::U32);
-        h.update_by_incr(1.0, u32::MAX as u64 - (u16::MAX as u64 + 1)).unwrap();
+        h.update_by_incr(1.0, u32::MAX as u64 - (u16::MAX as u64 + 1))
+            .unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U32);
         h.update(1.0).unwrap(); // U32→U64
         assert_eq!(h.bucket_width(), BucketWidth::U64);
@@ -2124,18 +1959,23 @@ mod tests {
 
     #[test]
     fn test_bucket_count_halves_on_widen() {
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::with_scale(0)
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         let initial_cap = h.bucket_capacity();
-        assert_eq!(initial_cap, 14 * 16); // 224
+        assert_eq!(initial_cap, 16 * 16); // 256
 
         h.update_by_incr(1.0, 16).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
-        assert_eq!(h.bucket_capacity(), 14 * 8); // 112
+        assert_eq!(h.bucket_capacity(), 16 * 8); // 128
     }
 
     #[test]
     fn test_clear_resets_to_b4() {
-        let mut h: Histogram<16, P32> = Histogram::with_max_scale(3).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> =
+            Histogram::with_max_scale(3)
+                .with_min_bucket_width(BucketWidth::B4)
+                .with_literal_mode(false);
         h.update_by_incr(1.0, 16).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
         h.clear();
@@ -2146,20 +1986,20 @@ mod tests {
 
     #[test]
     fn test_with_max_scale() {
-        let h: Histogram<16, P32> = Histogram::with_max_scale(3);
+        let h: Histogram<16> = Histogram::with_max_scale(3);
         assert_eq!(h.limit_scale(), 3);
     }
 
     #[test]
     fn test_with_max_scale_clamps() {
-        let h: Histogram<16, P32> = Histogram::with_max_scale(100);
+        let h: Histogram<16> = Histogram::with_max_scale(100);
         assert_eq!(h.limit_scale(), max_scale());
     }
 
     #[test]
     fn test_with_max_scale_records_at_limited_scale() {
-        let mut limited: Histogram<16, P32> = Histogram::with_max_scale(3);
-        let mut unlimited: Histogram<16, P32> = Histogram::new();
+        let mut limited: Histogram<16> = Histogram::with_max_scale(3);
+        let mut unlimited: Histogram<16> = Histogram::new();
         limited.update(1.0).unwrap();
         limited.update(1.001).unwrap();
         unlimited.update(1.0).unwrap();
@@ -2172,7 +2012,7 @@ mod tests {
 
     #[test]
     fn test_clear_resets_to_limit_scale() {
-        let mut h: Histogram<16, P32> = Histogram::with_max_scale(3);
+        let mut h: Histogram<16> = Histogram::with_max_scale(3);
         h.update(0.001).unwrap();
         h.update(1000.0).unwrap();
         assert!(h.scale() <= 3);
@@ -2185,7 +2025,7 @@ mod tests {
 
     #[test]
     fn test_widen_preserves_data() {
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16> = Histogram::with_scale(0);
         h.update_by_incr(1.0, 100).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
 
@@ -2206,20 +2046,32 @@ mod tests {
 
     #[test]
     fn test_merge_equivalence_comprehensive() {
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
         let hardcoded_sets: &[&[f64]] = &[
-            &[], &[0.0], &[1.0], &[0.0, 0.0], &[1.0, 1.0], &[1.0, 2.0],
-            &[0.5, 1.5, 2.5], &[0.001, 1.0, 20.0], &[1.0, 1.0, 1.0, 1.0],
-            &[0.0, 1.0, 2.0, 0.0], &[5.0, 10.0, 15.0, 20.0],
+            &[],
+            &[0.0],
+            &[1.0],
+            &[0.0, 0.0],
+            &[1.0, 1.0],
+            &[1.0, 2.0],
+            &[0.5, 1.5, 2.5],
+            &[0.001, 1.0, 20.0],
+            &[1.0, 1.0, 1.0, 1.0],
+            &[0.0, 1.0, 2.0, 0.0],
+            &[5.0, 10.0, 15.0, 20.0],
             &[0.1, 0.2, 0.3, 0.4, 0.5],
             &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
-            &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0],
+            &[
+                10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
+            ],
             &[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5],
             &[0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
-            &[0.01, 0.1, 1.0, 10.0], &[0.0, 20.0], &[1.0, 19.0],
+            &[0.01, 0.1, 1.0, 10.0],
+            &[0.0, 20.0],
+            &[1.0, 19.0],
             &[5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
             &[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0],
             &[15.0, 16.0, 17.0, 18.0, 19.0, 20.0],
@@ -2235,20 +2087,20 @@ mod tests {
             test_sets.push(set);
         }
 
-        test_merge_equivalence_for_size::<8, P32>(&test_sets);
-        test_merge_equivalence_for_size::<12, P32>(&test_sets);
-        test_merge_equivalence_for_size::<16, P32>(&test_sets);
-        test_merge_equivalence_for_size::<20, P32>(&test_sets);
+        test_merge_equivalence_for_size::<8>(&test_sets);
+        test_merge_equivalence_for_size::<12>(&test_sets);
+        test_merge_equivalence_for_size::<16>(&test_sets);
+        test_merge_equivalence_for_size::<20>(&test_sets);
     }
 
-    fn test_merge_equivalence_for_size<const K: usize, P: Precision>(test_sets: &[Vec<f64>]) {
+    fn test_merge_equivalence_for_size<const K: usize>(test_sets: &[Vec<f64>]) {
         for (i, set_a) in test_sets.iter().enumerate() {
             for (j, set_b) in test_sets.iter().enumerate() {
-                let mut merged: Histogram<K, P> = Histogram::new();
+                let mut merged: Histogram<K> = Histogram::new();
                 for &v in set_a {
                     merged.update(v).unwrap();
                 }
-                let mut other: Histogram<K, P> = Histogram::new();
+                let mut other: Histogram<K> = Histogram::new();
                 for (vi, &v) in set_b.iter().enumerate() {
                     if let Err(e) = other.update(v) {
                         panic!("other.update failed for size={K} sets {i} x {j} val[{vi}]={v}: {e}\n  set_b: {set_b:?}\n  other: {:?}", other);
@@ -2258,7 +2110,7 @@ mod tests {
                     panic!("merge_from failed for size={K} sets {i} x {j}: {e}\n  set_a: {set_a:?}\n  set_b: {set_b:?}\n  merged: {:?}\n  other: {:?}", merged, other);
                 }
 
-                let mut single: Histogram<K, P> = Histogram::new();
+                let mut single: Histogram<K> = Histogram::new();
                 for &v in set_a {
                     single.update(v).unwrap();
                 }
@@ -2266,20 +2118,28 @@ mod tests {
                     single.update(v).unwrap();
                 }
 
-                assert_eq!(merged.count(), single.count(),
-                    "count mismatch for size={K} sets {i} x {j}");
-                // P32 uses f32 for sum, so order-of-operations rounding
-                // can differ between merged and single paths. Use relative
-                // tolerance appropriate for f32 precision.
+                assert_eq!(
+                    merged.count(),
+                    single.count(),
+                    "count mismatch for size={K} sets {i} x {j}"
+                );
+                // Order-of-operations rounding can differ between merged
+                // and single paths. Use relative tolerance.
                 let ms = merged.sum();
                 let ss = single.sum();
                 let sum_diff = (ms - ss).abs();
                 let denom = ms.abs().max(ss.abs()).max(1e-30);
-                assert!(sum_diff / denom < 1e-5,
+                assert!(
+                    sum_diff / denom < 1e-5,
                     "sum mismatch for size={K} sets {i} x {j}: {} vs {}",
-                    ms, ss);
-                assert_eq!(derived_zero_count(&mut merged), derived_zero_count(&mut single),
-                    "zero_count mismatch for size={K} sets {i} x {j}");
+                    ms,
+                    ss
+                );
+                assert_eq!(
+                    derived_zero_count(&mut merged),
+                    derived_zero_count(&mut single),
+                    "zero_count mismatch for size={K} sets {i} x {j}"
+                );
 
                 let m_total: u64 = {
                     let mb = merged.positive();
@@ -2289,8 +2149,10 @@ mod tests {
                     let sb = single.positive();
                     (0..sb.len()).map(|k| sb.at(k)).sum()
                 };
-                assert_eq!(m_total, s_total,
-                    "bucket total mismatch for size={K} sets {i} x {j}");
+                assert_eq!(
+                    m_total, s_total,
+                    "bucket total mismatch for size={K} sets {i} x {j}"
+                );
             }
         }
     }
@@ -2298,26 +2160,35 @@ mod tests {
     #[test]
     fn test_merge_regression_bucket_total() {
         // Regression: "bucket total mismatch for size=8 sets 2 x 35"
-        let set_b: &[f64] = &[18.896147780359236, 19.038540970281623, 15.726266735088323,
-                               19.97053274796744, 16.963914020801518];
+        let set_b: &[f64] = &[
+            18.896147780359236,
+            19.038540970281623,
+            15.726266735088323,
+            19.97053274796744,
+            16.963914020801518,
+        ];
 
-        let mut other: Histogram<8, P32> = Histogram::new();
+        let mut other: Histogram<8> = Histogram::new();
         for &v in set_b {
             other.update(v).unwrap();
             let bv = other.positive();
             let btotal: u64 = (0..bv.len()).map(|k| bv.at(k)).sum();
             let non_zero_count = other.count() - derived_zero_count(&mut other);
-            assert_eq!(btotal, non_zero_count, "bucket total mismatch after inserting {}", v);
+            assert_eq!(
+                btotal, non_zero_count,
+                "bucket total mismatch after inserting {}",
+                v
+            );
         }
 
         let set_a: &[f64] = &[1.0];
-        let mut merged: Histogram<8, P32> = Histogram::new();
+        let mut merged: Histogram<8> = Histogram::new();
         for &v in set_a {
             merged.update(v).unwrap();
         }
         merged.merge_from(&other).unwrap();
 
-        let mut single: Histogram<8, P32> = Histogram::new();
+        let mut single: Histogram<8> = Histogram::new();
         for &v in set_a {
             single.update(v).unwrap();
         }
@@ -2329,8 +2200,11 @@ mod tests {
         let sb = single.positive();
         let m_total: u64 = (0..mb.len()).map(|k| mb.at(k)).sum();
         let s_total: u64 = (0..sb.len()).map(|k| sb.at(k)).sum();
-        assert_eq!(m_total, s_total,
-            "bucket total mismatch: merged={} single={}", m_total, s_total);
+        assert_eq!(
+            m_total, s_total,
+            "bucket total mismatch: merged={} single={}",
+            m_total, s_total
+        );
     }
 
     #[test]
@@ -2345,11 +2219,11 @@ mod tests {
         let idx_inf = m0.map_to_index(inf);
         assert_eq!(idx_max, idx_inf);
 
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16> = Histogram::with_scale(0);
         h.update(1.0).unwrap();
         h.update(max_f64).unwrap();
-        // At P32, f64::MAX overflows f32, so sum is already infinite.
-        // At P64, it would still be finite. Don't assert finiteness.
+        // f64::MAX fits in f64 sum, but after adding infinity the sum
+        // is infinite.
         h.update(inf).unwrap();
         assert_eq!(h.count(), 3);
         assert_eq!(h.max(), f64::INFINITY);
@@ -2367,7 +2241,7 @@ mod tests {
         let m0 = Mapping::new(0).unwrap();
         assert_eq!(m0.map_to_index(subnormal), m0.map_to_index(min_normal));
 
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16> = Histogram::with_scale(0);
         h.update(subnormal).unwrap();
         h.update(min_normal).unwrap();
         assert_eq!(h.count(), 2);
@@ -2377,18 +2251,21 @@ mod tests {
     #[test]
     fn test_exhaustive_u8_overflow() {
         // Insert 8 values spanning a wide index range at scale 0, each
-        // with count 255. Starting at B1 with 320 slots (Histogram<8, P32>),
+        // with count 255. Starting at B1 with 320 slots (Histogram<8>),
         // counters widen B1→B2→B4→U8 (255 fits in U8), but the larger
         // initial capacity means the span still fits without reaching U64.
-        let mut h: Histogram<8, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<8> = Histogram::with_scale(0);
         let num_buckets = 8;
         for i in 0..num_buckets {
             let val = 2.0_f64.powi(i * 8);
             h.update_by_incr(val, 255).unwrap();
         }
         // With B1 start, U8 has enough capacity for the span.
-        assert!(h.bucket_width() >= BucketWidth::U8,
-            "expected at least U8, got {:?}", h.bucket_width());
+        assert!(
+            h.bucket_width() >= BucketWidth::U8,
+            "expected at least U8, got {:?}",
+            h.bucket_width()
+        );
         assert_eq!(h.count(), num_buckets as u64 * 255);
         // Adding one more should still be fine at U64 (no further widen needed).
         h.update(1.0).unwrap();
@@ -2397,7 +2274,9 @@ mod tests {
 
     #[test]
     fn test_successive_sub_byte_widening() {
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::with_scale(0)
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
 
         h.update(1.0).unwrap();
         assert_eq!(h.count(), 1);
@@ -2406,8 +2285,11 @@ mod tests {
         for count in 2..=15u64 {
             h.update(1.0).unwrap();
             assert_eq!(h.count(), count);
-            assert_eq!(h.bucket_width(), BucketWidth::B4,
-                "expected B4 at count {count}");
+            assert_eq!(
+                h.bucket_width(),
+                BucketWidth::B4,
+                "expected B4 at count {count}"
+            );
         }
 
         h.update(1.0).unwrap();
@@ -2421,11 +2303,9 @@ mod tests {
 
     #[test]
     fn test_successive_sub_byte_widening_multi_bucket() {
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
         let num_buckets = 8;
-        let values: Vec<f64> = (1..=num_buckets)
-            .map(|k| 2.0_f64.powi(k))
-            .collect();
+        let values: Vec<f64> = (1..=num_buckets).map(|k| 2.0_f64.powi(k)).collect();
 
         for &v in &values {
             h.update(v).unwrap();
@@ -2448,8 +2328,12 @@ mod tests {
         assert!(h.bucket_width() >= BucketWidth::U8);
 
         let expected_sum: f64 = values.iter().sum::<f64>() * 16.0;
-        assert!((h.sum() - expected_sum).abs() < 1e-6,
-            "sum mismatch: got {} expected {}", h.sum(), expected_sum);
+        assert!(
+            (h.sum() - expected_sum).abs() < 1e-6,
+            "sum mismatch: got {} expected {}",
+            h.sum(),
+            expected_sum
+        );
         assert_eq!(h.count(), target);
     }
 
@@ -2457,15 +2341,14 @@ mod tests {
     // Cross-size merge tests
     // -----------------------------------------------------------------------
 
-
     // -----------------------------------------------------------------------
     // Cross-size merge tests
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_merge_different_sizes() {
-        let mut collector: Histogram<16, P32> = Histogram::new();
-        let mut source: Histogram<8, P32> = Histogram::new();
+        let mut collector: Histogram<16> = Histogram::new();
+        let mut source: Histogram<8> = Histogram::new();
 
         source.update(1.0).unwrap();
         source.update(2.0).unwrap();
@@ -2481,10 +2364,10 @@ mod tests {
 
     #[test]
     fn test_merge_multiple_sources() {
-        let mut collector: Histogram<20, P32> = Histogram::new();
+        let mut collector: Histogram<20> = Histogram::new();
 
         for batch in 0..5 {
-            let mut src: Histogram<16, P32> = Histogram::new();
+            let mut src: Histogram<16> = Histogram::new();
             for i in 0..10 {
                 src.update((batch * 10 + i) as f64 * 0.1 + 0.1).unwrap();
             }
@@ -2497,8 +2380,8 @@ mod tests {
 
     #[test]
     fn test_merge_preserves_buckets() {
-        let mut collector: Histogram<16, P32> = Histogram::with_scale(0);
-        let mut source: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut collector: Histogram<16> = Histogram::with_scale(0);
+        let mut source: Histogram<16> = Histogram::with_scale(0);
 
         source.update(1.0).unwrap();
         source.update(2.0).unwrap();
@@ -2506,7 +2389,7 @@ mod tests {
 
         collector.merge_from_other(&source).unwrap();
 
-        let mut direct: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut direct: Histogram<16> = Histogram::with_scale(0);
         direct.update(1.0).unwrap();
         direct.update(2.0).unwrap();
         direct.update(4.0).unwrap();
@@ -2525,10 +2408,10 @@ mod tests {
 
     #[test]
     fn test_merge_empty_into_populated() {
-        let mut collector: Histogram<16, P32> = Histogram::new();
+        let mut collector: Histogram<16> = Histogram::new();
         collector.update(1.0).unwrap();
 
-        let empty: Histogram<8, P32> = Histogram::new();
+        let empty: Histogram<8> = Histogram::new();
         collector.merge_from_other(&empty).unwrap();
 
         assert_eq!(collector.count(), 1);
@@ -2537,8 +2420,8 @@ mod tests {
 
     #[test]
     fn test_merge_into_empty() {
-        let mut collector: Histogram<16, P32> = Histogram::new();
-        let mut source: Histogram<8, P32> = Histogram::new();
+        let mut collector: Histogram<16> = Histogram::new();
+        let mut source: Histogram<8> = Histogram::new();
         source.update(5.0).unwrap();
 
         collector.merge_from_other(&source).unwrap();
@@ -2553,36 +2436,32 @@ mod tests {
 
     mod flat_layout {
         use super::*;
-        use crate::precision::{P32, P64};
 
         #[test]
-        fn test_capacity_p32() {
-            let h: Histogram<16, P32> = Histogram::new();
-            assert_eq!(h.bucket_word_count(), 14);
-            assert_eq!(h.bucket_capacity(), 896); // 14 * 64 at B1
-        }
-
-        #[test]
-        fn test_capacity_p64() {
-            let h: Histogram<16, P64> = Histogram::new();
-            assert_eq!(h.bucket_word_count(), 12);
-            assert_eq!(h.bucket_capacity(), 768); // 12 * 64 at B1
+        fn test_capacity() {
+            let h: Histogram<16> = Histogram::new();
+            assert_eq!(h.bucket_word_count(), 16);
+            assert_eq!(h.bucket_capacity(), 1024); // 16 * 64 at B1
         }
 
         #[test]
         fn test_minimum_n() {
-            let h: Histogram<8, P32> = Histogram::new();
-            assert_eq!(h.bucket_word_count(), 6);
-            assert_eq!(h.bucket_capacity(), 384); // 6 * 64 at B1
+            let h: Histogram<8> = Histogram::new();
+            assert_eq!(h.bucket_word_count(), 8);
+            assert_eq!(h.bucket_capacity(), 512); // 8 * 64 at B1
         }
 
         #[test]
         fn test_struct_size() {
             use core::mem;
-            let size = mem::size_of::<Histogram<16, P32>>();
-            // 16 u64 words (128 bytes) + fixed metadata fields.
-            // Data pool dominates; struct should not exceed pool + 48 bytes overhead.
-            assert!(size <= 128 + 48, "Histogram<16, P32> unexpectedly large: {} bytes", size);
+            let size = mem::size_of::<Histogram<16>>();
+            // 16 u64 words (128 bytes) + Stats (32 bytes) + fixed metadata.
+            // Data pool + stats dominate; struct should not exceed pool + 80 bytes overhead.
+            assert!(
+                size <= 128 + 80,
+                "Histogram<16> unexpectedly large: {} bytes",
+                size
+            );
         }
     }
 
@@ -2625,8 +2504,11 @@ mod tests {
         let input = pack_u8x8([1, 1, 1, 1, 1, 1, 1, 1]);
         let result = narrow_u8_to_b4(input);
         let expected = pack_b4x16([1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     #[test]
@@ -2635,8 +2517,11 @@ mod tests {
         let input = pack_u8x8([15, 15, 15, 15, 15, 15, 15, 15]);
         let result = narrow_u8_to_b4(input);
         let expected = pack_b4x16([15, 15, 15, 15, 15, 15, 15, 15, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     #[test]
@@ -2645,8 +2530,11 @@ mod tests {
         let input = pack_u8x8([0, 1, 2, 3, 4, 5, 6, 7]);
         let result = narrow_u8_to_b4(input);
         let expected = pack_b4x16([0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     #[test]
@@ -2655,8 +2543,11 @@ mod tests {
         let input = pack_u8x8([15, 0, 8, 0, 3, 0, 1, 0]);
         let result = narrow_u8_to_b4(input);
         let expected = pack_b4x16([15, 0, 8, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     #[test]
@@ -2670,8 +2561,11 @@ mod tests {
         let input = pack_u16x4([10, 20, 30, 40]);
         let result = narrow_u16_to_u8(input);
         let expected = pack_u8x8([10, 20, 30, 40, 0, 0, 0, 0]) & 0xFFFF_FFFF;
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     #[test]
@@ -2680,8 +2574,11 @@ mod tests {
         let input = pack_u16x4([255, 255, 255, 255]);
         let result = narrow_u16_to_u8(input);
         let expected = pack_u8x8([255, 255, 255, 255, 0, 0, 0, 0]) & 0xFFFF_FFFF;
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     #[test]
@@ -2695,8 +2592,11 @@ mod tests {
         let input = pack_u32x2(1000, 2000);
         let result = narrow_u32_to_u16(input);
         let expected = (1000u64) | (2000u64 << 16);
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     #[test]
@@ -2704,8 +2604,11 @@ mod tests {
         let input = pack_u32x2(65535, 65535);
         let result = narrow_u32_to_u16(input);
         let expected = (65535u64) | (65535u64 << 16);
-        assert_eq!(result, expected,
-            "got {:#018x}, expected {:#018x}", result, expected);
+        assert_eq!(
+            result, expected,
+            "got {:#018x}, expected {:#018x}",
+            result, expected
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2726,8 +2629,11 @@ mod tests {
 
         // Expect one word with 16 nibbles: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0]
         let expected = pack_b4x16([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0]);
-        assert_eq!(data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}", data[0], expected);
+        assert_eq!(
+            data[0], expected,
+            "word 0: got {:#018x}, expected {:#018x}",
+            data[0], expected
+        );
         assert_eq!(data[1], 0, "word 1 should be zeroed");
     }
 
@@ -2744,10 +2650,16 @@ mod tests {
 
         let expected0 = pack_b4x16([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
         let expected1 = pack_b4x16([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
-        assert_eq!(data[0], expected0,
-            "word 0: got {:#018x}, expected {:#018x}", data[0], expected0);
-        assert_eq!(data[1], expected1,
-            "word 1: got {:#018x}, expected {:#018x}", data[1], expected1);
+        assert_eq!(
+            data[0], expected0,
+            "word 0: got {:#018x}, expected {:#018x}",
+            data[0], expected0
+        );
+        assert_eq!(
+            data[1], expected1,
+            "word 1: got {:#018x}, expected {:#018x}",
+            data[1], expected1
+        );
         assert_eq!(data[2], 0, "word 2 should be zeroed");
         assert_eq!(data[3], 0, "word 3 should be zeroed");
     }
@@ -2757,30 +2669,30 @@ mod tests {
         // Two words of U16 data (result of swar_step on U8), each ≤ 255.
         // Word 0: [10, 20, 30, 40]  Word 1: [50, 60, 70, 80]
         // After compact: one word of 8 bytes.
-        let mut data = [
-            pack_u16x4([10, 20, 30, 40]),
-            pack_u16x4([50, 60, 70, 80]),
-        ];
+        let mut data = [pack_u16x4([10, 20, 30, 40]), pack_u16x4([50, 60, 70, 80])];
         swar_narrow_compact(&mut data, BucketWidth::U8);
 
         let expected = pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]);
-        assert_eq!(data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}", data[0], expected);
+        assert_eq!(
+            data[0], expected,
+            "word 0: got {:#018x}, expected {:#018x}",
+            data[0], expected
+        );
         assert_eq!(data[1], 0, "word 1 should be zeroed");
     }
 
     #[test]
     fn test_swar_narrow_compact_u16_two_words() {
         // Two words of U32 data, each ≤ 65535.
-        let mut data = [
-            pack_u32x2(100, 200),
-            pack_u32x2(300, 400),
-        ];
+        let mut data = [pack_u32x2(100, 200), pack_u32x2(300, 400)];
         swar_narrow_compact(&mut data, BucketWidth::U16);
 
         let expected = pack_u16x4([100, 200, 300, 400]);
-        assert_eq!(data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}", data[0], expected);
+        assert_eq!(
+            data[0], expected,
+            "word 0: got {:#018x}, expected {:#018x}",
+            data[0], expected
+        );
         assert_eq!(data[1], 0, "word 1 should be zeroed");
     }
 
@@ -2791,8 +2703,11 @@ mod tests {
         swar_narrow_compact(&mut data, BucketWidth::U32);
 
         let expected = pack_u32x2(1000, 2000);
-        assert_eq!(data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}", data[0], expected);
+        assert_eq!(
+            data[0], expected,
+            "word 0: got {:#018x}, expected {:#018x}",
+            data[0], expected
+        );
         assert_eq!(data[1], 0, "word 1 should be zeroed");
     }
 
@@ -2873,10 +2788,18 @@ mod tests {
         // After swar_step, each word has 8 bytes = pairwise sums:
         // Word 0: bytes [1+2, 3+4, 0+0, 0+0, 0+0, 0+0, 0+0, 0+0] = [3,7,0,0,0,0,0,0]
         // Word 1: bytes [0+0, 0+0, 0+0, 0+0, 0+0, 0+0, 5+0, 6+0] = [0,0,0,0,0,0,5,6]
-        assert_eq!(data[0], pack_u8x8([3, 7, 0, 0, 0, 0, 0, 0]),
-            "swar_step word 0: got {:#018x}", data[0]);
-        assert_eq!(data[1], pack_u8x8([0, 0, 0, 0, 0, 0, 5, 6]),
-            "swar_step word 1: got {:#018x}", data[1]);
+        assert_eq!(
+            data[0],
+            pack_u8x8([3, 7, 0, 0, 0, 0, 0, 0]),
+            "swar_step word 0: got {:#018x}",
+            data[0]
+        );
+        assert_eq!(
+            data[1],
+            pack_u8x8([0, 0, 0, 0, 0, 0, 5, 6]),
+            "swar_step word 1: got {:#018x}",
+            data[1]
+        );
 
         // Step 2: No overflow (all ≤ 15)
         assert!(!swar_has_overflow(&data, BucketWidth::B4));
@@ -2886,8 +2809,11 @@ mod tests {
 
         // Result: 1 word of 16 nibbles = [3,7,0,0,0,0,0,0, 0,0,0,0,0,0,5,6]
         let expected = pack_b4x16([3, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6]);
-        assert_eq!(data[0], expected,
-            "compact result: got {:#018x}, expected {:#018x}", data[0], expected);
+        assert_eq!(
+            data[0], expected,
+            "compact result: got {:#018x}, expected {:#018x}",
+            data[0], expected
+        );
         assert_eq!(data[1], 0, "freed word should be zero");
     }
 
@@ -2921,17 +2847,18 @@ mod tests {
 
         swar_narrow_compact(&mut data, BucketWidth::U8);
         // 1 word of 8 bytes: [150, 50, 15, 4, 0, 0, 0, 0]
-        assert_eq!(data[0], pack_u8x8([150, 50, 15, 4, 0, 0, 0, 0]),
-            "compact result: got {:#018x}", data[0]);
+        assert_eq!(
+            data[0],
+            pack_u8x8([150, 50, 15, 4, 0, 0, 0, 0]),
+            "compact result: got {:#018x}",
+            data[0]
+        );
         assert_eq!(data[1], 0);
     }
 
     #[test]
     fn test_swar_step_then_narrow_compact_u16_roundtrip() {
-        let mut data = [
-            pack_u16x4([1000, 2000, 3000, 4000]),
-            pack_u16x4([0; 4]),
-        ];
+        let mut data = [pack_u16x4([1000, 2000, 3000, 4000]), pack_u16x4([0; 4])];
 
         swar_step(&mut data, BucketWidth::U16);
         // Pair sums: [3000, 7000, 0, 0] as U32
@@ -2939,8 +2866,12 @@ mod tests {
 
         swar_narrow_compact(&mut data, BucketWidth::U16);
         // 1 word: [3000, 7000, 0, 0] as U16
-        assert_eq!(data[0], pack_u16x4([3000, 7000, 0, 0]),
-            "compact result: got {:#018x}", data[0]);
+        assert_eq!(
+            data[0],
+            pack_u16x4([3000, 7000, 0, 0]),
+            "compact result: got {:#018x}",
+            data[0]
+        );
         assert_eq!(data[1], 0);
     }
 
@@ -2953,8 +2884,12 @@ mod tests {
         assert!(!swar_has_overflow(&data, BucketWidth::U32));
 
         swar_narrow_compact(&mut data, BucketWidth::U32);
-        assert_eq!(data[0], pack_u32x2(300_000, 0),
-            "compact result: got {:#018x}", data[0]);
+        assert_eq!(
+            data[0],
+            pack_u32x2(300_000, 0),
+            "compact result: got {:#018x}",
+            data[0]
+        );
         assert_eq!(data[1], 0);
     }
 
@@ -2965,38 +2900,44 @@ mod tests {
     #[test]
     fn test_do_downscale_merge_stays_b4() {
         // Insert small values at adjacent indices so pair sums ≤ 15.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
         // At scale 0, map_to_index(2.0) = 0, map_to_index(4.0) = 1.
         // These are a pair (even, odd) that will sum via SWAR.
-        h.update_by_incr(2.0, 5).unwrap();  // index 0, count 5
-        h.update_by_incr(4.0, 7).unwrap();  // index 1, count 7
+        h.update_by_incr(2.0, 5).unwrap(); // index 0, count 5
+        h.update_by_incr(4.0, 7).unwrap(); // index 1, count 7
         assert_eq!(h.bucket_width(), BucketWidth::B4);
 
         // Merge: 5+7=12 ≤ 15, should stay at B4.
         h.do_downscale(1).unwrap();
-        assert_eq!(h.bucket_width(), BucketWidth::B4,
-            "width should be preserved when pair sums fit");
+        assert_eq!(
+            h.bucket_width(),
+            BucketWidth::B4,
+            "width should be preserved when pair sums fit"
+        );
     }
 
     #[test]
     fn test_do_downscale_merge_widens_b4() {
         // Insert values that sum to > 15 at B4.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
-        h.update_by_incr(2.0, 10).unwrap();  // index 0, count 10
-        h.update_by_incr(4.0, 10).unwrap();  // index 1, count 10
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        h.update_by_incr(2.0, 10).unwrap(); // index 0, count 10
+        h.update_by_incr(4.0, 10).unwrap(); // index 1, count 10
         assert_eq!(h.bucket_width(), BucketWidth::B4);
 
         // Merge: 10+10=20 > 15, should widen to U8.
         h.do_downscale(1).unwrap();
-        assert_eq!(h.bucket_width(), BucketWidth::U8,
-            "width should widen when pair sums overflow");
+        assert_eq!(
+            h.bucket_width(),
+            BucketWidth::U8,
+            "width should widen when pair sums overflow"
+        );
     }
 
     #[test]
     fn test_do_downscale_preserves_width_when_possible() {
         // Fill histogram with small counts at many indices.
         // Downscale should merge pairs without widening.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
+        let mut h: Histogram<16> = Histogram::with_scale(0)
             .with_min_bucket_width(BucketWidth::B4)
             .with_literal_mode(false);
         // Insert 1 at each of several indices (all count=1, sums ≤ 2).
@@ -3007,18 +2948,21 @@ mod tests {
 
         let width_before = h.bucket_width();
         h.do_downscale(1).unwrap();
-        assert_eq!(h.bucket_width(), width_before,
-            "width should be preserved when pair sums fit");
+        assert_eq!(
+            h.bucket_width(),
+            width_before,
+            "width should be preserved when pair sums fit"
+        );
     }
 
     #[test]
     fn test_do_downscale_widens_on_overflow() {
         // Fill histogram with counts that will overflow on merge.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
+        let mut h: Histogram<16> = Histogram::with_scale(0)
             .with_min_bucket_width(BucketWidth::B4)
             .with_literal_mode(false);
-        h.update_by_incr(2.0, 15).unwrap();  // index 0, count 15
-        h.update_by_incr(4.0, 15).unwrap();  // index 1, count 15
+        h.update_by_incr(2.0, 15).unwrap(); // index 0, count 15
+        h.update_by_incr(4.0, 15).unwrap(); // index 1, count 15
         assert_eq!(h.bucket_width(), BucketWidth::B4);
 
         h.do_downscale(1).unwrap();
@@ -3037,15 +2981,23 @@ mod tests {
         let set_a = [0.5, 1.5, 2.5];
         let set_b = [5.0, 10.0, 15.0, 20.0];
 
-        let mut merged: Histogram<8, P32> = Histogram::new();
-        for &v in &set_a { merged.update(v).unwrap(); }
-        let mut other: Histogram<8, P32> = Histogram::new();
-        for &v in &set_b { other.update(v).unwrap(); }
+        let mut merged: Histogram<8> = Histogram::new();
+        for &v in &set_a {
+            merged.update(v).unwrap();
+        }
+        let mut other: Histogram<8> = Histogram::new();
+        for &v in &set_b {
+            other.update(v).unwrap();
+        }
         merged.merge_from(&other).unwrap();
 
-        let mut single: Histogram<8, P32> = Histogram::new();
-        for &v in &set_a { single.update(v).unwrap(); }
-        for &v in &set_b { single.update(v).unwrap(); }
+        let mut single: Histogram<8> = Histogram::new();
+        for &v in &set_a {
+            single.update(v).unwrap();
+        }
+        for &v in &set_b {
+            single.update(v).unwrap();
+        }
 
         let mb = merged.positive();
         let sb = single.positive();
@@ -3066,10 +3018,16 @@ mod tests {
     fn test_swar_step_b4_single_word() {
         // 16 nibbles: [1,2, 3,0, 0,0, 15,0, 0,0, 0,0, 0,0, 0,0]
         // Pair sums → 8 bytes: [3, 3, 0, 15, 0, 0, 0, 0]
-        let mut data = [pack_b4x16([1,2, 3,0, 0,0, 15,0, 0,0, 0,0, 0,0, 0,0])];
+        let mut data = [pack_b4x16([
+            1, 2, 3, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])];
         swar_step(&mut data, BucketWidth::B4);
-        assert_eq!(data[0], pack_u8x8([3, 3, 0, 15, 0, 0, 0, 0]),
-            "got {:#018x}", data[0]);
+        assert_eq!(
+            data[0],
+            pack_u8x8([3, 3, 0, 15, 0, 0, 0, 0]),
+            "got {:#018x}",
+            data[0]
+        );
     }
 
     #[test]
@@ -3078,8 +3036,12 @@ mod tests {
         // Pair sums → 4 shorts: [300, 100, 0, 0]
         let mut data = [pack_u8x8([100, 200, 50, 50, 0, 0, 0, 0])];
         swar_step(&mut data, BucketWidth::U8);
-        assert_eq!(data[0], pack_u16x4([300, 100, 0, 0]),
-            "got {:#018x}", data[0]);
+        assert_eq!(
+            data[0],
+            pack_u16x4([300, 100, 0, 0]),
+            "got {:#018x}",
+            data[0]
+        );
     }
 
     #[test]
@@ -3088,8 +3050,7 @@ mod tests {
         // Pair sums → 2 ints: [3000, 7000]
         let mut data = [pack_u16x4([1000, 2000, 3000, 4000])];
         swar_step(&mut data, BucketWidth::U16);
-        assert_eq!(data[0], pack_u32x2(3000, 7000),
-            "got {:#018x}", data[0]);
+        assert_eq!(data[0], pack_u32x2(3000, 7000), "got {:#018x}", data[0]);
     }
 
     #[test]
@@ -3104,7 +3065,9 @@ mod tests {
     #[test]
     fn test_swar_step_b4_max_pair_sum() {
         // Two 15s: sum = 30, which fits in U8 (max 255).
-        let mut data = [pack_b4x16([15,15, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0])];
+        let mut data = [pack_b4x16([
+            15, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ])];
         swar_step(&mut data, BucketWidth::B4);
         assert_eq!(data[0] & 0xFF, 30);
     }
@@ -3122,8 +3085,11 @@ mod tests {
         // With 1 word, step_by(2) produces i=0 only. lo=narrow(data[0]),
         // hi=0 (i+1 >= n). data[0] = lo | (0 << 32) = lo.
         let expected = narrow_u8_to_b4(pack_u8x8([3, 7, 0, 15, 0, 0, 5, 6]));
-        assert_eq!(data[0], expected,
-            "got {:#018x}, expected {:#018x}", data[0], expected);
+        assert_eq!(
+            data[0], expected,
+            "got {:#018x}, expected {:#018x}",
+            data[0], expected
+        );
     }
 
     #[test]
@@ -3133,20 +3099,18 @@ mod tests {
         // Word 1: [0,0,0,0,0,0,0,2]
         // Word 2: [3,0,0,0,0,0,0,4]
         let mut data = [
-            pack_u8x8([1,0,0,0,0,0,0,0]),
-            pack_u8x8([0,0,0,0,0,0,0,2]),
-            pack_u8x8([3,0,0,0,0,0,0,4]),
+            pack_u8x8([1, 0, 0, 0, 0, 0, 0, 0]),
+            pack_u8x8([0, 0, 0, 0, 0, 0, 0, 2]),
+            pack_u8x8([3, 0, 0, 0, 0, 0, 0, 4]),
         ];
         swar_narrow_compact(&mut data, BucketWidth::B4);
         // step_by(2): i=0 → data[0]=narrow(w0)|narrow(w1)<<32
         //             i=2 → data[1]=narrow(w2)|0<<32
-        let lo0 = narrow_u8_to_b4(pack_u8x8([1,0,0,0,0,0,0,0]));
-        let hi0 = narrow_u8_to_b4(pack_u8x8([0,0,0,0,0,0,0,2]));
-        let lo1 = narrow_u8_to_b4(pack_u8x8([3,0,0,0,0,0,0,4]));
-        assert_eq!(data[0], lo0 | (hi0 << 32),
-            "word 0: got {:#018x}", data[0]);
-        assert_eq!(data[1], lo1,
-            "word 1: got {:#018x}", data[1]);
+        let lo0 = narrow_u8_to_b4(pack_u8x8([1, 0, 0, 0, 0, 0, 0, 0]));
+        let hi0 = narrow_u8_to_b4(pack_u8x8([0, 0, 0, 0, 0, 0, 0, 2]));
+        let lo1 = narrow_u8_to_b4(pack_u8x8([3, 0, 0, 0, 0, 0, 0, 4]));
+        assert_eq!(data[0], lo0 | (hi0 << 32), "word 0: got {:#018x}", data[0]);
+        assert_eq!(data[1], lo1, "word 1: got {:#018x}", data[1]);
         assert_eq!(data[2], 0, "word 2 should be zeroed");
     }
 
@@ -3158,11 +3122,14 @@ mod tests {
             pack_u16x4([255, 0, 128, 1]),
         ];
         swar_narrow_compact(&mut data, BucketWidth::U8);
-        assert_eq!(data[0], pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]),
-            "word 0: got {:#018x}", data[0]);
+        assert_eq!(
+            data[0],
+            pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]),
+            "word 0: got {:#018x}",
+            data[0]
+        );
         let expected1 = narrow_u16_to_u8(pack_u16x4([255, 0, 128, 1]));
-        assert_eq!(data[1], expected1,
-            "word 1: got {:#018x}", data[1]);
+        assert_eq!(data[1], expected1, "word 1: got {:#018x}", data[1]);
         assert_eq!(data[2], 0, "word 2 should be zeroed");
     }
 
@@ -3211,9 +3178,9 @@ mod tests {
     fn test_bucket_downscale_scalar_preserves_total_no_overflow() {
         // Two values at adjacent indices with small counts → scalar merge
         // should sum them without widening.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_literal_mode(false);
-        h.update_by_incr(2.0, 3).unwrap();  // index 0
-        h.update_by_incr(4.0, 5).unwrap();  // index 1
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_literal_mode(false);
+        h.update_by_incr(2.0, 3).unwrap(); // index 0
+        h.update_by_incr(4.0, 5).unwrap(); // index 1
 
         let total_before: u64 = h.positive().iter().sum();
         let width_before = h.bucket_width();
@@ -3229,8 +3196,10 @@ mod tests {
         h.do_downscale(1).unwrap();
 
         let total_after: u64 = h.positive().iter().sum();
-        assert_eq!(total_before, total_after,
-            "bucket total changed: {total_before} → {total_after}");
+        assert_eq!(
+            total_before, total_after,
+            "bucket total changed: {total_before} → {total_after}"
+        );
         // Small counts (3+5=8 ≤ 15) → should stay at B4.
         assert_eq!(h.bucket_width(), width_before);
     }
@@ -3238,9 +3207,9 @@ mod tests {
     #[test]
     fn test_bucket_downscale_scalar_preserves_total_with_overflow() {
         // Fill enough that pair sums exceed B4 max (15).
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
-        h.update_by_incr(2.0, 10).unwrap();  // index 0, count 10
-        h.update_by_incr(4.0, 10).unwrap();  // index 1, count 10
+        let mut h: Histogram<16> = Histogram::with_scale(0);
+        h.update_by_incr(2.0, 10).unwrap(); // index 0, count 10
+        h.update_by_incr(4.0, 10).unwrap(); // index 1, count 10
 
         let total_before: u64 = h.positive().iter().sum();
 
@@ -3255,7 +3224,7 @@ mod tests {
     #[test]
     fn test_do_downscale_multi_step_preserves_total() {
         // Insert 4 values at separate indices, then downscale by 3.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
+        let mut h: Histogram<16> = Histogram::with_scale(0)
             .with_min_bucket_width(BucketWidth::B4)
             .with_literal_mode(false);
         for i in 0..4 {
@@ -3277,8 +3246,7 @@ mod tests {
     fn test_do_downscale_multi_step_through_alignment_boundary() {
         // Start with base aligned to 16, downscale 5+ times so base
         // goes from even to odd and back. Verify totals survive.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0)
-            .with_literal_mode(false);
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_literal_mode(false);
         for i in 0..8 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3296,7 +3264,7 @@ mod tests {
     #[test]
     fn test_do_downscale_odd_base_preserves_total() {
         // Downscale through odd-base steps using SWAR-shift.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_literal_mode(false);
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_literal_mode(false);
         for i in 0..4 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3309,8 +3277,10 @@ mod tests {
         }
 
         let total_after: u64 = h.positive().iter().sum();
-        assert_eq!(total_before, total_after,
-            "total changed after 7-step downscale through odd base");
+        assert_eq!(
+            total_before, total_after,
+            "total changed after 7-step downscale through odd base"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3321,7 +3291,7 @@ mod tests {
     fn test_bucket_widen_odd_base_uses_scalar() {
         // Construct a scenario where base is odd, then verify widen works.
         // Start at max scale so we have room to downscale.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(8);
+        let mut h: Histogram<16> = Histogram::with_scale(8);
         h.update_by_incr(1.5, 5).unwrap();
         h.update_by_incr(1.6, 7).unwrap();
 
@@ -3339,12 +3309,18 @@ mod tests {
             let width_before = h.bucket_width();
             if width_before != BucketWidth::U64 {
                 h.bucket_widen(1).unwrap();
-                assert!(h.bucket_width() > width_before,
-                    "width should increase: {:?} → {:?}", width_before, h.bucket_width());
+                assert!(
+                    h.bucket_width() > width_before,
+                    "width should increase: {:?} → {:?}",
+                    width_before,
+                    h.bucket_width()
+                );
 
                 let total_after: u64 = h.positive().iter().sum();
-                assert_eq!(total_before, total_after,
-                    "bucket total changed on odd-base widen");
+                assert_eq!(
+                    total_before, total_after,
+                    "bucket total changed on odd-base widen"
+                );
             }
         }
     }
@@ -3356,7 +3332,9 @@ mod tests {
     #[test]
     fn test_speculative_merge_b4_sparse_stays_b4() {
         // Many single-count buckets. All pair sums ≤ 2, so B4 stays.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::with_scale(0)
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         for i in 0..16 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3370,20 +3348,23 @@ mod tests {
     #[test]
     fn test_speculative_merge_b4_dense_widens_to_u8() {
         // Same bucket hit 10 times, its neighbor 10 times → sum 20 > 15.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
         h.update_by_incr(2.0, 10).unwrap();
         h.update_by_incr(4.0, 10).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::B4);
 
         h.do_downscale(1).unwrap();
-        assert_eq!(h.bucket_width(), BucketWidth::U8,
-            "10+10=20 > 15, must widen");
+        assert_eq!(
+            h.bucket_width(),
+            BucketWidth::U8,
+            "10+10=20 > 15, must widen"
+        );
     }
 
     #[test]
     fn test_speculative_merge_u8_dense_widens_to_u16() {
         // At U8, max = 255. Two adjacent buckets each with count 200 → 400 > 255.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16> = Histogram::with_scale(0);
         h.update_by_incr(2.0, 200).unwrap();
         // This first update at B4 will overflow (200 > 15) → widen to U8.
         assert_eq!(h.bucket_width(), BucketWidth::U8);
@@ -3400,7 +3381,7 @@ mod tests {
     #[test]
     fn test_speculative_merge_u8_sparse_stays_u8() {
         // At U8 with counts far below 255, pair sums should fit.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16> = Histogram::with_scale(0);
         h.update_by_incr(2.0, 100).unwrap();
         // 100 > 15 → widens B4→U8 on counter overflow path.
         assert_eq!(h.bucket_width(), BucketWidth::U8);
@@ -3423,7 +3404,7 @@ mod tests {
         // Fill a histogram with enough count magnitude to force widening
         // at every level: B4(max 15) → U8(255) → U16(65535) → U32 → U64.
         // Adjacent pairs sum to 1000, forcing overflow at B4, U8.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(8);
+        let mut h: Histogram<16> = Histogram::with_scale(8);
         h.update_by_incr(1.5, 500).unwrap();
         h.update_by_incr(1.6, 500).unwrap();
         // Start at U16 (500 > 255).
@@ -3439,9 +3420,12 @@ mod tests {
         for step in 1..=10 {
             h.do_downscale(1).unwrap();
             let current: u64 = h.positive().iter().sum();
-            assert_eq!(current, total,
+            assert_eq!(
+                current,
+                total,
                 "total changed at step {step} (width={:?}): {current} != {total}",
-                h.bucket_width());
+                h.bucket_width()
+            );
             if h.bucket_width() == BucketWidth::U64 {
                 break;
             }
@@ -3451,7 +3435,7 @@ mod tests {
     #[test]
     fn test_sum_conservation_scalar_path() {
         // Force the scalar path and check totals at each step.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0).with_literal_mode(false);
+        let mut h: Histogram<16> = Histogram::with_scale(0).with_literal_mode(false);
         for i in 0..10 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -3462,17 +3446,21 @@ mod tests {
         for step in 1..=8 {
             h.do_downscale(1).unwrap();
             let current: u64 = h.positive().iter().sum();
-            assert_eq!(current, total,
+            assert_eq!(
+                current,
+                total,
                 "total changed at step {step}: {current} != {total}, \
                  width={:?} base={}",
-                h.bucket_width(), h.index_base);
+                h.bucket_width(),
+                h.index_base
+            );
         }
     }
 
     #[test]
     fn test_sum_conservation_large_counts() {
         // High counts that force widening at every merge.
-        let mut h: Histogram<16, P32> = Histogram::with_scale(0);
+        let mut h: Histogram<16> = Histogram::with_scale(0);
         h.update_by_incr(2.0, 15).unwrap(); // fills B4 to max
         h.update_by_incr(4.0, 15).unwrap();
         h.update_by_incr(8.0, 15).unwrap();
@@ -3483,9 +3471,13 @@ mod tests {
         for step in 1..=6 {
             h.do_downscale(1).unwrap();
             let current: u64 = h.positive().iter().sum();
-            assert_eq!(current, total,
+            assert_eq!(
+                current,
+                total,
                 "total changed at step {step}: {current} != {total}, \
-                 width={:?}", h.bucket_width());
+                 width={:?}",
+                h.bucket_width()
+            );
         }
     }
 
@@ -3504,15 +3496,21 @@ mod tests {
 
             // Extract nibble i from the result (low 32 bits).
             let nibble = (result >> (i as u64 * 4)) & 0xF;
-            assert_eq!(nibble, (i + 1).min(15) as u64,
-                "nibble {i}: expected {}, got {nibble}", (i + 1).min(15));
+            assert_eq!(
+                nibble,
+                (i + 1).min(15) as u64,
+                "nibble {i}: expected {}, got {nibble}",
+                (i + 1).min(15)
+            );
 
             // All other nibbles should be zero.
             for j in 0..8u8 {
                 if j != i {
                     let other = (result >> (j as u64 * 4)) & 0xF;
-                    assert_eq!(other, 0,
-                        "nibble {j} should be 0 when only nibble {i} is set, got {other}");
+                    assert_eq!(
+                        other, 0,
+                        "nibble {j} should be 0 when only nibble {i} is set, got {other}"
+                    );
                 }
             }
         }
@@ -3527,8 +3525,12 @@ mod tests {
             let result = narrow_u16_to_u8(input);
 
             let byte = (result >> (i as u64 * 8)) & 0xFF;
-            assert_eq!(byte, (i + 1).min(255) as u64,
-                "byte {i}: expected {}, got {byte}", (i + 1).min(255));
+            assert_eq!(
+                byte,
+                (i + 1).min(255) as u64,
+                "byte {i}: expected {}, got {byte}",
+                (i + 1).min(255)
+            );
         }
     }
 
@@ -3598,10 +3600,10 @@ mod tests {
 
     #[test]
     fn test_adaptive_downscale_sequential_inserts_small_pool() {
-        // Reproducer: insert 1.0..=8.0 into Histogram<8, P32>.
+        // Reproducer: insert 1.0..=8.0 into Histogram<8>.
         // At B1 with 6 bucket words (384 slots), the index span forces
         // repeated downscaling. Bucket totals must stay consistent.
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         for i in 1..=8 {
             let v = i as f64;
             h.update(v).unwrap();
@@ -3610,17 +3612,25 @@ mod tests {
                 let t: u64 = (0..b.len()).map(|k| b.at(k)).sum();
                 (t, b.width(), b.offset(), b.len(), b.capacity())
             };
-            assert_eq!(total, h.count(),
+            assert_eq!(
+                total,
+                h.count(),
                 "After inserting {v}: bucket total ({total}) != count ({})\n  \
                  scale={} width={:?} offset={} len={} cap={}",
-                h.count(), h.scale(), b_width, b_offset, b_len, b_cap);
+                h.count(),
+                h.scale(),
+                b_width,
+                b_offset,
+                b_len,
+                b_cap
+            );
         }
     }
 
     #[test]
     fn test_adaptive_downscale_wide_span_small_pool() {
         // Wide value range in a small pool — forces multi-step downscale.
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         let values = [0.001, 1.0, 1000.0, 0.5, 50.0, 0.01, 100.0, 10.0];
         for (vi, &v) in values.iter().enumerate() {
             h.update(v).unwrap();
@@ -3629,10 +3639,15 @@ mod tests {
                 let t: u64 = (0..b.len()).map(|k| b.at(k)).sum();
                 (t, b.width())
             };
-            assert_eq!(total, h.count(),
+            assert_eq!(
+                total,
+                h.count(),
                 "After values[{vi}]={v}: bucket total ({total}) != count ({})\n  \
                  scale={} width={:?}",
-                h.count(), h.scale(), b_width);
+                h.count(),
+                h.scale(),
+                b_width
+            );
         }
     }
 
@@ -3641,23 +3656,19 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Helper: count total across all positive buckets.
-    fn bucket_total<const N: usize, P: Precision>(h: &mut Histogram<N, P>) -> u64 {
+    fn bucket_total<const N: usize>(h: &mut Histogram<N>) -> u64 {
         let b = h.positive();
         (0..b.len()).map(|i| b.at(i)).sum()
     }
 
     /// Helper: build two same-size histograms from ops, merge, and
     /// assert count and bucket-total invariants.
-    fn merge_check<const N: usize, P: Precision>(
-        left: &[(f64, u64)],
-        right: &[(f64, u64)],
-        label: &str,
-    ) {
-        let mut h1 = Histogram::<N, P>::new();
+    fn merge_check<const N: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
+        let mut h1 = Histogram::<N>::new();
         for &(v, incr) in left {
             h1.update_by_incr(v, incr).unwrap();
         }
-        let mut h2 = Histogram::<N, P>::new();
+        let mut h2 = Histogram::<N>::new();
         for &(v, incr) in right {
             h2.update_by_incr(v, incr).unwrap();
         }
@@ -3670,16 +3681,16 @@ mod tests {
 
     /// Helper: build two different-size histograms from ops, merge via
     /// `merge_from_other`, and assert count and bucket-total invariants.
-    fn merge_check_cross<const N: usize, P: Precision, const M: usize>(
+    fn merge_check_cross<const N: usize, const M: usize>(
         left: &[(f64, u64)],
         right: &[(f64, u64)],
         label: &str,
     ) {
-        let mut h1 = Histogram::<N, P>::new();
+        let mut h1 = Histogram::<N>::new();
         for &(v, incr) in left {
             h1.update_by_incr(v, incr).unwrap();
         }
-        let mut h2 = Histogram::<M, P>::new();
+        let mut h2 = Histogram::<M>::new();
         for &(v, incr) in right {
             h2.update_by_incr(v, incr).unwrap();
         }
@@ -3692,10 +3703,10 @@ mod tests {
 
     #[test]
     fn test_merge_needs_downscale_in_raw() {
-        let mut h1 = Histogram::<8, P32>::new();
+        let mut h1 = Histogram::<8>::new();
         h1.update(1.0).unwrap();
 
-        let mut h2 = Histogram::<8, P32>::new();
+        let mut h2 = Histogram::<8>::new();
         h2.update(1e30).unwrap();
         h2.update(1e-30).unwrap();
 
@@ -3706,8 +3717,17 @@ mod tests {
         let h2_scale = h2.scale();
         let b2 = h2.positive();
         h1.merge_from_raw(
-            &Stats { count: h2_count, sum: h2_sum, min: h2_min, max: h2_max },
-            &BucketDescriptor { scale: h2_scale, offset: b2.offset(), len: b2.len() },
+            &Stats {
+                count: h2_count,
+                sum: h2_sum,
+                min: h2_min,
+                max: h2_max,
+            },
+            &BucketDescriptor {
+                scale: h2_scale,
+                offset: b2.offset(),
+                len: b2.len(),
+            },
             &|i| b2.at(i),
         )
         .unwrap();
@@ -3723,17 +3743,14 @@ mod tests {
         let v1 = f64::from_le_bytes([32, 0, 66, 0, 0, 98, 65, 3]); // ~5.44e-293, subnormal as f32
         let v2 = f64::from_le_bytes([0, 32, 0, 66, 0, 98, 65, 64]); // ~34.77
 
-        let left_ops: Vec<(f64, u64)> = vec![
-            (v1, 3), (v2, 1), (v1, 12), (v2, 4), (v1, 192), (v2, 64),
-        ];
-        let right_ops: Vec<(f64, u64)> = vec![
-            (v1, 3072), (v2, 1024),
-        ];
+        let left_ops: Vec<(f64, u64)> =
+            vec![(v1, 3), (v2, 1), (v1, 12), (v2, 4), (v1, 192), (v2, 64)];
+        let right_ops: Vec<(f64, u64)> = vec![(v1, 3072), (v2, 1024)];
 
-        merge_check::<8, P32>(&left_ops, &right_ops, "same N=8");
-        merge_check::<16, P32>(&left_ops, &right_ops, "same N=16");
-        merge_check_cross::<8, P32, 16>(&left_ops, &right_ops, "cross 8←16");
-        merge_check_cross::<16, P32, 8>(&left_ops, &right_ops, "cross 16←8");
+        merge_check::<8>(&left_ops, &right_ops, "same N=8");
+        merge_check::<16>(&left_ops, &right_ops, "same N=16");
+        merge_check_cross::<8, 16>(&left_ops, &right_ops, "cross 8←16");
+        merge_check_cross::<16, 8>(&left_ops, &right_ops, "cross 16←8");
     }
 
     /// Regression: three values with a subnormal, split across merge,
@@ -3741,24 +3758,30 @@ mod tests {
     #[test]
     fn test_three_vals_with_subnormal_echo() {
         let v1 = f64::from_le_bytes([22, 22, 0, 237, 237, 59, 59, 59]); // ~2.25e-23
-        let v2 = f64::from_le_bytes([59, 59, 1, 0, 59, 31, 0, 0]);     // ~1.70e-310, subnormal as f32
+        let v2 = f64::from_le_bytes([59, 59, 1, 0, 59, 31, 0, 0]); // ~1.70e-310, subnormal as f32
         let v3 = f64::from_le_bytes([0, 59, 237, 237, 64, 0, 122, 64]); // ~416.0
 
         let left: Vec<(f64, u64)> = vec![(v1, 300), (v2, 5)];
         let right: Vec<(f64, u64)> = vec![
-            (v3, 5), (v1, 1200), (v2, 20), (v3, 20), (v1, 19200), (v2, 320), (v3, 320),
+            (v3, 5),
+            (v1, 1200),
+            (v2, 20),
+            (v3, 20),
+            (v1, 19200),
+            (v2, 320),
+            (v3, 320),
         ];
 
-        merge_check::<8, P32>(&left, &right, "same 8");
-        merge_check::<16, P32>(&left, &right, "same 16");
-        merge_check_cross::<8, P32, 16>(&left, &right, "cross 8←16");
-        merge_check_cross::<16, P32, 8>(&left, &right, "cross 16←8");
+        merge_check::<8>(&left, &right, "same 8");
+        merge_check::<16>(&left, &right, "same 16");
+        merge_check_cross::<8, 16>(&left, &right, "cross 8←16");
+        merge_check_cross::<16, 8>(&left, &right, "cross 16←8");
     }
 
     #[test]
     fn test_merge_p64_bucket_total_exceeds_count() {
-        let mut h0 = Histogram::<8, P64>::new();
-        let mut h1 = Histogram::<8, P64>::new();
+        let mut h0 = Histogram::<8>::new();
+        let mut h1 = Histogram::<8>::new();
 
         h1.update_by_incr(2.8396262443943004e+238, 40).unwrap();
         h0.update_by_incr(2.635549485807631e-82, 1).unwrap();
@@ -3772,8 +3795,7 @@ mod tests {
             let count = h0.count();
             let b = h0.positive();
             let bt: u64 = (0..b.len()).map(|i| b.at(i)).sum();
-            assert!(bt <= count,
-                "bucket total ({bt}) exceeds count ({count})");
+            assert!(bt <= count, "bucket total ({bt}) exceeds count ({count})");
         }
     }
 
@@ -3784,8 +3806,8 @@ mod tests {
         let v0: f64 = 5.653943197254256e-308;
         let v1: f64 = 2.740490672504645e-61;
 
-        let mut h0 = Histogram::<8, P32>::new();
-        let mut h1 = Histogram::<8, P32>::new();
+        let mut h0 = Histogram::<8>::new();
+        let mut h1 = Histogram::<8>::new();
 
         h0.update_by_incr(v0, 1).unwrap();
         h1.update_by_incr(v1, 1).unwrap();
@@ -3812,11 +3834,24 @@ mod tests {
         let exp_len = (exp_max - exp_min + 1) as u32;
 
         let b = h0.positive();
-        assert_eq!(b.offset(), exp_min,
-            "offset mismatch: got {} expected {} (scale={})", b.offset(), exp_min, scale);
-        assert_eq!(b.len(), exp_len,
+        assert_eq!(
+            b.offset(),
+            exp_min,
+            "offset mismatch: got {} expected {} (scale={})",
+            b.offset(),
+            exp_min,
+            scale
+        );
+        assert_eq!(
+            b.len(),
+            exp_len,
             "len mismatch: got {} expected {} (scale={}, idx0={}, idx1={})",
-            b.len(), exp_len, scale, idx0, idx1);
+            b.len(),
+            exp_len,
+            scale,
+            idx0,
+            idx1
+        );
 
         // No trailing/leading zero buckets
         if !b.is_empty() {
@@ -3831,7 +3866,7 @@ mod tests {
 
     #[test]
     fn test_literal_mode_default() {
-        let h: Histogram<8, P32> = Histogram::new();
+        let h: Histogram<8> = Histogram::new();
         assert!(h.is_literal());
         assert_eq!(h.count(), 0);
         assert_eq!(h.sum(), 0.0);
@@ -3839,7 +3874,7 @@ mod tests {
 
     #[test]
     fn test_literal_mode_stores_values() {
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         h.update(1.0).unwrap();
         h.update(2.0).unwrap();
         h.update(4.0).unwrap();
@@ -3851,38 +3886,24 @@ mod tests {
     }
 
     #[test]
-    fn test_literal_mode_capacity_p32() {
-        // Histogram<8, P32>: STAT_WORDS=2, so 6 literal slots.
-        let mut h: Histogram<8, P32> = Histogram::new();
-        for i in 0..6 {
+    fn test_literal_mode_capacity() {
+        // Histogram<8>: all 8 words available for literals.
+        let mut h: Histogram<8> = Histogram::new();
+        for i in 0..8 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
-        assert!(h.is_literal(), "should still be literal with 6 values");
-        assert_eq!(h.count(), 6);
+        assert!(h.is_literal(), "should still be literal with 8 values");
+        assert_eq!(h.count(), 8);
 
-        // 7th value should trigger promotion.
-        h.update(128.0).unwrap();
-        assert!(!h.is_literal(), "should promote on 7th value");
-        assert_eq!(h.count(), 7);
-    }
-
-    #[test]
-    fn test_literal_mode_capacity_p64() {
-        // Histogram<8, P64>: STAT_WORDS=4, so 4 literal slots.
-        let mut h: Histogram<8, P64> = Histogram::new();
-        for i in 0..4 {
-            h.update(2.0_f64.powi(i)).unwrap();
-        }
-        assert!(h.is_literal(), "should still be literal with 4 values");
-
-        h.update(32.0).unwrap();
-        assert!(!h.is_literal(), "should promote on 5th value");
-        assert_eq!(h.count(), 5);
+        // 9th value should trigger promotion.
+        h.update(256.0).unwrap();
+        assert!(!h.is_literal(), "should promote on 9th value");
+        assert_eq!(h.count(), 9);
     }
 
     #[test]
     fn test_literal_mode_opt_out() {
-        let mut h: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+        let mut h: Histogram<8> = Histogram::new().with_literal_mode(false);
         assert!(!h.is_literal());
         h.update(1.0).unwrap();
         assert!(!h.is_literal());
@@ -3890,9 +3911,9 @@ mod tests {
 
     #[test]
     fn test_literal_mode_clear_resets() {
-        let mut h: Histogram<8, P32> = Histogram::new();
-        // Fill to promotion.
-        for i in 0..7 {
+        let mut h: Histogram<8> = Histogram::new();
+        // Fill beyond literal capacity (8 slots) to trigger promotion.
+        for i in 0..9 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
         assert!(!h.is_literal());
@@ -3904,7 +3925,7 @@ mod tests {
     #[test]
     fn test_literal_mode_zero_values() {
         // Zero values don't consume literal slots.
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         h.update(0.0).unwrap();
         h.update(0.0).unwrap();
         h.update(0.0).unwrap();
@@ -3917,7 +3938,7 @@ mod tests {
 
     #[test]
     fn test_literal_mode_identical_values() {
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         for _ in 0..6 {
             h.update(42.0).unwrap();
         }
@@ -3934,8 +3955,8 @@ mod tests {
     #[test]
     fn test_literal_mode_bucket_view() {
         // Compare literal-mode virtual view to bucket-mode actual view.
-        let mut lit: Histogram<8, P32> = Histogram::new();
-        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+        let mut lit: Histogram<8> = Histogram::new();
+        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
 
         let values = [1.0, 2.0, 4.0];
         for &v in &values {
@@ -3963,24 +3984,24 @@ mod tests {
     fn test_literal_promotion_optimal_scale() {
         // Verify that promotion picks the optimal scale (matching what
         // bucket mode would choose given the same values).
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         // Insert values that span a wide range to force downscaling.
-        let values = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+        let values = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
         for &v in &values {
             h.update(v).unwrap();
         }
         assert!(h.is_literal());
 
         // Now promote by inserting one more.
-        h.update(64.0).unwrap();
+        h.update(256.0).unwrap();
         assert!(!h.is_literal());
 
         // Compare to bucket-mode histogram with same values.
-        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
         for &v in &values {
             bkt.update(v).unwrap();
         }
-        bkt.update(64.0).unwrap();
+        bkt.update(256.0).unwrap();
 
         // The total counts should match.
         let lit_total: u64 = h.positive().iter().sum();
@@ -3992,7 +4013,7 @@ mod tests {
 
     #[test]
     fn test_literal_update_by_incr() {
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         // 3 copies of the same value.
         h.update_by_incr(5.0, 3).unwrap();
         assert!(h.is_literal());
@@ -4002,20 +4023,20 @@ mod tests {
 
     #[test]
     fn test_literal_update_by_incr_overflow() {
-        // Histogram<8, P32>: 6 literal slots. incr=7 should promote.
-        let mut h: Histogram<8, P32> = Histogram::new();
-        h.update_by_incr(3.25, 7).unwrap();
+        // Histogram<8>: 8 literal slots. incr=9 should promote.
+        let mut h: Histogram<8> = Histogram::new();
+        h.update_by_incr(3.25, 9).unwrap();
         assert!(!h.is_literal());
-        assert_eq!(h.count(), 7);
+        assert_eq!(h.count(), 9);
     }
 
     #[test]
     fn test_literal_merge_literal_into_literal() {
-        let mut a: Histogram<8, P32> = Histogram::new();
+        let mut a: Histogram<8> = Histogram::new();
         a.update(1.0).unwrap();
         a.update(2.0).unwrap();
 
-        let mut b: Histogram<8, P32> = Histogram::new();
+        let mut b: Histogram<8> = Histogram::new();
         b.update(4.0).unwrap();
         b.update(8.0).unwrap();
 
@@ -4033,11 +4054,11 @@ mod tests {
 
     #[test]
     fn test_literal_merge_literal_into_bucket() {
-        let mut collector: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        let mut collector: Histogram<16> = Histogram::new().with_literal_mode(false);
         collector.update(1.0).unwrap();
         collector.update(2.0).unwrap();
 
-        let mut source: Histogram<16, P32> = Histogram::new();
+        let mut source: Histogram<16> = Histogram::new();
         source.update(4.0).unwrap();
         source.update(8.0).unwrap();
         assert!(source.is_literal());
@@ -4049,11 +4070,11 @@ mod tests {
 
     #[test]
     fn test_literal_merge_bucket_into_literal() {
-        let mut collector: Histogram<16, P32> = Histogram::new();
+        let mut collector: Histogram<16> = Histogram::new();
         collector.update(1.0).unwrap();
         assert!(collector.is_literal());
 
-        let mut source: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        let mut source: Histogram<16> = Histogram::new().with_literal_mode(false);
         source.update(4.0).unwrap();
         source.update(8.0).unwrap();
 
@@ -4067,10 +4088,10 @@ mod tests {
     #[test]
     fn test_literal_merge_preserves_source() {
         // Source stays literal after merge (it's &self).
-        let mut collector: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        let mut collector: Histogram<16> = Histogram::new().with_literal_mode(false);
         collector.update(1.0).unwrap();
 
-        let mut source: Histogram<16, P32> = Histogram::new();
+        let mut source: Histogram<16> = Histogram::new();
         source.update(4.0).unwrap();
         assert!(source.is_literal());
 
@@ -4085,10 +4106,10 @@ mod tests {
     #[test]
     fn test_literal_merge_cross_size() {
         // Merge a literal Histogram<8> into a larger Histogram<16>.
-        let mut collector: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        let mut collector: Histogram<16> = Histogram::new().with_literal_mode(false);
         collector.update(1.0).unwrap();
 
-        let mut source: Histogram<8, P32> = Histogram::new();
+        let mut source: Histogram<8> = Histogram::new();
         source.update(4.0).unwrap();
         source.update(8.0).unwrap();
         assert!(source.is_literal());
@@ -4105,51 +4126,60 @@ mod tests {
         // The source must remain in literal mode after merge.
 
         // Same-size merge: literal source into bucket dest.
-        let mut dest: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        let mut dest: Histogram<16> = Histogram::new().with_literal_mode(false);
         for v in [1.0, 2.0, 3.0] {
             dest.update(v).unwrap();
         }
         assert!(!dest.is_literal());
 
-        let mut source: Histogram<16, P32> = Histogram::new();
+        let mut source: Histogram<16> = Histogram::new();
         for v in [10.0, 20.0, 30.0] {
             source.update(v).unwrap();
         }
         assert!(source.is_literal());
 
         dest.merge_from(&source).unwrap();
-        assert!(source.is_literal(), "same-size merge must not promote source");
+        assert!(
+            source.is_literal(),
+            "same-size merge must not promote source"
+        );
         assert_eq!(dest.count(), 6);
 
         // Cross-size merge: small literal source into large bucket dest.
-        let mut big: Histogram<16, P32> = Histogram::new().with_literal_mode(false);
+        let mut big: Histogram<16> = Histogram::new().with_literal_mode(false);
         for v in [1.0, 2.0, 3.0] {
             big.update(v).unwrap();
         }
 
-        let mut small: Histogram<8, P32> = Histogram::new();
+        let mut small: Histogram<8> = Histogram::new();
         for v in [100.0, 200.0] {
             small.update(v).unwrap();
         }
         assert!(small.is_literal());
 
         big.merge_from_other(&small).unwrap();
-        assert!(small.is_literal(), "cross-size merge must not promote source");
+        assert!(
+            small.is_literal(),
+            "cross-size merge must not promote source"
+        );
         assert_eq!(big.count(), 5);
 
         // Wide-range literal values: ensure even with values spanning
         // many scales, the source stays literal and dest absorbs them
         // correctly through incremental insertion.
-        let mut dest2: Histogram<16, P64> = Histogram::new().with_literal_mode(false);
+        let mut dest2: Histogram<16> = Histogram::new().with_literal_mode(false);
         dest2.update(1.0).unwrap();
 
-        let mut source2: Histogram<16, P64> = Histogram::new();
+        let mut source2: Histogram<16> = Histogram::new();
         source2.update(1e-200).unwrap();
         source2.update(1e200).unwrap();
         assert!(source2.is_literal());
 
         dest2.merge_from(&source2).unwrap();
-        assert!(source2.is_literal(), "wide-range merge must not promote source");
+        assert!(
+            source2.is_literal(),
+            "wide-range merge must not promote source"
+        );
         assert_eq!(dest2.count(), 3);
 
         // Verify bucket totals match count minus zeros.
@@ -4161,17 +4191,17 @@ mod tests {
     fn test_literal_equivalence_with_bucket_mode() {
         // Verify that a promoted literal histogram and a bucket-mode
         // histogram produce the same bucket totals for the same inputs.
-        let values = [1.5, 2.7, 0.3, 100.0, 42.0, 7.7];
+        let values = [1.5, 2.7, 0.3, 100.0, 42.0, 7.7, 13.0, 55.5];
 
-        let mut lit: Histogram<8, P32> = Histogram::new();
-        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+        let mut lit: Histogram<8> = Histogram::new();
+        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
 
         for &v in &values {
             lit.update(v).unwrap();
             bkt.update(v).unwrap();
         }
 
-        // Both at 6 values. lit is literal, bkt is bucket.
+        // All 8 values fit in literal mode.
         assert!(lit.is_literal());
 
         // Force promotion by inserting one more.
@@ -4191,19 +4221,19 @@ mod tests {
     #[test]
     fn test_literal_subnormal_values() {
         let subnormal = 5.0e-324_f64; // smallest subnormal
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         h.update(subnormal).unwrap();
         h.update(subnormal).unwrap();
         assert!(h.is_literal());
         assert_eq!(h.count(), 2);
-        // P32 uses f32 for min/max, so subnormals below f32 range
-        // underflow to 0 in the stat words. Check bucket view instead.
+        // With f64 stats, subnormals are preserved exactly.
+        // Check bucket view to verify data integrity.
         assert_eq!(h.positive().at(0), 2);
     }
 
     #[test]
     fn test_literal_empty_bucket_view() {
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         assert!(h.is_literal());
         assert!(h.positive().is_empty());
         assert_eq!(h.positive().len(), 0);
@@ -4212,8 +4242,8 @@ mod tests {
     #[test]
     fn test_literal_scale_matches_bucket() {
         let values = [1.0, 1024.0]; // wide range
-        let mut lit: Histogram<8, P32> = Histogram::new();
-        let mut bkt: Histogram<8, P32> = Histogram::new().with_literal_mode(false);
+        let mut lit: Histogram<8> = Histogram::new();
+        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
 
         for &v in &values {
             lit.update(v).unwrap();
@@ -4227,9 +4257,12 @@ mod tests {
 
     #[test]
     fn test_literal_debug_format() {
-        let mut h: Histogram<8, P32> = Histogram::new();
+        let mut h: Histogram<8> = Histogram::new();
         h.update(1.0).unwrap();
         let debug = format!("{:?}", h);
-        assert!(debug.contains("literal"), "Debug should mention literal mode");
+        assert!(
+            debug.contains("literal"),
+            "Debug should mention literal mode"
+        );
     }
 }

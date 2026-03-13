@@ -2,7 +2,6 @@
 
 use libfuzzer_sys::fuzz_target;
 use otel_expohisto::{Histogram, Mapping};
-use otel_expohisto::{P32, Precision};
 use std::collections::BTreeMap;
 
 /// A weighted insert operation: record `value` with multiplicity `incr`.
@@ -42,7 +41,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Echo phase: replay earlier values with exponentially growing
     // multipliers. This forces counter widening (B1→B2→…→U64) and,
-    // for large enough totals, stat widening (S32→S64).
+    // for large enough totals, larger count accumulation.
     let echo_passes = (echo_ctl % 4) as usize;
     let base_len = ops.len();
     for pass in 0..echo_passes {
@@ -82,13 +81,13 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 
         // Sit right at each width's maximum value.
         1 => match sel {
-            0..=63   => 1,                // B1 max
-            64..=95  => 3,                // B2 max
-            96..=127 => 15,               // B4 max
-            128..=159 => 255,             // U8 max
-            160..=191 => 65535,           // U16 max
-            192..=223 => (1 << 24) - 1,   // large U32
-            224..=255 => 1 << 28,         // toward U32 overflow
+            0..=63 => 1,                 // B1 max
+            64..=95 => 3,                // B2 max
+            96..=127 => 15,              // B4 max
+            128..=159 => 255,            // U8 max
+            160..=191 => 65535,          // U16 max
+            192..=223 => (1 << 24) - 1, // large U32
+            224..=255 => 1 << 28,        // toward U32 overflow
         },
 
         // Ramp: selector scaled by mode, covering a smooth range.
@@ -96,16 +95,22 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 
         // Just past each threshold — immediate widening trigger.
         3 => match sel % 6 {
-            0 => 2,      // exceeds B1
-            1 => 4,      // exceeds B2
-            2 => 16,     // exceeds B4
-            3 => 256,    // exceeds U8
-            4 => 65536,  // exceeds U16
+            0 => 2,     // exceeds B1
+            1 => 4,     // exceeds B2
+            2 => 16,    // exceeds B4
+            3 => 256,   // exceeds U8
+            4 => 65536, // exceeds U16
             _ => 1,
         },
 
         // Mostly unit inserts with rare large spikes.
-        _ => if sel < 200 { 1 } else { 1u64 << (sel - 200) },
+        _ => {
+            if sel < 200 {
+                1
+            } else {
+                1u64 << (sel - 200)
+            }
+        }
     }
 }
 
@@ -114,7 +119,7 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: bool) {
-    let mut h1 = Histogram::<N, P32>::new().with_literal_mode(literal_mode);
+    let mut h1 = Histogram::<N>::new().with_literal_mode(literal_mode);
     let mut ok_left: Vec<Op> = Vec::new();
     for &op in left {
         if h1.update_by_incr(op.value, op.incr).is_ok() {
@@ -122,7 +127,7 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: boo
         }
     }
 
-    let mut h2 = Histogram::<N, P32>::new().with_literal_mode(literal_mode);
+    let mut h2 = Histogram::<N>::new().with_literal_mode(literal_mode);
     let mut ok_right: Vec<Op> = Vec::new();
     for &op in right {
         if h2.update_by_incr(op.value, op.incr).is_ok() {
@@ -138,8 +143,12 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: boo
     verify_histogram(&mut h1, &ok_left);
 }
 
-fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[Op], literal_mode: bool) {
-    let mut h1 = Histogram::<N, P32>::new().with_literal_mode(literal_mode);
+fn check_merge_different<const N: usize, const M: usize>(
+    left: &[Op],
+    right: &[Op],
+    literal_mode: bool,
+) {
+    let mut h1 = Histogram::<N>::new().with_literal_mode(literal_mode);
     let mut ok_left: Vec<Op> = Vec::new();
     for &op in left {
         if h1.update_by_incr(op.value, op.incr).is_ok() {
@@ -147,7 +156,7 @@ fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[O
         }
     }
 
-    let mut h2 = Histogram::<M, P32>::new().with_literal_mode(literal_mode);
+    let mut h2 = Histogram::<M>::new().with_literal_mode(literal_mode);
     let mut ok_right: Vec<Op> = Vec::new();
     for &op in right {
         if h2.update_by_incr(op.value, op.incr).is_ok() {
@@ -167,7 +176,7 @@ fn check_merge_different<const N: usize, const M: usize>(left: &[Op], right: &[O
 // Oracle
 // ---------------------------------------------------------------------------
 
-fn verify_histogram<const N: usize, P: Precision>(hist: &mut Histogram<N, P>, inserted: &[Op]) {
+fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, inserted: &[Op]) {
     // ── 1. count ──────────────────────────────────────────────────────
     let total_count: u64 = inserted.iter().map(|op| op.incr).sum();
     if total_count == 0 {
@@ -184,22 +193,14 @@ fn verify_histogram<const N: usize, P: Precision>(hist: &mut Histogram<N, P>, in
     );
 
     // ── 2. min / max ──────────────────────────────────────────────────
-    // Histograms start at S32 (f32 precision for min/max). Even after
-    // widening to S64, values stored during the S32 phase retain only
-    // f32 precision. Compare at f32 granularity unconditionally.
     let expected_min = inserted.iter().map(|op| op.value).fold(f64::INFINITY, f64::min);
-    let expected_max = inserted.iter().map(|op| op.value).fold(f64::NEG_INFINITY, f64::max);
+    let expected_max = inserted
+        .iter()
+        .map(|op| op.value)
+        .fold(f64::NEG_INFINITY, f64::max);
 
-    assert_eq!(
-        hist.min() as f32,
-        expected_min as f32,
-        "min mismatch",
-    );
-    assert_eq!(
-        hist.max() as f32,
-        expected_max as f32,
-        "max mismatch",
-    );
+    assert_eq!(hist.min(), expected_min, "min mismatch");
+    assert_eq!(hist.max(), expected_max, "max mismatch");
 
     // ── 3. zero count ─────────────────────────────────────────────────
     let non_zero_total: u64 = inserted
