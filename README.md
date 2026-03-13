@@ -1,5 +1,10 @@
 # Rust OpenTelemetry Exponential Histogram using Table Lookup
 
+[![CI](https://github.com/open-telemetry/rust-expohisto/actions/workflows/ci.yml/badge.svg)](https://github.com/open-telemetry/rust-expohisto/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/rust-expohisto.svg)](https://crates.io/crates/rust-expohisto)
+[![docs.rs](https://docs.rs/rust-expohisto/badge.svg)](https://docs.rs/rust-expohisto)
+[![License](https://img.shields.io/crates/l/rust-expohisto.svg)](https://github.com/open-telemetry/rust-expohisto/blob/main/LICENSE)
+
 An allocation-free, table-lookup based implementation of the
 [OpenTelemetry Exponential Histogram](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
 in Rust.
@@ -34,14 +39,14 @@ println!("scale: {}", hist.scale());
 
 ## Performance
 
-Benchmark results (100 test values, per-iteration timing):
+Benchmark results — `map_to_index` over 100 random f64 values (criterion, median):
 
-| Method | Scale | Time | Notes |
-|--------|-------|------|-------|
-| Exponent | ≤0 | ~1.1 ns | Bit extraction only |
-| NewRelic lookup | 1-8 | ~1.7 ns | Integer-only, 2N linear buckets, 1 correction |
-| Dynatrace lookup | 1-8 | ~1.7 ns | Integer-only, N linear buckets, 2 corrections |
-| Logarithm | 1-20 | ~6 ns | Used when no lookup table is compiled |
+| Method | Scale range | Per-value | Notes |
+|--------|------------|-----------|-------|
+| Exponent | ≤ 0 | ~3.4 ns | Bit extraction only |
+| Dynatrace lookup | 1–14 | ~5.9 ns | Integer-only, N linear buckets, 2 corrections |
+| NewRelic lookup | 1–14 | ~7.3 ns | Integer-only, 2N linear buckets, 1 correction |
+| Logarithm | 1–20 | ~10.5 ns | `ln()`-based, works at any scale |
 
 The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected at construction time (`Mapping::new` returns `ScaleNotSupported`).
 
@@ -95,6 +100,28 @@ where `S` is the scale. There are `N = 2^S` buckets per power of two, so the k-t
 
 Higher scales provide finer resolution at the cost of more buckets.
 
+Bucket boundaries between 1 and 4, at different scales:
+
+```text
+Scale 0 (1 bucket per octave):
+  1               2               4
+  ├───────────────┤───────────────┤
+  │   bucket -1   │   bucket 0    │   bucket 1
+
+Scale 1 (2 buckets per octave, base = √2 ≈ 1.414):
+  1       √2      2      2√2      4
+  ├───────┤───────┤───────┤───────┤
+  │  b -1 │  b 0  │  b 1  │  b 2  │   b 3
+
+Scale 4 (16 buckets per octave, base = 2^(1/16) ≈ 1.044):
+  1    1.04 1.09 1.14 1.19 ... 1.91  2    2.09 ...  4
+  ├────┤────┤────┤────┤────···──┤────┤────┤────···──┤
+  │b-1 │ b0 │ b1 │ b2 │ b3     │b15 │b16 │b17      │ b31
+  ◄──────── 16 buckets ────────►◄──── 16 buckets ──►
+```
+
+Each scale doubles the number of buckets per octave and halves the relative error.
+
 ## Bucket Inclusivity
 
 Per the OpenTelemetry specification, bucket boundaries are **upper-inclusive**:
@@ -117,7 +144,7 @@ In this implementation both algorithms are re-engineered into a single skeleton 
 
 For the **logarithm fallback** and **exponent mapping** (scale ≤ 0), an explicit correction is still needed since these don't use the boundary table:
 
-```rust
+```rust,ignore
 // Exact powers of two: use exponent directly, subtract 1
 if significand == 0 { return (exponent << scale) - 1; }
 ```
@@ -143,7 +170,7 @@ For scales beyond the table's maximum, `Mapping::new` returns `ScaleNotSupported
 
 When the `logarithm` feature is enabled instead of a lookup table, the standard formula is used:
 
-```
+```text
 index = ceil(ln(value) × 2^scale / ln(2)) - 1
 ```
 
@@ -169,7 +196,7 @@ Both algorithms use the same two tables, generated once at the highest compiled 
 
 **`BOUNDARIES[N+3]`** — Exact sub-bucket boundary significands, shared by both algorithms:
 
-```
+```text
 [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]
 ```
 
@@ -179,7 +206,7 @@ Both algorithms use the same two tables, generated once at the highest compiled 
 
 **`INDEX_TABLE[L]`** — Linear-to-log bucket mapping, derived from `BOUNDARIES` by the same function for both algorithms (with `L = 2N` for NewRelic, `L = N` for Dynatrace):
 
-```
+```text
 SHIFT = 52 - log2(L)
 
 for i in 0..L:
@@ -192,7 +219,7 @@ Each entry gives the approximate log bucket for the significand range starting a
 
 The runtime mapping is identical for both variants, parameterized only by `L` (linear bucket count) and `MAX_CORRECTIONS` (1 or 2):
 
-```
+```text
 fn map_to_index(value, scale) -> index:
     significand = bits 0..51 of value         // IEEE 754 significand
     exponent    = biased_exponent - 1023      // IEEE 754 exponent
@@ -242,7 +269,7 @@ Note that `boundary(1) = 2^(1/N) = 2^(2^(-S))` is the exponential base (see [Exp
 
 These are computed exactly at build time using repeated square roots and bignum verification (following [PR #3841](https://github.com/open-telemetry/opentelemetry-collector/pull/3841)):
 
-```
+```text
 fn compute_boundary(k, S) -> u64:
     // Start with 2^k as a high-precision float
     x = 2^k                          // exact
@@ -285,31 +312,120 @@ The `mapping-gen` crate can be tested independently:
 cd mapping-gen && cargo test
 ```
 
+## Literal Mode (Cold-Start Optimization)
+
+New histograms start in **literal mode**: the first few observations are stored as raw
+`f64` bit patterns in the data pool (one u64 per value). When the pool fills, the
+histogram promotes to bucket mode, computing the optimal starting scale from the full
+observed range in a single pass.
+
+```text
+Literal Mode Lifecycle:
+
+  new()                    update(v)                 (N-STAT_WORDS+1)th value
+    │                         │                              │
+    ▼                         ▼                              ▼
+┌────────┐   non-zero    ┌────────────┐    pool full    ┌──────────┐
+│ Empty  │──────────────►│  Storing   │────────────────►│ Promote  │
+│literal │   store bits  │  literals  │  promote_with() │ to bucket│
+│mode=on │               │  in pool   │                 │   mode   │
+└────────┘               └────────────┘                 └──────────┘
+     │                        │                              │
+     │   zero values          │   zero values                │
+     └── update MMSC only ◄───┘                              ▼
+         (no literal slot)                          ┌──────────────────┐
+                                                    │  Bucket mode     │
+          Readers (positive(), scale(), etc.)        │  normal ops:     │
+          compute a virtual bucket view on the fly  │  insert, merge,  │
+          from stored literals — no promotion needed │  downscale, ...  │
+                                                    └──────────────────┘
+```
+
+**Why this matters**: Without literal mode, the first few values often span a wide range,
+triggering repeated downscale+widen operations that are immediately discarded as subsequent
+values refine the range. Literal mode eliminates all that incremental work — the optimal
+scale and bucket width are determined from the full initial set in one shot.
+
+For `Histogram<16, P32>`, literal capacity is 14 values (= 16 − 2 stat words).
+Literal mode can be disabled via `.with_literal_mode(false)` for benchmarks or when the
+caller already knows the value range.
+
 ## Sub-Byte Bucket Widths and Bit-Level Arithmetic
 
 Bucket counters start at 1 bit per counter, maximizing the initial bucket count for a given memory budget. As counters saturate, they widen in place through the chain **B1→B2→B4→U8→U16→U32→U64**, each transition halving the bucket count and doubling counter capacity. The sub-byte widths (B1, B2, B4) are the novel part — once you reach U8, it's just `bytemuck::cast_slice` for free reinterpretation. This section describes the bit-level machinery that makes sub-byte widths work.
 
 ### Memory layout
 
-All bucket data lives in a flat `[u64; N]` array. Each counter occupies a fixed number of bits, densely packed with **no padding**: the k-th counter is at bits `k*W..(k+1)*W` across the array, where `W` is the bit width. For N=4 (32 bytes), the capacity per width is:
+`Histogram<N, P>` stores everything in struct fields plus a flat `[u64; N]` data pool.
+The pool is split between MMSC statistics at the front and bucket data (or literals) after:
 
-| Width | Bits per counter | Buckets |
-|-------|-----------------|---------|
-| B1 | 1 | 256 |
-| B2 | 2 | 128 |
-| B4 | 4 | 64 |
-| U8 | 8 | 32 |
-| U16 | 16 | 16 |
-| U32 | 32 | 8 |
-| U64 | 64 | 4 |
+```text
+Histogram<16, P32>                    128 bytes total
+┌─────────────────────────────────────────────────────────────────┐
+│ data[0]          │ data[1]          │ data[2] ... data[15]      │
+│ ┌──────┬───────┐ │ ┌──────┬──────┐ │                            │
+│ │sum   │count  │ │ │min   │max   │ │   14 words: bucket data    │
+│ │(f32) │(u32)  │ │ │(f32) │(f32) │ │   or literal f64 values   │
+│ └──────┴───────┘ │ └──────┴──────┘ │                            │
+│    MMSC word 0   │   MMSC word 1   │                            │
+└─────────────────────────────────────────────────────────────────┘
+ ◄── P32: 2 words ─►◄──────── bucket pool: N-2 = 14 words ──────►
 
-All widths use the same physical `[u64; N]` backing array. This means a `Histogram<16>` always occupies the same number of bytes regardless of the current counter width — it just interprets the same bits differently.
+Histogram<16, P64>                    128 bytes total
+┌─────────────────────────────────────────────────────────────────┐
+│ data[0] │ data[1] │ data[2] │ data[3] │ data[4] ... data[15]   │
+│ sum     │ count   │ min     │ max     │                         │
+│ (f64)   │ (u64)   │ (f64)   │ (f64)   │  12 words: buckets     │
+└─────────────────────────────────────────────────────────────────┘
+ ◄────── P64: 4 words ────────►◄──── bucket pool: N-4 = 12 ────►
+```
+
+In **literal mode** (cold start), the bucket pool stores raw `f64` bit patterns
+— one per non-zero observation — until the pool fills and promotes to bucket mode.
+
+In **bucket mode**, the bucket pool is reinterpreted at the current counter width.
+All widths use the same physical `[u64; N]` backing array — the histogram just
+interprets the same bits differently:
+
+```text
+14 bucket words at each width (Histogram<16, P32>):
+
+B1  ┌──────────────────────────────────────────────┐  896 slots
+    │ 64 bits per word × 14 words = 896 1-bit slots│  max count: 1
+    └──────────────────────────────────────────────┘
+
+B2  ┌──────────────────────────────────────────────┐  448 slots
+    │ 32 × 2-bit slots per word × 14 words         │  max count: 3
+    └──────────────────────────────────────────────┘
+
+B4  ┌──────────────────────────────────────────────┐  224 slots
+    │ 16 nibbles per word × 14 words                │  max count: 15
+    └──────────────────────────────────────────────┘
+
+U8  ┌──────────────────────────────────────────────┐  112 slots
+    │ 8 bytes per word × 14 words                   │  max count: 255
+    └──────────────────────────────────────────────┘
+
+U16 ┌──────────────────────────────────────────────┐   56 slots
+    │ 4 u16s per word × 14 words                    │  max count: 65,535
+    └──────────────────────────────────────────────┘
+
+U32 ┌──────────────────────────────────────────────┐   28 slots
+    │ 2 u32s per word × 14 words                    │  max count: ~4.3 billion
+    └──────────────────────────────────────────────┘
+
+U64 ┌──────────────────────────────────────────────┐   14 slots
+    │ 1 u64 per word × 14 words                     │  max count: ~1.8 × 10¹⁹
+    └──────────────────────────────────────────────┘
+```
+
+Each counter occupies a fixed number of bits, densely packed with **no padding**: the k-th counter is at bits `k*W..(k+1)*W` across the array, where `W` is the bit width.
 
 ### Sub-byte get/set
 
 Slot access extracts or replaces a bitfield within a u64 word:
 
-```
+```text
 fn get(slot) -> u64:
     match width:
         B1:  data[slot / 64] >> (slot % 64)         & 1
@@ -334,7 +450,7 @@ When a B1 counter saturates (value goes from 1 to 2), the histogram needs to wid
 
 Instead, the widening uses **SWAR** (SIMD Within A Register): each stage is one step of the textbook popcount algorithm. The key insight is that pairwise-summing N-bit fields into 2N-bit fields is exactly what popcount does at each stage, and the bitmask constants are the same.
 
-```
+```text
 B1 → B2:   w = ((x >> 1) & 0x5555...) + (x & 0x5555...)
 B2 → B4:   w = ((x >> 2) & 0x3333...) + (x & 0x3333...)
 B4 → U8:   w = ((x >> 4) & 0x0F0F...) + (x & 0x0F0F...)
@@ -349,7 +465,7 @@ Each formula processes all counters in one u64 word simultaneously:
 - **B4→U8**: The mask `0x0F0F...0F0F` selects alternating nibbles. Shifting right by 4 aligns them. Adding gives an 8-bit (byte) sum. Beyond this point, the value fits in a byte and the transition to U8 needs no further reinterpretation — `bytemuck::cast_slice` views the same `[u64]` as `[u8]`.
 
 The inner loop is:
-```
+```text
 for w in data.iter_mut() {
     let x = *w;
     *w = ((x >> FIELD_WIDTH) & MASK) + (x & MASK);
@@ -389,7 +505,7 @@ When `index_base` is odd, the physical slot layout is misaligned for SWAR pairin
 
 The shift operates on the raw `[u64]` array in a single high-to-low pass:
 
-```
+```text
 swar_shift_up_one(data, width):
     bits = width.bits()
     for i in (N-1 down to 1):
@@ -409,6 +525,19 @@ Once counters have reached U64, further downscale steps use a different path (`b
 
 When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to record another observation), the histogram must widen all counters. This is done via `bucket_widen(steps)`:
 
+```text
+Widening cascade for Histogram<16, P32> (14 bucket words):
+
+B1 ──saturate──► B2 ──saturate──► B4 ──saturate──► U8 ──► U16 ──► U32 ──► U64
+│                │                │                │       │       │       │
+896 slots        448 slots        224 slots        112     56      28      14
+max=1            max=3            max=15           max=255 max=64K max=4G  max=2⁶⁴
+
+Each transition: counters merge pairwise, scale decreases by 1.
+Sub-byte transitions (B1→B2→B4→U8) use SWAR — one pass per u64 word.
+Byte+ transitions (U8→U16→U32→U64) use bytemuck cast_slice reinterpretation.
+```
+
 1. **If base is even**: Use multi-step SWAR widening (`swar_widen`), which chains SWAR steps from the current width to the target width. Each step sums adjacent pairs, doubling the counter width and halving the bucket count.
 
 2. **If base is odd**: Fall back to scalar gather-scatter for each step, since the SWAR pairing would be incorrect.
@@ -416,6 +545,50 @@ When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to
 3. **Update metadata**: Shift `index_start`, `index_end`, and `index_base` right by `steps`, set the new `bucket_width`.
 
 The transition preserves the total count across all buckets: the sum of all counters before and after widening is identical. Resolution is lost (adjacent buckets are merged), but no data is destroyed.
+
+## Choosing Your Parameters
+
+`Histogram<N, P>` has two compile-time parameters:
+
+### Pool size `N` (u64 words)
+
+`N` controls total memory: each histogram uses exactly `N × 8` bytes of data pool.
+After `P`'s stat words are subtracted, the remaining words hold bucket counters.
+Larger `N` means more buckets, which means finer resolution before downscaling.
+
+| N | Total bytes | Bucket words (P32) | B1 slots | U64 slots |
+|---:|---:|---:|---:|---:|
+| 8 | 64 | 6 | 384 | 6 |
+| 16 | 128 | 14 | 896 | 14 |
+| 32 | 256 | 30 | 1920 | 30 |
+
+**Rule of thumb**: For typical latency distributions (0.1ms–10s), `N=16` with
+P32 provides 896 B1 buckets — enough for scale 4 (16 buckets/octave, ~2.2%
+relative error) across the full range.
+
+### Precision `P` (P32 or P64)
+
+The precision tier controls how MMSC (min, max, sum, count) statistics are stored:
+
+| Precision | Stat words | Sum type | Count type | Min/Max type |
+|-----------|---:|----------|-----------|-------------|
+| `P32` | 2 | `f32` | `u32` | `f32` |
+| `P64` | 4 | `f64` | `u64` | `f64` |
+
+Use `P32` (default recommendation) unless you need:
+- Per-bucket counts above 4 billion → `P64`
+- Sum precision beyond f32 (~7 digits) → `P64`
+- Min/max precision beyond f32 → `P64`
+
+### Other configuration
+
+| Method | Effect |
+|--------|--------|
+| `with_max_scale(s)` | Cap the starting scale (default: table max) |
+| `with_min_bucket_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
+| `with_literal_mode(false)` | Disable literal mode when the value range is already known |
+
+Run `cargo run --example sizing` for an interactive capacity explorer.
 
 ## References
 
