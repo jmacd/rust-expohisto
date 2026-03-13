@@ -1,4 +1,4 @@
-# Contributing to rust-expohisto
+# Contributing to otel-expohisto
 
 Thanks for your interest! This document covers setup, testing, and project conventions.
 

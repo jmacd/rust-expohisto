@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run --example sizing`
 
-use rust_expohisto::{Histogram, P32, BucketWidth};
+use otel_expohisto::{Histogram, P32, BucketWidth};
 
 fn show_capacity<const N: usize>(label: &str, stat_words: usize) {
     let bucket_words = N - stat_words;

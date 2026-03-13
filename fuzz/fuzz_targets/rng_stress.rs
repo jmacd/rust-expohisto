@@ -20,7 +20,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use rust_expohisto::{Histogram, Mapping, P32, P64};
+use otel_expohisto::{Histogram, Mapping, P32, P64};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ fn decode_count(sel: u8) -> usize {
 // Two-pass test runner
 // ---------------------------------------------------------------------------
 
-fn run<const N: usize, const M: usize, P: rust_expohisto::Precision>(cfg: &Config, is_p32: bool) {
+fn run<const N: usize, const M: usize, P: otel_expohisto::Precision>(cfg: &Config, is_p32: bool) {
     let count = decode_count(cfg.count_sel);
 
     // ===== PASS 1: INSERT =====

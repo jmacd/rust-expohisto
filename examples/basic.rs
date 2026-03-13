@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run --example basic`
 
-use rust_expohisto::{Histogram, P32};
+use otel_expohisto::{Histogram, P32};
 
 fn main() {
     // Create a histogram with 16 u64 words (128 bytes) of data pool.

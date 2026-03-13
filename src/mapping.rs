@@ -8,7 +8,7 @@
 //! scale > 0, it delegates to the compile-time selected algorithm:
 //!
 //! - `logarithm` feature: pure logarithm-based mapping
-//! - `newrelic-*` features: lookup table-based mapping (exact, no FP errors)
+//! - `newrelic` / `dynatrace` features: lookup table-based mapping (exact, no FP errors)
 
 use crate::float64::{
     MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE,
@@ -54,7 +54,7 @@ impl std::error::Error for MappingError {}
 /// Returns the maximum scale supported by the selected mapping algorithm.
 ///
 /// - `logarithm`: supports all scales up to MAX_SCALE (20)
-/// - `newrelic-*` / `dynatrace-*`: supports scales up to the shared table scale
+/// - `newrelic` / `dynatrace`: supports scales up to the compiled table scale
 #[inline]
 pub const fn max_scale() -> i32 {
     #[cfg(any(

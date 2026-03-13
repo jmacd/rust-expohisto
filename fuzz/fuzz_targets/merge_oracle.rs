@@ -1,8 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rust_expohisto::{Histogram, Mapping};
-use rust_expohisto::{P32, Precision};
+use otel_expohisto::{Histogram, Mapping};
+use otel_expohisto::{P32, Precision};
 use std::collections::BTreeMap;
 
 /// A weighted insert operation: record `value` with multiplicity `incr`.

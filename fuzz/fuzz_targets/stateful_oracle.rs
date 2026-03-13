@@ -14,7 +14,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use rust_expohisto::{Histogram, Mapping, P32, P64};
+use otel_expohisto::{Histogram, Mapping, P32, P64};
 use std::collections::BTreeMap;
 
 /// Number of P32 histograms in the pool.
@@ -136,7 +136,7 @@ fn verify_p64<const N: usize>(hist: &mut Histogram<N, P64>, shadow: &Shadow, lab
     verify_generic::<N, P64>(hist, shadow, label, false);
 }
 
-fn verify_generic<const N: usize, P: rust_expohisto::Precision>(
+fn verify_generic<const N: usize, P: otel_expohisto::Precision>(
     hist: &mut Histogram<N, P>,
     shadow: &Shadow,
     label: &str,

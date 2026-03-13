@@ -28,6 +28,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `BucketView` — borrow-based read access to bucket data with iteration
 - OTel SDK specification compatibility (count, sum, min, max, positive buckets)
 - +Inf and subnormal value handling
-- 152 unit tests and 3 fuzz targets
+- 160 unit tests and 3 fuzz targets
 - Comprehensive README with algorithm documentation, SWAR explanation,
   memory layout diagrams, and OTel spec compatibility matrix

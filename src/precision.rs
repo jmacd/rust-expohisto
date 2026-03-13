@@ -9,17 +9,19 @@
 //!
 //! Two built-in precision tiers are provided:
 //!
-//! | Tier   | Float | Count | Overhead* |
-//! |--------|-------|-------|----------|
-//! | [`P32`] | `f32` | `u32` | 28 bytes |
-//! | [`P64`] | `f64` | `u64` | 56 bytes |
+//! | Tier   | Float | Count | Pool Overhead* |
+//! |--------|-------|-------|----------------|
+//! | [`P32`] | `f32` | `u32` | 16 bytes (2 words) |
+//! | [`P64`] | `f64` | `u64` | 32 bytes (4 words) |
 //!
-//! \* Overhead = 3×Float + 1×Count + 2×i32 (sum/min/max + count + scale fields).
+//! \* Pool overhead = 3×Float + 1×Count (sum/min/max + count), stored at the
+//! front of the data pool.
 
 use core::fmt::Debug;
 use core::ops::{Add, AddAssign};
 
 /// Floating-point type used for histogram sum, min, and max.
+#[doc(hidden)]
 pub trait HistFloat:
     Copy + Clone + Debug + PartialEq + PartialOrd + Add<Output = Self> + AddAssign
 {
@@ -34,7 +36,8 @@ pub trait HistFloat:
 
     /// Returns the minimum of two values.
     ///
-    /// Matches IEEE 754 `minimum` semantics: propagates NaN, treats −0 < +0.
+    /// Uses `f32::min` / `f64::min` semantics: returns the other value if
+    /// either argument is NaN.
     fn min_of(self, other: Self) -> Self;
 
     /// Returns the maximum of two values.
@@ -42,6 +45,7 @@ pub trait HistFloat:
 }
 
 /// Unsigned integer type used for histogram count.
+#[doc(hidden)]
 pub trait HistCount: Copy + Clone + Debug + PartialEq + Eq + PartialOrd + Ord {
     /// Returns zero.
     fn zero() -> Self;
@@ -179,5 +183,4 @@ impl HistCount for u32 {
         self as u64
     }
 }
-
 

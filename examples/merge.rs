@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run --example merge`
 
-use rust_expohisto::{Histogram, P32};
+use otel_expohisto::{Histogram, P32};
 
 fn print_histogram<const N: usize>(label: &str, h: &mut Histogram<N, P32>) {
     println!("{label}:");

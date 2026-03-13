@@ -16,7 +16,7 @@
 //!    including the benefit of starting wider (skip sub-byte entirely).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rust_expohisto::{BucketWidth, Histogram, Mapping, P32};
+use otel_expohisto::{BucketWidth, Histogram, Mapping, P32};
 
 /// Generate `count` distinct values that each land in a unique bucket at
 /// the given scale. Uses lower_boundary midpoints to guarantee distinct indices.

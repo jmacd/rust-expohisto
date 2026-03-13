@@ -26,7 +26,7 @@
 //!    literal-start vs bucket-start.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rust_expohisto::{Histogram, Mapping, P32, P64};
+use otel_expohisto::{Histogram, Mapping, P32, P64};
 
 /// Generate `count` distinct values that each land in a unique bucket
 /// at the given scale. Uses lower_boundary midpoints.

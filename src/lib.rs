@@ -9,8 +9,11 @@ pub mod histogram;
 pub mod mapping;
 pub mod precision;
 
-// Algorithm modules - conditionally compiled
+// Algorithm modules - conditionally compiled.
+// These are public for benchmark access but hidden from docs since users
+// should go through `Mapping` rather than calling algorithms directly.
 #[cfg(feature = "logarithm")]
+#[doc(hidden)]
 pub mod logarithm;
 
 #[cfg(any(
@@ -21,14 +24,17 @@ pub mod logarithm;
     feature = "scale-12",
     feature = "scale-14"
 ))]
+#[doc(hidden)]
 pub mod lookup;
 
 #[cfg(feature = "newrelic")]
+#[doc(hidden)]
 pub mod newrelic;
 
 #[cfg(feature = "dynatrace")]
+#[doc(hidden)]
 pub mod dynatrace;
 
-pub use histogram::{BucketView, BucketWidth, BucketsIter, Histogram, Overflow};
+pub use histogram::{BucketDescriptor, BucketView, BucketWidth, BucketsIter, Histogram, Overflow, Stats};
 pub use mapping::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
-pub use precision::{HistCount, HistFloat, P32, P64, Precision};
+pub use precision::{P32, P64, Precision};

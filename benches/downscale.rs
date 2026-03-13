@@ -17,7 +17,7 @@
 //!    pre-built histogram for various step counts.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rust_expohisto::{Histogram, Mapping, P32};
+use otel_expohisto::{Histogram, Mapping, P32};
 
 /// Generate `count` distinct values that each land in a unique bucket
 /// at the given scale.

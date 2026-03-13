@@ -1,14 +1,15 @@
 [package]
-name = "rust-expohisto"
+name = "otel-expohisto"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.73"
 description = "Allocation-free OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/open-telemetry/rust-expohisto"
+repository = "https://github.com/open-telemetry/otel-expohisto"
 keywords = ["opentelemetry", "histogram", "exponential", "metrics", "observability"]
-categories = ["data-structures", "no-std"]
+categories = ["data-structures"]
+exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md"]
 
 [features]
 default = ["newrelic", "scale-8"]
@@ -34,12 +35,12 @@ logarithm = []
 # NewRelic lookup table-based mapping.
 # Pros: Exact (no FP errors), fast integer-only computation.
 # Cons: Larger binary size, table scale limits useful range.
-newrelic = []
+newrelic = ["scale-4"]
 
 # Dynatrace lookup table-based mapping.
 # Pros: Exact (no FP errors), ~50% smaller index table than NewRelic.
 # Cons: Two branch corrections vs one; table scale limits useful range.
-dynatrace = []
+dynatrace = ["scale-4"]
 
 # For benchmarking all algorithms together
 bench-all = ["logarithm", "newrelic", "dynatrace", "scale-8"]

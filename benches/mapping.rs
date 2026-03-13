@@ -4,7 +4,7 @@
 //! Benchmarks for exponential histogram mapping functions.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rust_expohisto::{Mapping, max_scale};
+use otel_expohisto::{Mapping, max_scale};
 
 /// 100 test values with significands roughly uniformly distributed across [1.0, 2.0).
 /// 10 base significands × 10 magnitude groups = 100 values.
@@ -80,7 +80,7 @@ fn bench_map_to_index(c: &mut Criterion) {
         // Dynatrace direct (when newrelic is primary via Mapping)
         #[cfg(feature = "dynatrace")]
         {
-            let dt_max = rust_expohisto::dynatrace::table_scale();
+            let dt_max = otel_expohisto::dynatrace::table_scale();
             let dt_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14]
                 .into_iter()
                 .filter(|&s| s <= dt_max)
@@ -90,7 +90,7 @@ fn bench_map_to_index(c: &mut Criterion) {
                 group.bench_function(BenchmarkId::new("dynatrace", scale), |b| {
                     b.iter(|| {
                         for &v in TEST_VALUES {
-                            black_box(rust_expohisto::dynatrace::map_to_index(
+                            black_box(otel_expohisto::dynatrace::map_to_index(
                                 black_box(v),
                                 scale,
                             ));
@@ -109,7 +109,7 @@ fn bench_map_to_index(c: &mut Criterion) {
                 group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
                     b.iter(|| {
                         for &v in TEST_VALUES {
-                            black_box(rust_expohisto::logarithm::map_to_index(
+                            black_box(otel_expohisto::logarithm::map_to_index(
                                 black_box(v),
                                 scale,
                             ));

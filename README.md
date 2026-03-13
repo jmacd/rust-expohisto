@@ -1,9 +1,9 @@
-# Rust OpenTelemetry Exponential Histogram using Table Lookup
+# Rust OpenTelemetry Exponential Histogram
 
-[![CI](https://github.com/open-telemetry/rust-expohisto/actions/workflows/ci.yml/badge.svg)](https://github.com/open-telemetry/rust-expohisto/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/rust-expohisto.svg)](https://crates.io/crates/rust-expohisto)
-[![docs.rs](https://docs.rs/rust-expohisto/badge.svg)](https://docs.rs/rust-expohisto)
-[![License](https://img.shields.io/crates/l/rust-expohisto.svg)](https://github.com/open-telemetry/rust-expohisto/blob/main/LICENSE)
+[![CI](https://github.com/open-telemetry/otel-expohisto/actions/workflows/ci.yml/badge.svg)](https://github.com/open-telemetry/otel-expohisto/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/otel-expohisto.svg)](https://crates.io/crates/otel-expohisto)
+[![docs.rs](https://docs.rs/otel-expohisto/badge.svg)](https://docs.rs/otel-expohisto)
+[![License](https://img.shields.io/crates/l/otel-expohisto.svg)](https://github.com/open-telemetry/otel-expohisto/blob/main/LICENSE)
 
 An allocation-free, table-lookup based implementation of the
 [OpenTelemetry Exponential Histogram](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
@@ -20,7 +20,7 @@ Exponential histograms provide a compact, high-resolution representation of valu
 ## Quick Start
 
 ```rust
-use rust_expohisto::{Histogram, P32};
+use otel_expohisto::{Histogram, P32};
 
 // Create a histogram with 16 u64 words (128 bytes) of data pool.
 // P32 uses 2 words for MMSC stats (f32/u32), leaving 14 words for
@@ -56,7 +56,7 @@ Choose a **scale** feature to set the table size, and an **algorithm** feature t
 
 ```toml
 [dependencies]
-rust-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # default
+otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # default
 ```
 
 ### Scale (table size)
@@ -303,7 +303,7 @@ A table generated at scale `H` supports all scales `1..H` via arithmetic right s
 
 ## Crate Structure
 
-- **`rust-expohisto`**: Main library with histogram and mapping implementations
+- **`otel-expohisto`**: Main library with histogram and mapping implementations
 - **`mapping-gen`**: Sub-crate for generating lookup tables (used at build time)
 
 The `mapping-gen` crate can be tested independently:

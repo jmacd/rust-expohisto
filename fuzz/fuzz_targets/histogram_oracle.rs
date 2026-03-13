@@ -1,8 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rust_expohisto::{Histogram, Mapping, max_scale};
-use rust_expohisto::{P32, P64, Precision};
+use otel_expohisto::{Histogram, Mapping, max_scale};
+use otel_expohisto::{P32, P64, Precision};
 use std::collections::BTreeMap;
 
 fuzz_target!(|data: &[u8]| {
@@ -164,7 +164,7 @@ fn check_histogram<const N: usize, P: Precision>(values: &[f64], literal_mode: b
 
     // Find the highest scale where span fits at B1 capacity.
     let mut optimal = max_scale();
-    for s in (rust_expohisto::MIN_SCALE..=max_scale()).rev() {
+    for s in (otel_expohisto::MIN_SCALE..=max_scale()).rev() {
         if let Ok(m) = Mapping::new(s) {
             let indices: Vec<i32> = non_zero.iter().map(|&v| m.map_to_index(v)).collect();
             let lo = *indices.iter().min().unwrap();

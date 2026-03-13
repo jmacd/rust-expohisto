@@ -302,7 +302,7 @@ Table size is approximately:
 
 ## Usage
 
-This crate is used at build time by `rust-expohisto` to generate lookup tables:
+This crate is used at build time by `otel-expohisto` to generate lookup tables:
 
 ```rust
 use expohisto_mapping_gen::LookupTables;
