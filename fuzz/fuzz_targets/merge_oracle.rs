@@ -120,29 +120,25 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 // Merge checks
 // ---------------------------------------------------------------------------
 
+fn build<const N: usize>(ops: &[Op], literal_mode: bool) -> (Histogram<N>, Vec<Op>) {
+    let mut h = Histogram::<N>::new().with_literal_mode(literal_mode);
+    let mut ok = Vec::new();
+    for &op in ops {
+        if h.update_by_incr(op.value, op.incr).is_ok() {
+            ok.push(op);
+        }
+    }
+    (h, ok)
+}
+
 fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: bool) {
-    let mut h1 = Histogram::<N>::new().with_literal_mode(literal_mode);
-    let mut ok_left: Vec<Op> = Vec::new();
-    for &op in left {
-        if h1.update_by_incr(op.value, op.incr).is_ok() {
-            ok_left.push(op);
-        }
-    }
-
-    let mut h2 = Histogram::<N>::new().with_literal_mode(literal_mode);
-    let mut ok_right: Vec<Op> = Vec::new();
-    for &op in right {
-        if h2.update_by_incr(op.value, op.incr).is_ok() {
-            ok_right.push(op);
-        }
-    }
-
+    let (mut h1, mut ok) = build::<N>(left, literal_mode);
+    let (h2, ok_right) = build::<N>(right, literal_mode);
     if h1.merge_from(&h2).is_err() {
         return;
     }
-
-    ok_left.extend_from_slice(&ok_right);
-    verify_histogram(&mut h1, &ok_left);
+    ok.extend_from_slice(&ok_right);
+    verify_histogram(&mut h1, &ok);
 }
 
 fn check_merge_different<const N: usize, const M: usize>(
@@ -150,28 +146,13 @@ fn check_merge_different<const N: usize, const M: usize>(
     right: &[Op],
     literal_mode: bool,
 ) {
-    let mut h1 = Histogram::<N>::new().with_literal_mode(literal_mode);
-    let mut ok_left: Vec<Op> = Vec::new();
-    for &op in left {
-        if h1.update_by_incr(op.value, op.incr).is_ok() {
-            ok_left.push(op);
-        }
-    }
-
-    let mut h2 = Histogram::<M>::new().with_literal_mode(literal_mode);
-    let mut ok_right: Vec<Op> = Vec::new();
-    for &op in right {
-        if h2.update_by_incr(op.value, op.incr).is_ok() {
-            ok_right.push(op);
-        }
-    }
-
+    let (mut h1, mut ok) = build::<N>(left, literal_mode);
+    let (h2, ok_right) = build::<M>(right, literal_mode);
     if h1.merge_from_other(&h2).is_err() {
         return;
     }
-
-    ok_left.extend_from_slice(&ok_right);
-    verify_histogram(&mut h1, &ok_left);
+    ok.extend_from_slice(&ok_right);
+    verify_histogram(&mut h1, &ok);
 }
 
 // ---------------------------------------------------------------------------

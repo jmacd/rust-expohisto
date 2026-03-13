@@ -121,6 +121,18 @@ fn verify<const N: usize>(hist: &mut Histogram<N>, shadow: &Shadow, label: &str)
     verify::verify_histogram(hist, &ops, label);
 }
 
+/// Borrows two distinct elements of a slice mutably.
+fn two_mut<T>(arr: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
+    assert_ne!(i, j);
+    if i < j {
+        let (a, b) = arr.split_at_mut(j);
+        (&mut a[i], &mut b[0])
+    } else {
+        let (a, b) = arr.split_at_mut(i);
+        (&mut b[0], &mut a[j])
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fuzz target
 // ---------------------------------------------------------------------------
@@ -180,13 +192,7 @@ fuzz_target!(|data: &[u8]| {
                     big_shadow.merge_from(&src_shadow);
                 }
 
-                let (dst_hist, src_hist) = if d < s {
-                    let (a, b) = pool.split_at_mut(s);
-                    (&mut a[d], &b[0])
-                } else {
-                    let (a, b) = pool.split_at_mut(d);
-                    (&mut b[0], &a[s] as &Histogram<8>)
-                };
+                let (dst_hist, src_hist) = two_mut(&mut pool, d, s);
                 if dst_hist.merge_from(src_hist).is_ok() {
                     let src_shadow = shadows[s].clone();
                     shadows[d].merge_from(&src_shadow);
@@ -205,21 +211,9 @@ fuzz_target!(|data: &[u8]| {
                 if ai == bi {
                     continue;
                 }
-                let (lo, hi) = if ai < bi {
-                    let (a, b) = pool.split_at_mut(bi);
-                    (&mut a[ai], &mut b[0])
-                } else {
-                    let (a, b) = pool.split_at_mut(ai);
-                    (&mut b[0], &mut a[bi])
-                };
+                let (lo, hi) = two_mut(&mut pool, ai, bi);
                 lo.swap(hi);
-                let (slo, shi) = if ai < bi {
-                    let (a, b) = shadows.split_at_mut(bi);
-                    (&mut a[ai], &mut b[0])
-                } else {
-                    let (a, b) = shadows.split_at_mut(ai);
-                    (&mut b[0], &mut a[bi])
-                };
+                let (slo, shi) = two_mut(&mut shadows, ai, bi);
                 slo.swap(shi);
             }
 
