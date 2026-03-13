@@ -81,7 +81,7 @@ mod tests {
 
         // Values between 1 and 2 should be in buckets 0..15
         let idx = map_to_index(1.5, scale);
-        assert!(idx >= 0 && idx < 15, "1.5 should be in [0, 15), got {}", idx);
+        assert!((0..15).contains(&idx), "1.5 should be in [0, 15), got {}", idx);
     }
 
     #[test]

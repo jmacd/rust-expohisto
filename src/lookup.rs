@@ -35,7 +35,8 @@ fn per_scale_boundaries() -> &'static PerScaleBoundaries {
         let mut data = Vec::with_capacity(total);
         let mut offsets = [0u32; 16];
 
-        for s in 1..=h {
+    #[allow(clippy::needless_range_loop)] // `s` used both as index and for bit shifts
+    for s in 1..=h {
             offsets[s] = data.len() as u32;
             let n_s = 1usize << s;
             let stride = 1usize << (h - s);
@@ -64,7 +65,7 @@ fn per_scale_boundaries() -> &'static PerScaleBoundaries {
 /// derived by taking every `2^(H-S)`-th entry from the full-scale table.
 #[inline]
 pub fn boundaries(scale: i32) -> &'static [u64] {
-    debug_assert!(scale >= 1 && scale <= TABLE_SCALE);
+    debug_assert!((1..=TABLE_SCALE).contains(&scale));
     let psb = per_scale_boundaries();
     let s = scale as usize;
     let start = psb.offsets[s] as usize;
@@ -80,6 +81,7 @@ pub fn boundaries(scale: i32) -> &'static [u64] {
 pub fn derive_index_table(boundaries: &[u64], count: usize, shift: u32) -> Vec<u16> {
     let mut table = vec![0u16; count];
     let mut j: u16 = 0;
+    #[allow(clippy::needless_range_loop)] // `i` used for both indexing and bit shift
     for i in 0..count {
         let lower_bound = (i as u64) << shift;
         while lower_bound >= boundaries[j as usize + 1] {

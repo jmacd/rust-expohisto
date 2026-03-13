@@ -33,6 +33,8 @@ impl fmt::Display for Overflow {
     }
 }
 
+impl std::error::Error for Overflow {}
+
 // ---------------------------------------------------------------------------
 // BucketWidth — counter width for bucket data
 // ---------------------------------------------------------------------------
@@ -250,6 +252,8 @@ pub struct Histogram<const N: usize, P: Precision> {
     /// instead of bucket counters. `index_end` is repurposed as the literal
     /// count. Fits in the existing 1-byte alignment gap before `index_base`.
     literal: bool,
+    /// Whether literal mode is enabled (persists across `clear()`).
+    literal_enabled: bool,
     index_base: i32,
     index_start: i32,
     index_end: i32,
@@ -268,6 +272,7 @@ impl<const N: usize, P: Precision> Clone for Histogram<N, P> {
             min_bucket_width: self.min_bucket_width,
             bucket_width: self.bucket_width,
             literal: self.literal,
+            literal_enabled: self.literal_enabled,
             index_base: self.index_base,
             index_start: self.index_start,
             index_end: self.index_end,
@@ -917,6 +922,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// merge levels are applied until the range fits.
     ///
     /// Returns the number of scale steps performed (>= 1).
+    #[allow(clippy::needless_range_loop)]
     fn scalar_merge_step(&mut self, force_widen: bool) -> Option<i32> {
         let cap = self.bucket_capacity() as i32;
         let width = self.bucket_width;
@@ -1004,6 +1010,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     ///
     /// At U64 width, sums use saturating arithmetic and cannot
     /// meaningfully overflow.
+    #[allow(clippy::needless_range_loop)] // `i` used both as index and for arithmetic
     fn bucket_downscale_u64(&mut self, by: i32) {
         debug_assert_eq!(self.bucket_width, BucketWidth::U64);
         debug_assert!(by >= 1);
@@ -1164,8 +1171,8 @@ fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
                 let hi = if i + 1 < n { narrow_b2_to_b1(data[i + 1]) } else { 0 };
                 data[i / 2] = lo | (hi << 32);
             }
-            for i in ((n + 1) / 2)..n {
-                data[i] = 0;
+            for w in &mut data[n.div_ceil(2)..n] {
+                *w = 0;
             }
         }
         BucketWidth::B2 => {
@@ -1175,8 +1182,8 @@ fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
                 let hi = if i + 1 < n { narrow_b4_to_b2(data[i + 1]) } else { 0 };
                 data[i / 2] = lo | (hi << 32);
             }
-            for i in ((n + 1) / 2)..n {
-                data[i] = 0;
+            for w in &mut data[n.div_ceil(2)..n] {
+                *w = 0;
             }
         }
         BucketWidth::B4 => {
@@ -1187,8 +1194,8 @@ fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
                 let hi = if i + 1 < n { narrow_u8_to_b4(data[i + 1]) } else { 0 };
                 data[i / 2] = lo | (hi << 32);
             }
-            for i in ((n + 1) / 2)..n {
-                data[i] = 0;
+            for w in &mut data[n.div_ceil(2)..n] {
+                *w = 0;
             }
         }
         BucketWidth::U8 => {
@@ -1198,8 +1205,8 @@ fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
                 let hi = if i + 1 < n { narrow_u16_to_u8(data[i + 1]) } else { 0 };
                 data[i / 2] = lo | (hi << 32);
             }
-            for i in ((n + 1) / 2)..n {
-                data[i] = 0;
+            for w in &mut data[n.div_ceil(2)..n] {
+                *w = 0;
             }
         }
         BucketWidth::U16 => {
@@ -1209,8 +1216,8 @@ fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
                 let hi = if i + 1 < n { narrow_u32_to_u16(data[i + 1]) } else { 0 };
                 data[i / 2] = lo | (hi << 32);
             }
-            for i in ((n + 1) / 2)..n {
-                data[i] = 0;
+            for w in &mut data[n.div_ceil(2)..n] {
+                *w = 0;
             }
         }
         BucketWidth::U32 => {
@@ -1220,8 +1227,8 @@ fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
                 let hi = if i + 1 < n { data[i + 1] & 0xFFFF_FFFF } else { 0 };
                 data[i / 2] = lo | (hi << 32);
             }
-            for i in ((n + 1) / 2)..n {
-                data[i] = 0;
+            for w in &mut data[n.div_ceil(2)..n] {
+                *w = 0;
             }
         }
         BucketWidth::U64 => unreachable!("cannot narrow past U64"),
@@ -1325,6 +1332,10 @@ fn narrow_u32_to_u16(w: u64) -> u64 {
 
 impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Creates a new histogram at the maximum supported scale.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no valid mapping algorithm feature is enabled.
     #[inline]
     pub fn new() -> Self {
         let scale = max_scale();
@@ -1334,6 +1345,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             min_bucket_width: BucketWidth::B1,
             bucket_width: BucketWidth::B1,
             literal: true,
+            literal_enabled: true,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -1343,6 +1355,12 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     }
 
     /// Creates a new histogram with an upper bound on scale.
+    ///
+    /// The scale is clamped to [`max_scale()`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the clamped scale is not supported by the mapping algorithm.
     #[inline]
     pub fn with_max_scale(scale: i32) -> Self {
         let scale = scale.min(max_scale());
@@ -1352,6 +1370,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             min_bucket_width: BucketWidth::B1,
             bucket_width: BucketWidth::B1,
             literal: true,
+            literal_enabled: true,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -1361,6 +1380,13 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     }
 
     /// Creates a new histogram at the specified scale.
+    ///
+    /// Unlike [`with_max_scale`](Self::with_max_scale), this does not clamp
+    /// to [`max_scale()`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scale` is not supported by the mapping algorithm.
     #[inline]
     pub fn with_scale(scale: i32) -> Self {
         Self {
@@ -1369,6 +1395,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             min_bucket_width: BucketWidth::B1,
             bucket_width: BucketWidth::B1,
             literal: true,
+            literal_enabled: true,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -1379,7 +1406,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
     /// Sets the minimum (initial) bucket counter width.
     ///
-    /// By default, counters start at 4-bit (B4). Setting a higher floor
+    /// By default, counters start at 1-bit (B1). Setting a higher floor
     /// (e.g. `BucketWidth::U8`) trades bucket capacity for avoiding the
     /// CPU cost of sub-byte bit-level indexing and SWAR widening.
     ///
@@ -1391,12 +1418,16 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         self
     }
 
-    /// Disables literal mode so the histogram starts directly in bucket mode.
+    /// Enables or disables literal mode.
+    ///
+    /// When disabled, the histogram starts directly in bucket mode. This
+    /// setting persists across `clear()`.
     ///
     /// Useful for benchmarks or when the caller knows the value range upfront.
     #[inline]
     pub fn with_literal_mode(mut self, enabled: bool) -> Self {
         self.literal = enabled;
+        self.literal_enabled = enabled;
         self
     }
 
@@ -1476,7 +1507,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     pub fn clear(&mut self) {
         self.data.fill(0);
         self.bucket_width = self.min_bucket_width;
-        self.literal = true;
+        self.literal = self.literal_enabled;
         self.index_start = 0;
         self.index_end = 0;
         self.index_base = 0;
@@ -1490,6 +1521,10 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     }
 
     /// Records a single value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
         self.update_by_incr(value, 1)
@@ -1567,14 +1602,23 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         }
     }
 
-    /// Promotes from literal mode to bucket mode, including a trigger value
-    /// that caused overflow of literal capacity.
-    fn promote_with(&mut self, trigger: f64, trigger_incr: u64) -> Result<(), Overflow> {
+    /// Promotes from literal mode to bucket mode, optionally including
+    /// a trigger value that caused overflow of literal capacity.
+    fn promote_impl(
+        &mut self,
+        trigger: Option<(f64, u64)>,
+    ) -> Result<(), Overflow> {
         debug_assert!(self.literal);
 
-        // Collect stored literal values before we clobber the data pool.
         let count = self.literal_count();
-        let mut literals = [0u64; 64]; // max N in practice
+
+        if count == 0 && trigger.is_none() {
+            self.literal = false;
+            return Ok(());
+        }
+
+        // Collect stored literal values before we clobber the data pool.
+        let mut literals = [0u64; N];
         literals[..count].copy_from_slice(self.literal_values());
 
         // Reset to empty bucket mode at max_scale and replay values
@@ -1596,45 +1640,25 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             self.update_buckets(v, 1)?;
         }
 
-        self.update_buckets(trigger, trigger_incr)?;
+        if let Some((trigger_val, trigger_incr)) = trigger {
+            self.update_buckets(trigger_val, trigger_incr)?;
+        }
 
         Ok(())
     }
 
+    /// Promotes from literal mode to bucket mode, including a trigger value
+    /// that caused overflow of literal capacity.
+    #[inline]
+    fn promote_with(&mut self, trigger: f64, trigger_incr: u64) -> Result<(), Overflow> {
+        self.promote_impl(Some((trigger, trigger_incr)))
+    }
+
     /// Promotes from literal mode to bucket mode without a trigger value.
     /// Used when self is a merge destination and needs to accept bucket data.
+    #[inline]
     fn promote(&mut self) -> Result<(), Overflow> {
-        debug_assert!(self.literal);
-
-        let count = self.literal_count();
-
-        if count == 0 {
-            self.literal = false;
-            return Ok(());
-        }
-
-        let mut literals = [0u64; 64];
-        literals[..count].copy_from_slice(self.literal_values());
-
-        // Reset to empty bucket mode at max_scale and replay values
-        // through the normal update path.
-        self.literal = false;
-        self.bucket_width = self.min_bucket_width;
-        self.mapping = Mapping::new(self.max_scale as i32).map_err(|_| Overflow)?;
-        let start = self.bucket_data_start();
-        for w in &mut self.data[start..] {
-            *w = 0;
-        }
-        self.index_base = 0;
-        self.index_start = 0;
-        self.index_end = 0;
-
-        for &bits in &literals[..count] {
-            let v = f64::from_bits(bits);
-            self.update_buckets(v, 1)?;
-        }
-
-        Ok(())
+        self.promote_impl(None)
     }
 
     /// Updates buckets for a positive value.
@@ -1916,6 +1940,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     }
 
     /// Merges from raw histogram data, enabling cross-size merging.
+    #[allow(clippy::too_many_arguments)]
     pub fn merge_from_raw(
         &mut self,
         other_count: u64,
@@ -2164,9 +2189,10 @@ mod tests {
     use crate::precision::{P32, P64, Precision};
 
     fn derived_zero_count<const N: usize, P: Precision>(h: &mut Histogram<N, P>) -> u64 {
-        let buckets = h.positive();
-        let non_zero: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
-        drop(buckets);
+        let non_zero: u64 = {
+            let buckets = h.positive();
+            (0..buckets.len()).map(|i| buckets.at(i)).sum()
+        };
         h.count() - non_zero
     }
 
@@ -2485,16 +2511,16 @@ mod tests {
                     (0..sb.len()).map(|k| sb.at(k)).sum()
                 };
                 if m_total != s_total {
-                    let mb = merged.positive();
-                    let mb_buckets: Vec<_> = (0..mb.len()).map(|k| mb.at(k)).collect();
-                    let mb_width = mb.width();
-                    let mb_len = mb.len();
-                    drop(mb);
-                    let sb = single.positive();
-                    let sb_buckets: Vec<_> = (0..sb.len()).map(|k| sb.at(k)).collect();
-                    let sb_width = sb.width();
-                    let sb_len = sb.len();
-                    drop(sb);
+                    let (mb_buckets, mb_width, mb_len) = {
+                        let mb = merged.positive();
+                        let buckets: Vec<_> = (0..mb.len()).map(|k| mb.at(k)).collect();
+                        (buckets, mb.width(), mb.len())
+                    };
+                    let (sb_buckets, sb_width, sb_len) = {
+                        let sb = single.positive();
+                        let buckets: Vec<_> = (0..sb.len()).map(|k| sb.at(k)).collect();
+                        (buckets, sb.width(), sb.len())
+                    };
                     eprintln!("FAIL size={K} sets {i} x {j}");
                     eprintln!("  set_a: {:?}", set_a);
                     eprintln!("  set_b: {:?}", set_b);
@@ -2521,11 +2547,12 @@ mod tests {
         let mut other: Histogram<8, P32> = Histogram::new();
         for (vi, &v) in set_b.iter().enumerate() {
             other.update(v).unwrap();
-            let bv = other.positive();
-            let btotal: u64 = (0..bv.len()).map(|k| bv.at(k)).sum();
-            let bv_width = bv.width();
-            let bv_buckets: Vec<_> = (0..bv.len()).map(|k| bv.at(k)).collect();
-            drop(bv);
+            let (btotal, bv_width, bv_buckets) = {
+                let bv = other.positive();
+                let total: u64 = (0..bv.len()).map(|k| bv.at(k)).sum();
+                let buckets: Vec<_> = (0..bv.len()).map(|k| bv.at(k)).collect();
+                (total, bv.width(), buckets)
+            };
             let non_zero_count = other.count() - derived_zero_count(&mut other);
             eprintln!("Other after val[{}]={}: scale={} width={:?} start={} end={} base={} cap={} btotal={} expected={}",
                 vi, v, other.scale(), bv_width,
@@ -2826,8 +2853,8 @@ mod tests {
     /// Helper: pack 16 nibbles into one u64, nibble0 in the low 4 bits.
     fn pack_b4x16(n: [u8; 16]) -> u64 {
         let mut w = 0u64;
-        for i in 0..16 {
-            w |= (n[i] as u64 & 0xF) << (i * 4);
+        for (i, &nibble) in n.iter().enumerate() {
+            w |= (nibble as u64 & 0xF) << (i * 4);
         }
         w
     }
@@ -3839,13 +3866,11 @@ mod tests {
         for i in 1..=8 {
             let v = i as f64;
             h.update(v).unwrap();
-            let b = h.positive();
-            let total: u64 = (0..b.len()).map(|k| b.at(k)).sum();
-            let b_width = b.width();
-            let b_offset = b.offset();
-            let b_len = b.len();
-            let b_cap = b.capacity();
-            drop(b);
+            let (total, b_width, b_offset, b_len, b_cap) = {
+                let b = h.positive();
+                let t: u64 = (0..b.len()).map(|k| b.at(k)).sum();
+                (t, b.width(), b.offset(), b.len(), b.capacity())
+            };
             assert_eq!(total, h.count(),
                 "After inserting {v}: bucket total ({total}) != count ({})\n  \
                  scale={} width={:?} offset={} len={} cap={}",
@@ -3860,10 +3885,11 @@ mod tests {
         let values = [0.001, 1.0, 1000.0, 0.5, 50.0, 0.01, 100.0, 10.0];
         for (vi, &v) in values.iter().enumerate() {
             h.update(v).unwrap();
-            let b = h.positive();
-            let total: u64 = (0..b.len()).map(|k| b.at(k)).sum();
-            let b_width = b.width();
-            drop(b);
+            let (total, b_width) = {
+                let b = h.positive();
+                let t: u64 = (0..b.len()).map(|k| b.at(k)).sum();
+                (t, b.width())
+            };
             assert_eq!(total, h.count(),
                 "After values[{vi}]={v}: bucket total ({total}) != count ({})\n  \
                  scale={} width={:?}",
@@ -4079,7 +4105,7 @@ mod tests {
             b.len(), exp_len, scale, idx0, idx1);
 
         // No trailing/leading zero buckets
-        if b.len() > 0 {
+        if !b.is_empty() {
             assert!(b.at(0) > 0, "leading zero bucket");
             assert!(b.at(b.len() - 1) > 0, "trailing zero bucket");
         }
@@ -4264,7 +4290,7 @@ mod tests {
     fn test_literal_update_by_incr_overflow() {
         // Histogram<8, P32>: 6 literal slots. incr=7 should promote.
         let mut h: Histogram<8, P32> = Histogram::new();
-        h.update_by_incr(3.14, 7).unwrap();
+        h.update_by_incr(3.25, 7).unwrap();
         assert!(!h.is_literal());
         assert_eq!(h.count(), 7);
     }

@@ -78,7 +78,7 @@ fn generate_tables<W: Write>(w: &mut W, table_scale: u32) -> std::io::Result<()>
     )?;
     writeln!(
         w,
-        "/// Layout: [sentinel=0, b[0]=1, b[1], ..., b[N-1], sentinel=2^52, sentinel=2^52]"
+        "/// Layout: \\[sentinel=0, b\\[0\\]=1, b\\[1\\], ..., b\\[N-1\\], sentinel=2^52, sentinel=2^52\\]"
     )?;
     writeln!(w, "/// where N = 2^TABLE_SCALE = {}.", n)?;
     writeln!(w, "pub static BOUNDARIES: [u64; {}] = [", n + 3)?;

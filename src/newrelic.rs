@@ -31,6 +31,7 @@ fn nr_tables() -> &'static NrScaleTables {
         let mut data = Vec::with_capacity(total);
         let mut offsets = [0u32; 16];
 
+        #[allow(clippy::needless_range_loop)] // `s` used both as index and for bit shifts
         for s in 1..=h {
             offsets[s] = data.len() as u32;
             let count = 1usize << (s + 1);
@@ -131,17 +132,17 @@ mod tests {
         // TABLE_SCALE should be >= the feature selected (may be higher
         // when multiple table features are enabled)
         #[cfg(feature = "scale-4")]
-        assert!(TABLE_SCALE >= 4);
+        const { assert!(TABLE_SCALE >= 4) };
         #[cfg(feature = "scale-6")]
-        assert!(TABLE_SCALE >= 6);
+        const { assert!(TABLE_SCALE >= 6) };
         #[cfg(feature = "scale-8")]
-        assert!(TABLE_SCALE >= 8);
+        const { assert!(TABLE_SCALE >= 8) };
         #[cfg(feature = "scale-10")]
-        assert!(TABLE_SCALE >= 10);
+        const { assert!(TABLE_SCALE >= 10) };
         #[cfg(feature = "scale-12")]
-        assert!(TABLE_SCALE >= 12);
+        const { assert!(TABLE_SCALE >= 12) };
         #[cfg(feature = "scale-14")]
-        assert!(TABLE_SCALE >= 14);
+        const { assert!(TABLE_SCALE >= 14) };
     }
 
     #[test]

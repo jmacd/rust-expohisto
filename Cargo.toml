@@ -2,8 +2,13 @@
 name = "rust-expohisto"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.73"
 description = "Allocation-free OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/open-telemetry/rust-expohisto"
+keywords = ["opentelemetry", "histogram", "exponential", "metrics", "observability"]
+categories = ["data-structures", "no-std"]
 
 [features]
 default = ["newrelic", "scale-8"]

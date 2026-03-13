@@ -15,12 +15,12 @@ Exponential histograms provide a compact, high-resolution representation of valu
 ## Quick Start
 
 ```rust
-use rust_expohisto::Histogram;
+use rust_expohisto::{Histogram, P32};
 
 // Create a histogram with 16 u64 words (128 bytes) of data pool.
-// MMSC stats use 2 words (S32), leaving 14 words for bucket data:
-// 896 one-bit buckets at the default B1 width.
-let mut hist: Histogram<16> = Histogram::new();
+// P32 uses 2 words for MMSC stats (f32/u32), leaving 14 words for
+// bucket data: 896 one-bit buckets at the default B1 width.
+let mut hist: Histogram<16, P32> = Histogram::new();
 
 // Record observations
 hist.update(1.5).unwrap();
@@ -41,9 +41,9 @@ Benchmark results (100 test values, per-iteration timing):
 | Exponent | ≤0 | ~1.1 ns | Bit extraction only |
 | NewRelic lookup | 1-8 | ~1.7 ns | Integer-only, 2N linear buckets, 1 correction |
 | Dynatrace lookup | 1-8 | ~1.7 ns | Integer-only, N linear buckets, 2 corrections |
-| Logarithm | 1-20 | ~6 ns | Fallback when lookup unavailable |
+| Logarithm | 1-20 | ~6 ns | Used when no lookup table is compiled |
 
-The lookup table accelerates all scales from 1 up to the compiled maximum. Higher scales beyond the table fall back to logarithm computation.
+The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected at construction time (`Mapping::new` returns `ScaleNotSupported`).
 
 ## Lookup Table Features
 
@@ -137,11 +137,11 @@ When a lookup feature is enabled (default: `newrelic` + `scale-8`), mapping uses
 3. Apply boundary check(s) to correct the approximation
 4. Combine with exponent to produce the final index
 
-For scales beyond the table's maximum, the implementation falls back to logarithm computation.
+For scales beyond the table's maximum, `Mapping::new` returns `ScaleNotSupported`.
 
-### Scale > 0: Logarithm Fallback
+### Scale > 0: Logarithm
 
-When no lookup table is available (or for scales above the table's maximum), the standard formula is used:
+When the `logarithm` feature is enabled instead of a lookup table, the standard formula is used:
 
 ```
 index = ceil(ln(value) × 2^scale / ln(2)) - 1
@@ -436,7 +436,7 @@ The spec defines three configuration parameters:
 
 | Parameter | Spec Default | This Implementation | Notes |
 |-----------|-------------|---------------------|-------|
-| **MaxSize** | 160 | Any compile-time `N` via `Histogram<N>` | `N` is the total pool size in u64 words. Bucket capacity depends on the current counter width and stat layout. |
+| **MaxSize** | 160 | Any compile-time `N` via `Histogram<N, P>` | `N` is the total pool size in u64 words. Bucket capacity depends on the current counter width and precision tier `P`. |
 | **MaxScale** | 20 | 20 (`MAX_SCALE`) | Effective max depends on the mapping feature: table-based features cap at `TABLE_SCALE` (e.g. 8 for `scale-8`); the `logarithm` feature reaches 20. `Histogram::with_max_scale()` lets the user set a lower cap. |
 | **RecordMinMax** | true | Always on | `min` and `max` are tracked on every update. There is no option to disable them. |
 

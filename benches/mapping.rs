@@ -106,14 +106,12 @@ fn bench_map_to_index(c: &mut Criterion) {
             let log_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20].to_vec();
 
             for &scale in &log_scales {
-                let sf = rust_expohisto::logarithm::scale_factor(scale);
                 group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
                     b.iter(|| {
                         for &v in TEST_VALUES {
                             black_box(rust_expohisto::logarithm::map_to_index(
                                 black_box(v),
                                 scale,
-                                sf,
                             ));
                         }
                     })

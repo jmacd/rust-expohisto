@@ -13,6 +13,7 @@
 use crate::float64::{
     MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE,
 };
+use core::fmt;
 
 /// Minimum scale for the exponent mapping.
 /// At scale -10, values in (0, 1] map to bucket -1 and values in (1, MAX) map to bucket 0.
@@ -34,6 +35,21 @@ pub enum MappingError {
     /// Scale exceeds what the selected algorithm supports.
     ScaleNotSupported,
 }
+
+impl fmt::Display for MappingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Underflow => f.write_str("bucket index corresponds to a subnormal value"),
+            Self::Overflow => f.write_str("bucket index corresponds to +Inf"),
+            Self::InvalidScale => f.write_str("invalid scale parameter"),
+            Self::ScaleNotSupported => {
+                f.write_str("scale exceeds what the selected algorithm supports")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MappingError {}
 
 /// Returns the maximum scale supported by the selected mapping algorithm.
 ///
@@ -144,15 +160,17 @@ impl Mapping {
             crate::logarithm::map_to_index(value, self.scale as i32)
         }
 
-        // No algorithm selected
+        // No algorithm selected — fail at compile time.
         #[cfg(not(any(
             feature = "logarithm",
             feature = "newrelic",
             feature = "dynatrace"
         )))]
         {
-            let _ = value;
-            0
+            compile_error!(
+                "No mapping algorithm feature enabled. \
+                 Enable one of: \"logarithm\", \"newrelic\", or \"dynatrace\"."
+            );
         }
     }
 

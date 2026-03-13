@@ -4,7 +4,7 @@
 //! Benchmarks measuring the performance of literal mode — the cold-start
 //! optimization that stores raw f64 values before promoting to buckets.
 //!
-//! Five scenarios:
+//! Six scenarios:
 //!
 //! 1. **insert_literal**: Per-insert cost while in literal mode, compared
 //!    with bucket mode at the same insert count.
@@ -21,6 +21,9 @@
 //!
 //! 5. **merge_literal_src**: Cost of merging a literal-mode source into a
 //!    bucket-mode destination.
+//!
+//! 6. **reset_loop**: Cost of repeated clear-and-fill cycles, comparing
+//!    literal-start vs bucket-start.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rust_expohisto::{Histogram, Mapping, P32, P64};
@@ -228,8 +231,8 @@ fn bench_literal(c: &mut Criterion) {
             // Wide: values spanning many decades.
             let wide = wide_range_values(n);
 
-            for &(range_label, ref vals) in
-                &[("narrow", &narrow), ("wide", &wide)]
+            for &(range_label, vals) in
+                [("narrow", &narrow), ("wide", &wide)].iter()
             {
                 let tag = format!("{}/{}", label, range_label);
 

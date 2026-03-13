@@ -105,8 +105,8 @@
 //! [`with_literal_mode(false)`](Histogram::with_literal_mode) for benchmarks
 //! or when the caller knows the value range upfront.
 
-pub mod exponent;
-pub mod float64;
+pub(crate) mod exponent;
+pub(crate) mod float64;
 pub mod histogram;
 pub mod mapping;
 pub mod precision;
