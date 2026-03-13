@@ -93,6 +93,17 @@ pub enum BucketWidth {
     U64 = 64,
 }
 
+/// All widths in level order, for computed lookups.
+const ALL_WIDTHS: [BucketWidth; 7] = [
+    BucketWidth::B1,
+    BucketWidth::B2,
+    BucketWidth::B4,
+    BucketWidth::U8,
+    BucketWidth::U16,
+    BucketWidth::U32,
+    BucketWidth::U64,
+];
+
 impl BucketWidth {
     /// Returns the bit width of one counter.
     #[inline]
@@ -100,18 +111,11 @@ impl BucketWidth {
         self as usize
     }
 
-    /// Returns the index into [`SWAR_TABLE`] for this width.
+    /// Returns the ordinal level (0=B1 … 6=U64), used to index
+    /// [`ALL_WIDTHS`] and [`SWAR_TABLE`].
     #[inline]
     const fn level(self) -> usize {
-        match self {
-            Self::B1 => 0,
-            Self::B2 => 1,
-            Self::B4 => 2,
-            Self::U8 => 3,
-            Self::U16 => 4,
-            Self::U32 => 5,
-            Self::U64 => 6,
-        }
+        self.bits().trailing_zeros() as usize
     }
 
     /// Returns the number of buckets that fit in `word_count` u64 words.
@@ -129,14 +133,11 @@ impl BucketWidth {
     /// Returns the next wider counter width, or `None` if already at u64.
     #[inline]
     const fn wider(self) -> Option<BucketWidth> {
-        match self {
-            Self::B1 => Some(Self::B2),
-            Self::B2 => Some(Self::B4),
-            Self::B4 => Some(Self::U8),
-            Self::U8 => Some(Self::U16),
-            Self::U16 => Some(Self::U32),
-            Self::U32 => Some(Self::U64),
-            Self::U64 => None,
+        let l = self.level();
+        if l < 6 {
+            Some(ALL_WIDTHS[l + 1])
+        } else {
+            None
         }
     }
 
@@ -144,30 +145,18 @@ impl BucketWidth {
     /// exceed U64.
     #[inline]
     const fn widen_by(self, steps: i32) -> Option<BucketWidth> {
-        let mut w = self;
-        let mut i = 0;
-        while i < steps {
-            match w.wider() {
-                Some(next) => w = next,
-                None => return None,
-            }
-            i += 1;
+        let target = self.level() + steps as usize;
+        if target > 6 {
+            None
+        } else {
+            Some(ALL_WIDTHS[target])
         }
-        Some(w)
     }
 
     /// Returns the maximum value storable in one counter at this width.
     #[inline]
     const fn counter_max(self) -> u64 {
-        match self {
-            Self::B1 => 1,
-            Self::B2 => 3,
-            Self::B4 => 15,
-            Self::U8 => u8::MAX as u64,
-            Self::U16 => u16::MAX as u64,
-            Self::U32 => u32::MAX as u64,
-            Self::U64 => u64::MAX,
-        }
+        u64::MAX >> (64 - self.bits())
     }
 }
 
@@ -522,64 +511,28 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Gets the value at a physical slot index.
+    ///
+    /// All widths use the same shift-and-mask formula on the underlying
+    /// `[u64]` pool. For sub-byte widths this extracts a packed bitfield;
+    /// for byte-aligned widths the compiler reduces it to the same code as
+    /// a direct typed read.
     #[inline]
     fn bucket_get(&self, slot: usize) -> u64 {
         let data = self.bucket_data();
-        match self.bucket_width {
-            BucketWidth::B1 => (data[slot / 64] >> (slot % 64)) & 1,
-            BucketWidth::B2 => (data[slot / 32] >> ((slot % 32) * 2)) & 0x3,
-            BucketWidth::B4 => (data[slot / 16] >> ((slot % 16) * 4)) & 0xF,
-            BucketWidth::U8 => {
-                let bytes: &[u8] = bytemuck::cast_slice(data);
-                bytes[slot] as u64
-            }
-            BucketWidth::U16 => {
-                let s: &[u16] = bytemuck::cast_slice(data);
-                s[slot] as u64
-            }
-            BucketWidth::U32 => {
-                let s: &[u32] = bytemuck::cast_slice(data);
-                s[slot] as u64
-            }
-            BucketWidth::U64 => data[slot],
-        }
+        let bits = self.bucket_width.bits();
+        let spw = 64 / bits;
+        (data[slot / spw] >> ((slot % spw) * bits)) & self.bucket_width.counter_max()
     }
 
     /// Sets the value at a physical slot index.
     #[inline]
     fn bucket_set(&mut self, slot: usize, value: u64) {
-        let width = self.bucket_width;
-        let data = self.bucket_data_mut();
-        match width {
-            BucketWidth::B1 => {
-                let word = &mut data[slot / 64];
-                let shift = slot % 64;
-                *word = (*word & !(1u64 << shift)) | ((value & 1) << shift);
-            }
-            BucketWidth::B2 => {
-                let word = &mut data[slot / 32];
-                let shift = (slot % 32) * 2;
-                *word = (*word & !(0x3u64 << shift)) | ((value & 0x3) << shift);
-            }
-            BucketWidth::B4 => {
-                let word = &mut data[slot / 16];
-                let shift = (slot % 16) * 4;
-                *word = (*word & !(0xFu64 << shift)) | ((value & 0xF) << shift);
-            }
-            BucketWidth::U8 => {
-                let bytes: &mut [u8] = bytemuck::cast_slice_mut(data);
-                bytes[slot] = value as u8;
-            }
-            BucketWidth::U16 => {
-                let s: &mut [u16] = bytemuck::cast_slice_mut(data);
-                s[slot] = value as u16;
-            }
-            BucketWidth::U32 => {
-                let s: &mut [u32] = bytemuck::cast_slice_mut(data);
-                s[slot] = value as u32;
-            }
-            BucketWidth::U64 => data[slot] = value,
-        }
+        let bits = self.bucket_width.bits();
+        let spw = 64 / bits;
+        let mask = self.bucket_width.counter_max();
+        let word = &mut self.bucket_data_mut()[slot / spw];
+        let shift = (slot % spw) * bits;
+        *word = (*word & !(mask << shift)) | ((value & mask) << shift);
     }
 
     /// Returns the count at position `pos` (0-indexed from offset).

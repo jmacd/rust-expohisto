@@ -15,14 +15,7 @@ pub mod mapping;
 #[doc(hidden)]
 pub mod logarithm;
 
-#[cfg(any(
-    feature = "scale-4",
-    feature = "scale-6",
-    feature = "scale-8",
-    feature = "scale-10",
-    feature = "scale-12",
-    feature = "scale-14"
-))]
+#[cfg(has_lookup_table)]
 #[doc(hidden)]
 pub mod lookup;
 

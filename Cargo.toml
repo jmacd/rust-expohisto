@@ -46,7 +46,6 @@ dynatrace = ["scale-4"]
 bench-all = ["logarithm", "newrelic", "dynatrace", "scale-8"]
 
 [dependencies]
-bytemuck = { version = "1.25.0", features = ["derive"] }
 
 [build-dependencies]
 expohisto-mapping-gen = { path = "mapping-gen" }

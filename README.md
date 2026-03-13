@@ -352,7 +352,7 @@ caller already knows the value range.
 
 ## Sub-Byte Bucket Widths and Bit-Level Arithmetic
 
-Bucket counters start at 1 bit per counter, maximizing the initial bucket count for a given memory budget. As counters saturate, they widen in place through the chain **B1→B2→B4→U8→U16→U32→U64**, each transition halving the bucket count and doubling counter capacity. The sub-byte widths (B1, B2, B4) are the novel part — once you reach U8, it's just `bytemuck::cast_slice` for free reinterpretation. This section describes the bit-level machinery that makes sub-byte widths work.
+Bucket counters start at 1 bit per counter, maximizing the initial bucket count for a given memory budget. As counters saturate, they widen in place through the chain **B1→B2→B4→U8→U16→U32→U64**, each transition halving the bucket count and doubling counter capacity. All widths use a single shift-and-mask formula over the `[u64]` pool — sub-byte widths extract packed bitfields, while byte-aligned widths reduce to ordinary word-sized reads. This section describes the bit-level machinery that makes sub-byte widths work.
 
 ### Memory layout
 
@@ -458,7 +458,7 @@ Each formula processes all counters in one u64 word simultaneously:
 
 - **B2→B4**: The mask `0x3333...3333` selects alternating 2-bit fields. Shifting right by 2 aligns adjacent 2-bit fields. Adding gives a 4-bit sum. All 16 pairs in 3 operations.
 
-- **B4→U8**: The mask `0x0F0F...0F0F` selects alternating nibbles. Shifting right by 4 aligns them. Adding gives an 8-bit (byte) sum. Beyond this point, the value fits in a byte and the transition to U8 needs no further reinterpretation — `bytemuck::cast_slice` views the same `[u64]` as `[u8]`.
+- **B4→U8**: The mask `0x0F0F...0F0F` selects alternating nibbles. Shifting right by 4 aligns them. Adding gives an 8-bit (byte) sum. Beyond this point, each counter occupies at least a full byte, so the same shift-and-mask formula reduces to ordinary word-sized reads at the compiler level.
 
 The inner loop is:
 ```text
@@ -530,8 +530,7 @@ B1 ──saturate──► B2 ──saturate──► B4 ──saturate──►
 max=1            max=3            max=15           max=255 max=64K max=4G  max=2⁶⁴
 
 Each transition: counters merge pairwise, scale decreases by 1.
-Sub-byte transitions (B1→B2→B4→U8) use SWAR — one pass per u64 word.
-Byte+ transitions (U8→U16→U32→U64) use bytemuck cast_slice reinterpretation.
+All transitions use SWAR shift-and-mask over the [u64] pool.
 ```
 
 1. **If base is even**: Use multi-step SWAR widening (`swar_widen`), which chains SWAR steps from the current width to the target width. Each step sums adjacent pairs, doubling the counter width and halving the bucket count.

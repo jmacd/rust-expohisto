@@ -57,26 +57,12 @@ impl std::error::Error for MappingError {}
 /// - `newrelic` / `dynatrace`: supports scales up to the compiled table scale
 #[inline]
 pub const fn max_scale() -> i32 {
-    #[cfg(any(
-        feature = "scale-4",
-        feature = "scale-6",
-        feature = "scale-8",
-        feature = "scale-10",
-        feature = "scale-12",
-        feature = "scale-14"
-    ))]
+    #[cfg(has_lookup_table)]
     {
         crate::lookup::TABLE_SCALE
     }
 
-    #[cfg(not(any(
-        feature = "scale-4",
-        feature = "scale-6",
-        feature = "scale-8",
-        feature = "scale-10",
-        feature = "scale-12",
-        feature = "scale-14"
-    )))]
+    #[cfg(not(has_lookup_table))]
     {
         MAX_SCALE
     }

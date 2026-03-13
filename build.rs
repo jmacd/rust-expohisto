@@ -18,7 +18,11 @@ fn main() {
     let dest_path = Path::new(&out_dir).join("lookup_tables.rs");
     let mut file = File::create(&dest_path).unwrap();
 
+    // Declare our custom cfg so rustc doesn't warn about it.
+    println!("cargo:rustc-check-cfg=cfg(has_lookup_table)");
+
     if let Some(scale) = table_scale() {
+        println!("cargo:rustc-cfg=has_lookup_table");
         generate_tables(&mut file, scale).unwrap();
     } else {
         writeln!(file, "// No table features enabled").unwrap();
