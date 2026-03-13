@@ -329,7 +329,7 @@ impl<const N: usize, P: Precision> fmt::Debug for Histogram<N, P> {
         } else {
             s.field("mode", &"bucket");
             s.field("scale", &self.mapping.scale());
-            s.field("bucket_len", &((self.index_end - self.index_start + 1) as u32));
+            s.field("bucket_len", &self.bucket_range_len());
         }
         s.finish()
     }
@@ -552,19 +552,58 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         if self.literal {
             return self.literal_count() as u64;
         }
-        let len = if self.is_effectively_empty() {
-            0u32
-        } else {
-            (self.index_end - self.index_start + 1) as u32
-        };
-        let cap = self.bucket_capacity() as i32;
+        let len = self.bucket_range_len();
         let mut total = 0u64;
         for pos in 0..len {
             let index = self.index_start + pos as i32;
-            let slot = (index - self.index_base).rem_euclid(cap) as usize;
-            total = total.saturating_add(self.bucket_get(slot));
+            total = total.saturating_add(self.bucket_get(self.slot_for(index)));
         }
         total
+    }
+
+    // -- Index arithmetic helpers --
+
+    /// Number of logical buckets in the live range, or 0 if empty.
+    #[inline]
+    fn bucket_range_len(&self) -> u32 {
+        if self.is_effectively_empty() {
+            0
+        } else {
+            (self.index_end - self.index_start + 1) as u32
+        }
+    }
+
+    /// Ring-buffer slot index for a given bucket index.
+    #[inline]
+    fn slot_for(&self, index: i32) -> usize {
+        let cap = self.bucket_capacity() as i32;
+        (index - self.index_base).rem_euclid(cap) as usize
+    }
+
+    /// Shifts all three index fields right by `by` positions.
+    #[inline]
+    fn shift_indices(&mut self, by: i32) {
+        self.index_start >>= by;
+        self.index_end >>= by;
+        self.index_base >>= by;
+    }
+
+    /// Clamps `index_end` so the live range does not exceed capacity.
+    #[inline]
+    fn clamp_index_end(&mut self) {
+        let cap = self.bucket_capacity() as i32;
+        let max_end = self.index_start + cap - 1;
+        if self.index_end > max_end {
+            self.index_end = max_end;
+        }
+    }
+
+    /// Returns true if the topmost slot in the last data word is occupied.
+    #[inline]
+    fn top_slot_occupied(&self) -> bool {
+        let bits = self.bucket_width.bits();
+        let n = self.bucket_word_count();
+        n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0
     }
 }
 
@@ -604,19 +643,22 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         self.bucket_width.capacity(self.bucket_word_count())
     }
 
+    /// Eagerly promotes from literal mode to bucket mode.
+    /// No-op if already in bucket mode.
+    #[inline]
+    fn ensure_promoted(&mut self) {
+        if self.literal {
+            let _ = self.promote();
+        }
+    }
+
     /// Returns the number of buckets in use.
     ///
     /// Promotes from literal mode if needed.
     #[inline]
     pub fn bucket_len(&mut self) -> u32 {
-        if self.literal {
-            let _ = self.promote();
-        }
-        if self.is_effectively_empty() {
-            0
-        } else {
-            (self.index_end - self.index_start + 1) as u32
-        }
+        self.ensure_promoted();
+        self.bucket_range_len()
     }
 
     /// Returns true if no buckets have been used.
@@ -634,24 +676,20 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         if self.index_end != self.index_start {
             return false;
         }
-        let cap = self.bucket_capacity() as i32;
-        let slot = (self.index_start - self.index_base).rem_euclid(cap);
-        self.bucket_get(slot as usize) == 0
+        let slot = self.slot_for(self.index_start);
+        self.bucket_get(slot) == 0
     }
 
     /// Trims leading and trailing zero buckets from the index range.
     fn trim_bucket_range(&mut self) {
-        let cap = self.bucket_capacity() as i32;
         while self.index_end > self.index_start {
-            let slot = (self.index_end - self.index_base).rem_euclid(cap) as usize;
-            if self.bucket_get(slot) != 0 {
+            if self.bucket_get(self.slot_for(self.index_end)) != 0 {
                 break;
             }
             self.index_end -= 1;
         }
         while self.index_start < self.index_end {
-            let slot = (self.index_start - self.index_base).rem_euclid(cap) as usize;
-            if self.bucket_get(slot) != 0 {
+            if self.bucket_get(self.slot_for(self.index_start)) != 0 {
                 break;
             }
             self.index_start += 1;
@@ -726,15 +764,11 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Panics if `pos >= bucket_len()`.
     #[inline]
     pub fn bucket_at(&mut self, pos: u32) -> u64 {
-        if self.literal {
-            let _ = self.promote();
-        }
-        let len = if self.is_effectively_empty() { 0 } else { (self.index_end - self.index_start + 1) as u32 };
+        self.ensure_promoted();
+        let len = self.bucket_range_len();
         assert!(pos < len, "bucket_at: pos {} out of range (len {})", pos, len);
         let index = self.index_start + pos as i32;
-        let cap = self.bucket_capacity() as i32;
-        let slot = (index - self.index_base).rem_euclid(cap) as usize;
-        self.bucket_get(slot)
+        self.bucket_get(self.slot_for(index))
     }
 
     /// Attempts to add `incr` to a physical slot. Returns false on overflow.
@@ -754,9 +788,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Promotes from literal mode if needed.
     #[inline]
     pub fn bucket_offset(&mut self) -> i32 {
-        if self.literal {
-            let _ = self.promote();
-        }
+        self.ensure_promoted();
         self.index_start
     }
 }
@@ -787,11 +819,7 @@ impl<const N: usize, P: Precision> BucketView<'_, N, P> {
     /// Number of logical buckets in use.
     #[inline]
     pub fn len(&self) -> u32 {
-        if self.hist.is_effectively_empty() {
-            0
-        } else {
-            (self.hist.index_end - self.hist.index_start + 1) as u32
-        }
+        self.hist.bucket_range_len()
     }
 
     /// Returns the current counter width.
@@ -822,9 +850,7 @@ impl<const N: usize, P: Precision> BucketView<'_, N, P> {
         let len = self.len();
         assert!(pos < len, "BucketView::at: pos {} out of range (len {})", pos, len);
         let index = self.hist.index_start + pos as i32;
-        let cap = self.hist.bucket_capacity() as i32;
-        let slot = (index - self.hist.index_base).rem_euclid(cap) as usize;
-        self.hist.bucket_get(slot)
+        self.hist.bucket_get(self.hist.slot_for(index))
     }
 
     /// Returns an iterator over bucket counts.
@@ -864,11 +890,8 @@ impl<const N: usize, P: Precision> Iterator for BucketsIter<'_, N, P> {
         if self.pos >= self.len {
             return None;
         }
-        // Inline bucket-mode read (iterator is only used after promotion).
         let index = self.hist.index_start + self.pos as i32;
-        let cap = self.hist.bucket_capacity() as i32;
-        let slot = (index - self.hist.index_base).rem_euclid(cap) as usize;
-        let count = self.hist.bucket_get(slot);
+        let count = self.hist.bucket_get(self.hist.slot_for(index));
         self.pos += 1;
         Some(count)
     }
@@ -908,9 +931,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         if self.is_effectively_empty() {
             let target = self.bucket_width.widen_by(steps)?;
             self.bucket_width = target;
-            self.index_start >>= steps;
-            self.index_end >>= steps;
-            self.index_base >>= steps;
+            self.shift_indices(steps);
             return Some(steps);
         }
 
@@ -934,12 +955,8 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
             let shifted = self.index_base & 1 != 0;
 
-            // Ensure even base for SWAR.
             if shifted {
-                let bits = width.bits();
-                let n = self.bucket_word_count();
-                if n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0 {
-                    // Top slot occupied — scalar force-widen.
+                if self.top_slot_occupied() {
                     done += self.scalar_merge_step(true)?;
                     continue;
                 }
@@ -948,21 +965,10 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
             swar_step(self.bucket_data_mut(), width);
             self.bucket_width = width.wider().unwrap();
-            self.index_start >>= 1;
-            self.index_end >>= 1;
-            self.index_base >>= 1;
+            self.shift_indices(1);
 
-            // swar_shift_up_one pushes the top slot off the array
-            // (the assert guarantees it was zero). When the widened
-            // capacity exactly equals the new logical length, the
-            // off-by-one from right-shifting an odd base causes
-            // len > cap. Clamp index_end to keep the range valid.
             if shifted {
-                let cap = self.bucket_capacity() as i32;
-                let max_end = self.index_start + cap - 1;
-                if self.index_end > max_end {
-                    self.index_end = max_end;
-                }
+                self.clamp_index_end();
             }
 
             done += 1;
@@ -985,7 +991,6 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// Returns the number of scale steps performed (>= 1).
     #[allow(clippy::needless_range_loop)]
     fn scalar_merge_step(&mut self, force_widen: bool) -> Option<i32> {
-        let cap = self.bucket_capacity() as i32;
         let width = self.bucket_width;
         let max_val = width.counter_max();
         let bucket_words = self.bucket_word_count();
@@ -999,8 +1004,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
         // Phase 1: gather from hardware layout, merging adjacent pairs.
         for old_idx in self.index_start..=self.index_end {
-            let slot = (old_idx - self.index_base).rem_euclid(cap) as usize;
-            let val = self.bucket_get(slot);
+            let val = self.bucket_get(self.slot_for(old_idx));
             let out = ((old_idx >> 1) - cur_start) as usize;
             sums[out] = sums[out].saturating_add(val);
             if sums[out] > max_val {
@@ -1047,43 +1051,36 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         // Phase 3: commit — clear data, write back.
         self.bucket_width = target_width;
 
-        let data = self.bucket_data_mut();
-        for w in data.iter_mut() {
-            *w = 0;
-        }
-
-        self.index_start = cur_start;
-        self.index_end = cur_end;
         let spw = target_width.slots_per_word() as i32;
-        self.index_base = cur_start & !(spw - 1);
-
-        let new_cap = self.bucket_capacity() as i32;
-        for i in 0..cur_len {
-            let idx = cur_start + i as i32;
-            let slot = (idx - self.index_base).rem_euclid(new_cap) as usize;
-            self.bucket_set(slot, sums[i]);
-        }
+        self.rewrite_buckets(cur_start, cur_end, cur_start & !(spw - 1), &sums[..cur_len]);
 
         Some(scale_steps)
+    }
+
+    /// Clears bucket data and writes `sums` into the new index range.
+    fn rewrite_buckets(&mut self, start: i32, end: i32, base: i32, sums: &[u64]) {
+        self.bucket_data_mut().fill(0);
+        self.index_start = start;
+        self.index_end = end;
+        self.index_base = base;
+        for (i, &v) in sums.iter().enumerate() {
+            let idx = start + i as i32;
+            self.bucket_set(self.slot_for(idx), v);
+        }
     }
 
     /// Downscales at U64 width by collapsing 2^by adjacent buckets.
     ///
     /// At U64 width, sums use saturating arithmetic and cannot
     /// meaningfully overflow.
-    #[allow(clippy::needless_range_loop)] // `i` used both as index and for arithmetic
     fn bucket_downscale_u64(&mut self, by: i32) {
         debug_assert_eq!(self.bucket_width, BucketWidth::U64);
         debug_assert!(by >= 1);
 
         if self.is_effectively_empty() {
-            self.index_start >>= by;
-            self.index_end >>= by;
-            self.index_base >>= by;
+            self.shift_indices(by);
             return;
         }
-
-        let cap = self.bucket_capacity() as i32;
 
         let new_start = self.index_start >> by;
         let new_end = self.index_end >> by;
@@ -1093,26 +1090,12 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         debug_assert!(new_len <= sums.len());
 
         for old_idx in self.index_start..=self.index_end {
-            let slot = (old_idx - self.index_base).rem_euclid(cap) as usize;
-            let val = self.bucket_get(slot);
+            let val = self.bucket_get(self.slot_for(old_idx));
             let out = ((old_idx >> by) - new_start) as usize;
             sums[out] = sums[out].saturating_add(val);
         }
 
-        let data = self.bucket_data_mut();
-        for w in data.iter_mut() {
-            *w = 0;
-        }
-
-        self.index_start = new_start;
-        self.index_end = new_end;
-        self.index_base = new_start;
-
-        for i in 0..new_len {
-            let idx = new_start + i as i32;
-            let slot = (idx - self.index_base).rem_euclid(cap) as usize;
-            self.bucket_set(slot, sums[i]);
-        }
+        self.rewrite_buckets(new_start, new_end, new_start, &sums[..new_len]);
     }
 }
 
@@ -1120,53 +1103,29 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 // SWAR — per-word parallel pairwise summation
 // ---------------------------------------------------------------------------
 
+/// Applies a single SWAR pairwise-sum step: for each word, adds the
+/// upper half-slots to the lower half-slots, producing sums in the
+/// next-wider format.
+#[inline]
+fn swar_masked_step(data: &mut [u64], shift: u32, mask: u64) {
+    for w in data.iter_mut() {
+        let x = *w;
+        *w = ((x >> shift) & mask) + (x & mask);
+    }
+}
+
 /// Single SWAR step: sum adjacent counters at the current width into
 /// the next wider width, in place.
 #[inline]
 fn swar_step(data: &mut [u64], width: BucketWidth) {
     match width {
-        BucketWidth::B1 => {
-            // 64 bits → 32 crumbs (2-bit)
-            const MASK: u64 = 0x5555_5555_5555_5555;
-            for w in data.iter_mut() {
-                let x = *w;
-                *w = ((x >> 1) & MASK) + (x & MASK);
-            }
-        }
-        BucketWidth::B2 => {
-            // 32 crumbs → 16 nibbles
-            const MASK: u64 = 0x3333_3333_3333_3333;
-            for w in data.iter_mut() {
-                let x = *w;
-                *w = ((x >> 2) & MASK) + (x & MASK);
-            }
-        }
-        BucketWidth::B4 => {
-            // 16 nibbles → 8 bytes
-            const MASK: u64 = 0x0F0F_0F0F_0F0F_0F0F;
-            for w in data.iter_mut() {
-                let x = *w;
-                *w = ((x >> 4) & MASK) + (x & MASK);
-            }
-        }
-        BucketWidth::U8 => {
-            // 8 bytes → 4 shorts
-            const MASK: u64 = 0x00FF_00FF_00FF_00FF;
-            for w in data.iter_mut() {
-                let x = *w;
-                *w = ((x >> 8) & MASK) + (x & MASK);
-            }
-        }
-        BucketWidth::U16 => {
-            // 4 shorts → 2 ints
-            const MASK: u64 = 0x0000_FFFF_0000_FFFF;
-            for w in data.iter_mut() {
-                let x = *w;
-                *w = ((x >> 16) & MASK) + (x & MASK);
-            }
-        }
+        BucketWidth::B1  => swar_masked_step(data, 1,  0x5555_5555_5555_5555),
+        BucketWidth::B2  => swar_masked_step(data, 2,  0x3333_3333_3333_3333),
+        BucketWidth::B4  => swar_masked_step(data, 4,  0x0F0F_0F0F_0F0F_0F0F),
+        BucketWidth::U8  => swar_masked_step(data, 8,  0x00FF_00FF_00FF_00FF),
+        BucketWidth::U16 => swar_masked_step(data, 16, 0x0000_FFFF_0000_FFFF),
         BucketWidth::U32 => {
-            // 2 ints → 1 long
+            // 2 ints → 1 long (no mask needed, full 32-bit halves)
             for w in data.iter_mut() {
                 let x = *w;
                 *w = (x >> 32) + (x & 0xFFFF_FFFF);
@@ -1176,41 +1135,39 @@ fn swar_step(data: &mut [u64], width: BucketWidth) {
     }
 }
 
+/// Checks whether any word has bits set in the given overflow mask.
+#[inline]
+fn any_masked(data: &[u64], mask: u64) -> bool {
+    data.iter().any(|&w| w & mask != 0)
+}
+
 /// Checks whether any widened pair-sum overflows the original width.
 /// Called after `swar_step` has already written the wider sums.
 #[inline]
 fn swar_has_overflow(data: &[u64], original_width: BucketWidth) -> bool {
     match original_width {
-        BucketWidth::B1 => {
-            // Sums are in B2 format. Overflow if any crumb > 1.
-            const HI: u64 = 0xAAAA_AAAA_AAAA_AAAA;
-            data.iter().any(|&w| w & HI != 0)
-        }
-        BucketWidth::B2 => {
-            // Sums are in B4 format. Overflow if any nibble > 3.
-            const HI: u64 = 0xCCCC_CCCC_CCCC_CCCC;
-            data.iter().any(|&w| w & HI != 0)
-        }
-        BucketWidth::B4 => {
-            // Sums are in U8 format. Overflow if any byte > 15.
-            const HI: u64 = 0xF0F0_F0F0_F0F0_F0F0;
-            data.iter().any(|&w| w & HI != 0)
-        }
-        BucketWidth::U8 => {
-            // Sums are in U16 format. Overflow if any short > 255.
-            const HI: u64 = 0xFF00_FF00_FF00_FF00;
-            data.iter().any(|&w| w & HI != 0)
-        }
-        BucketWidth::U16 => {
-            // Sums are in U32 format. Overflow if any int > 65535.
-            const HI: u64 = 0xFFFF_0000_FFFF_0000;
-            data.iter().any(|&w| w & HI != 0)
-        }
-        BucketWidth::U32 => {
-            // Sums are in U64 format. Overflow if any > u32::MAX.
-            data.iter().any(|&w| w > u32::MAX as u64)
-        }
-        BucketWidth::U64 => false, // saturating add, never "overflows"
+        BucketWidth::B1  => any_masked(data, 0xAAAA_AAAA_AAAA_AAAA),
+        BucketWidth::B2  => any_masked(data, 0xCCCC_CCCC_CCCC_CCCC),
+        BucketWidth::B4  => any_masked(data, 0xF0F0_F0F0_F0F0_F0F0),
+        BucketWidth::U8  => any_masked(data, 0xFF00_FF00_FF00_FF00),
+        BucketWidth::U16 => any_masked(data, 0xFFFF_0000_FFFF_0000),
+        BucketWidth::U32 => data.iter().any(|&w| w > u32::MAX as u64),
+        BucketWidth::U64 => false,
+    }
+}
+
+/// Compacts narrowed half-words into full words, pairing two source
+/// words into one destination word and zeroing the freed tail.
+#[inline]
+fn compact_with<F: Fn(u64) -> u64>(data: &mut [u64], narrow: F) {
+    let n = data.len();
+    for i in (0..n).step_by(2) {
+        let lo = narrow(data[i]);
+        let hi = if i + 1 < n { narrow(data[i + 1]) } else { 0 };
+        data[i / 2] = lo | (hi << 32);
+    }
+    for w in &mut data[n.div_ceil(2)..n] {
+        *w = 0;
     }
 }
 
@@ -1222,76 +1179,13 @@ fn swar_has_overflow(data: &[u64], original_width: BucketWidth) -> bool {
 /// and packs pairs of words into one, freeing the upper half of the array.
 #[inline]
 fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
-    let n = data.len();
     match original_width {
-        BucketWidth::B1 => {
-            // Data is 32 × B2 per word, each ≤ 1. Compress to 64 × B1.
-            // Two words of 32 bits each → one word of 64 bits.
-            for i in (0..n).step_by(2) {
-                let lo = narrow_b2_to_b1(data[i]);
-                let hi = if i + 1 < n { narrow_b2_to_b1(data[i + 1]) } else { 0 };
-                data[i / 2] = lo | (hi << 32);
-            }
-            for w in &mut data[n.div_ceil(2)..n] {
-                *w = 0;
-            }
-        }
-        BucketWidth::B2 => {
-            // Data is 16 × B4 per word, each ≤ 3. Compress to 32 × B2.
-            for i in (0..n).step_by(2) {
-                let lo = narrow_b4_to_b2(data[i]);
-                let hi = if i + 1 < n { narrow_b4_to_b2(data[i + 1]) } else { 0 };
-                data[i / 2] = lo | (hi << 32);
-            }
-            for w in &mut data[n.div_ceil(2)..n] {
-                *w = 0;
-            }
-        }
-        BucketWidth::B4 => {
-            // Data is 8 × U8 per word, each ≤ 15. Compress to 16 × B4.
-            // Two words of 8 nibbles each → one word of 16 nibbles.
-            for i in (0..n).step_by(2) {
-                let lo = narrow_u8_to_b4(data[i]);
-                let hi = if i + 1 < n { narrow_u8_to_b4(data[i + 1]) } else { 0 };
-                data[i / 2] = lo | (hi << 32);
-            }
-            for w in &mut data[n.div_ceil(2)..n] {
-                *w = 0;
-            }
-        }
-        BucketWidth::U8 => {
-            // Data is 4 × U16 per word, each ≤ 255. Compress to 8 × U8.
-            for i in (0..n).step_by(2) {
-                let lo = narrow_u16_to_u8(data[i]);
-                let hi = if i + 1 < n { narrow_u16_to_u8(data[i + 1]) } else { 0 };
-                data[i / 2] = lo | (hi << 32);
-            }
-            for w in &mut data[n.div_ceil(2)..n] {
-                *w = 0;
-            }
-        }
-        BucketWidth::U16 => {
-            // Data is 2 × U32 per word, each ≤ 65535. Compress to 4 × U16.
-            for i in (0..n).step_by(2) {
-                let lo = narrow_u32_to_u16(data[i]);
-                let hi = if i + 1 < n { narrow_u32_to_u16(data[i + 1]) } else { 0 };
-                data[i / 2] = lo | (hi << 32);
-            }
-            for w in &mut data[n.div_ceil(2)..n] {
-                *w = 0;
-            }
-        }
-        BucketWidth::U32 => {
-            // Data is 1 × U64 per word, each ≤ u32::MAX. Compress to 2 × U32.
-            for i in (0..n).step_by(2) {
-                let lo = data[i] & 0xFFFF_FFFF;
-                let hi = if i + 1 < n { data[i + 1] & 0xFFFF_FFFF } else { 0 };
-                data[i / 2] = lo | (hi << 32);
-            }
-            for w in &mut data[n.div_ceil(2)..n] {
-                *w = 0;
-            }
-        }
+        BucketWidth::B1 => compact_with(data, narrow_b2_to_b1),
+        BucketWidth::B2 => compact_with(data, narrow_b4_to_b2),
+        BucketWidth::B4 => compact_with(data, narrow_u8_to_b4),
+        BucketWidth::U8 => compact_with(data, narrow_u16_to_u8),
+        BucketWidth::U16 => compact_with(data, narrow_u32_to_u16),
+        BucketWidth::U32 => compact_with(data, |w| w & 0xFFFF_FFFF),
         BucketWidth::U64 => unreachable!("cannot narrow past U64"),
     }
 }
@@ -1323,68 +1217,64 @@ fn swar_shift_up_one(data: &mut [u64], width: BucketWidth) {
     data[0] <<= bits;
 }
 
+/// Progressive bit-compaction: at each stage, merge adjacent groups by
+/// OR-shifting, then mask to keep only the compacted result.
+#[inline]
+fn compact_lanes(mut x: u64, stages: &[(u32, u64)]) -> u64 {
+    for &(shift, mask) in stages {
+        x = (x | (x >> shift)) & mask;
+    }
+    x
+}
+
 /// Compress 32 crumbs (each ≤ 1) into 32 bits in the low 32 bits.
 #[inline]
 fn narrow_b2_to_b1(w: u64) -> u64 {
-    // Each 2-bit field has value 0 or 1. Pack pairs into single bits.
-    let x = w & 0x5555_5555_5555_5555;  // mask: keep low bit of each crumb
-    let x = x | (x >> 1);               // crumb pairs → bits
-    let x = x & 0x3333_3333_3333_3333;  // keep merged pairs
-    let x = x | (x >> 2);               // nibble compaction
-    let x = x & 0x0F0F_0F0F_0F0F_0F0F;  // keep merged nibbles
-    let x = x | (x >> 4);               // byte compaction
-    let x = x & 0x00FF_00FF_00FF_00FF;  // keep merged bytes
-    let x = x | (x >> 8);               // short compaction
-    let x = x & 0x0000_FFFF_0000_FFFF;  // keep merged shorts
-    let x = x | (x >> 16);              // 32-bit compaction
-    x & 0x0000_0000_FFFF_FFFF
+    compact_lanes(w & 0x5555_5555_5555_5555, &[
+        (1,  0x3333_3333_3333_3333),
+        (2,  0x0F0F_0F0F_0F0F_0F0F),
+        (4,  0x00FF_00FF_00FF_00FF),
+        (8,  0x0000_FFFF_0000_FFFF),
+        (16, 0x0000_0000_FFFF_FFFF),
+    ])
 }
 
 /// Compress 16 nibbles (each ≤ 3) into 16 crumbs in the low 32 bits.
 #[inline]
 fn narrow_b4_to_b2(w: u64) -> u64 {
-    // Each nibble has value 0..3. Pack pairs into 2-bit crumbs.
-    let x = w & 0x3333_3333_3333_3333;  // mask: keep low 2 bits of each nibble
-    let x = x | (x >> 2);               // nibble pairs → crumbs
-    let x = x & 0x0F0F_0F0F_0F0F_0F0F;  // keep merged nibbles
-    let x = x | (x >> 4);               // byte compaction
-    let x = x & 0x00FF_00FF_00FF_00FF;  // keep merged bytes
-    let x = x | (x >> 8);               // short compaction
-    let x = x & 0x0000_FFFF_0000_FFFF;  // keep merged shorts
-    let x = x | (x >> 16);              // 32-bit compaction
-    x & 0x0000_0000_FFFF_FFFF
+    compact_lanes(w & 0x3333_3333_3333_3333, &[
+        (2,  0x0F0F_0F0F_0F0F_0F0F),
+        (4,  0x00FF_00FF_00FF_00FF),
+        (8,  0x0000_FFFF_0000_FFFF),
+        (16, 0x0000_0000_FFFF_FFFF),
+    ])
 }
 
 /// Compress 8 bytes (each ≤ 15) into 8 nibbles in the low 32 bits.
 #[inline]
 fn narrow_u8_to_b4(w: u64) -> u64 {
-    // Each byte has value 0..15. Pack adjacent byte pairs into byte,
-    // then adjacent byte pairs into shorts, etc.
-    let x = w & 0x0F0F_0F0F_0F0F_0F0F; // mask (redundant safety)
-    let x = x | (x >> 4);               // nibble pairs → bytes
-    let x = x & 0x00FF_00FF_00FF_00FF;  // keep merged bytes
-    let x = x | (x >> 8);               // byte pairs → shorts
-    let x = x & 0x0000_FFFF_0000_FFFF;  // keep merged shorts
-    let x = x | (x >> 16);              // short pairs → 32 bits
-    x & 0x0000_0000_FFFF_FFFF
+    compact_lanes(w & 0x0F0F_0F0F_0F0F_0F0F, &[
+        (4,  0x00FF_00FF_00FF_00FF),
+        (8,  0x0000_FFFF_0000_FFFF),
+        (16, 0x0000_0000_FFFF_FFFF),
+    ])
 }
 
 /// Compress 4 shorts (each ≤ 255) into 4 bytes in the low 32 bits.
 #[inline]
 fn narrow_u16_to_u8(w: u64) -> u64 {
-    let x = w & 0x00FF_00FF_00FF_00FF;  // mask (redundant safety)
-    let x = x | (x >> 8);               // short pairs → ints
-    let x = x & 0x0000_FFFF_0000_FFFF;  // keep merged ints
-    let x = x | (x >> 16);              // int pairs → 32 bits
-    x & 0x0000_0000_FFFF_FFFF
+    compact_lanes(w & 0x00FF_00FF_00FF_00FF, &[
+        (8,  0x0000_FFFF_0000_FFFF),
+        (16, 0x0000_0000_FFFF_FFFF),
+    ])
 }
 
 /// Compress 2 ints (each ≤ 65535) into 2 shorts in the low 32 bits.
 #[inline]
 fn narrow_u32_to_u16(w: u64) -> u64 {
-    let x = w & 0x0000_FFFF_0000_FFFF;  // mask (redundant safety)
-    let x = x | (x >> 16);              // int pairs → 32 bits
-    x & 0x0000_0000_FFFF_FFFF
+    compact_lanes(w & 0x0000_FFFF_0000_FFFF, &[
+        (16, 0x0000_0000_FFFF_FFFF),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,11 +1438,9 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
     /// extra cost.
     #[inline]
     pub fn positive(&mut self) -> BucketView<'_, N, P> {
-        if self.literal {
-            // promote() cannot fail here — if it could (which requires
-            // an invalid limit_scale), we'd have failed at construction.
-            let _ = self.promote();
-        }
+        // promote() cannot fail here — if it could (which requires
+        // an invalid limit_scale), we'd have failed at construction.
+        self.ensure_promoted();
         BucketView { hist: self }
     }
 
@@ -1759,9 +1647,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
         }
 
         if self.is_effectively_empty() {
-            self.index_start >>= change;
-            self.index_end >>= change;
-            self.index_base >>= change;
+            self.shift_indices(change);
             return self.adjust_scale(change);
         }
 
@@ -1769,19 +1655,15 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
 
         // Phase 1: Adaptive SWAR merge at sub-U64 widths.
         while remaining > 0 && self.bucket_width != BucketWidth::U64 {
-            // Ensure even base for correct SWAR pairing.
             let shifted = self.index_base & 1 != 0;
             if shifted {
-                let width = self.bucket_width;
-                let bits = width.bits();
-                let n = self.bucket_word_count();
-                if n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0 {
-                    // Top slot occupied — can't shift. Scalar merge.
+                if self.top_slot_occupied() {
                     let steps = self.scalar_merge_step(false).ok_or(Overflow)?;
                     self.adjust_scale(steps)?;
                     remaining -= steps;
                     continue;
                 }
+                let width = self.bucket_width;
                 swar_shift_up_one(self.bucket_data_mut(), width);
             }
 
@@ -1794,18 +1676,10 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
                 swar_narrow_compact(self.bucket_data_mut(), width);
             }
 
-            self.index_start >>= 1;
-            self.index_end >>= 1;
-            self.index_base >>= 1;
+            self.shift_indices(1);
 
-            // Same clamp as bucket_widen: after shift_up_one + >>= 1,
-            // the odd-base shift can cause len > cap by 1.
             if shifted {
-                let cap = self.bucket_capacity() as i32;
-                let max_end = self.index_start + cap - 1;
-                if self.index_end > max_end {
-                    self.index_end = max_end;
-                }
+                self.clamp_index_end();
             }
 
             self.adjust_scale(1)?;
@@ -1865,8 +1739,7 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
                 });
             }
             for idx in index..self.index_start {
-                let bi = (idx - self.index_base).rem_euclid(max_size);
-                self.bucket_set(bi as usize, 0);
+                self.bucket_set(self.slot_for(idx), 0);
             }
             self.index_start = index;
         } else if index > self.index_end {
@@ -1886,15 +1759,12 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
                 });
             }
             for idx in (self.index_end + 1)..=index {
-                let bi = (idx - self.index_base).rem_euclid(max_size);
-                self.bucket_set(bi as usize, 0);
+                self.bucket_set(self.slot_for(idx), 0);
             }
             self.index_end = index;
         }
 
-        let bucket_index = (index - self.index_base).rem_euclid(max_size);
-
-        if !self.bucket_try_increment(bucket_index as usize, incr) {
+        if !self.bucket_try_increment(self.slot_for(index), incr) {
             return IncrResult::CounterOverflow;
         }
 
@@ -2066,17 +1936,11 @@ impl<const N: usize, P: Precision> Histogram<N, P> {
             &BucketDescriptor {
                 scale: other.mapping.scale(),
                 offset: other.index_start,
-                len: if other.is_effectively_empty() {
-                    0
-                } else {
-                    (other.index_end - other.index_start + 1) as u32
-                },
+                len: other.bucket_range_len(),
             },
             &|i| {
                 let index = other.index_start + i as i32;
-                let cap = other.bucket_capacity() as i32;
-                let slot = (index - other.index_base).rem_euclid(cap) as usize;
-                other.bucket_get(slot)
+                other.bucket_get(other.slot_for(index))
             },
         )
     }
@@ -3718,12 +3582,6 @@ mod tests {
     }
 
     #[test]
-    fn test_swar_has_overflow_u16_boundary_65536() {
-        let data = [pack_u32x2(65536, 0)];
-        assert!(swar_has_overflow(&data, BucketWidth::U16));
-    }
-
-    #[test]
     fn test_swar_has_overflow_multi_word_only_last() {
         // Overflow only in the last word — must still be detected.
         let data = [
@@ -3788,6 +3646,50 @@ mod tests {
         (0..b.len()).map(|i| b.at(i)).sum()
     }
 
+    /// Helper: build two same-size histograms from ops, merge, and
+    /// assert count and bucket-total invariants.
+    fn merge_check<const N: usize, P: Precision>(
+        left: &[(f64, u64)],
+        right: &[(f64, u64)],
+        label: &str,
+    ) {
+        let mut h1 = Histogram::<N, P>::new();
+        for &(v, incr) in left {
+            h1.update_by_incr(v, incr).unwrap();
+        }
+        let mut h2 = Histogram::<N, P>::new();
+        for &(v, incr) in right {
+            h2.update_by_incr(v, incr).unwrap();
+        }
+        h1.merge_from(&h2).unwrap();
+        let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
+        assert_eq!(h1.count(), expected, "{label}: count mismatch");
+        let bt = bucket_total(&mut h1);
+        assert!(bt <= h1.count(), "{label}: bt={bt} > count={}", h1.count());
+    }
+
+    /// Helper: build two different-size histograms from ops, merge via
+    /// `merge_from_other`, and assert count and bucket-total invariants.
+    fn merge_check_cross<const N: usize, P: Precision, const M: usize>(
+        left: &[(f64, u64)],
+        right: &[(f64, u64)],
+        label: &str,
+    ) {
+        let mut h1 = Histogram::<N, P>::new();
+        for &(v, incr) in left {
+            h1.update_by_incr(v, incr).unwrap();
+        }
+        let mut h2 = Histogram::<M, P>::new();
+        for &(v, incr) in right {
+            h2.update_by_incr(v, incr).unwrap();
+        }
+        h1.merge_from_other(&h2).unwrap();
+        let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
+        assert_eq!(h1.count(), expected, "{label}: count mismatch");
+        let bt = bucket_total(&mut h1);
+        assert!(bt <= h1.count(), "{label}: bt={bt} > count={}", h1.count());
+    }
+
     #[test]
     fn test_merge_needs_downscale_in_raw() {
         let mut h1 = Histogram::<8, P32>::new();
@@ -3828,42 +3730,10 @@ mod tests {
             (v1, 3072), (v2, 1024),
         ];
 
-        fn check<const N: usize, P: Precision>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
-            let mut h1 = Histogram::<N, P>::new();
-            for &(v, incr) in left {
-                h1.update_by_incr(v, incr).unwrap();
-            }
-            let mut h2 = Histogram::<N, P>::new();
-            for &(v, incr) in right {
-                h2.update_by_incr(v, incr).unwrap();
-            }
-            h1.merge_from(&h2).unwrap();
-            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
-            assert_eq!(h1.count(), expected, "{label}: count mismatch");
-            let bt = { let b = h1.positive(); (0..b.len()).map(|i| b.at(i)).sum::<u64>() };
-            assert!(bt <= h1.count(), "{label}: bucket total ({bt}) exceeds count ({})", h1.count());
-        }
-
-        fn check_cross<const N: usize, P: Precision, const M: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
-            let mut h1 = Histogram::<N, P>::new();
-            for &(v, incr) in left {
-                h1.update_by_incr(v, incr).unwrap();
-            }
-            let mut h2 = Histogram::<M, P>::new();
-            for &(v, incr) in right {
-                h2.update_by_incr(v, incr).unwrap();
-            }
-            h1.merge_from_other(&h2).unwrap();
-            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
-            assert_eq!(h1.count(), expected, "{label}: count mismatch");
-            let bt = { let b = h1.positive(); (0..b.len()).map(|i| b.at(i)).sum::<u64>() };
-            assert!(bt <= h1.count(), "{label}: bucket total ({bt}) exceeds count ({})", h1.count());
-        }
-
-        check::<8, P32>(&left_ops, &right_ops, "same N=8");
-        check::<16, P32>(&left_ops, &right_ops, "same N=16");
-        check_cross::<8, P32, 16>(&left_ops, &right_ops, "cross 8←16");
-        check_cross::<16, P32, 8>(&left_ops, &right_ops, "cross 16←8");
+        merge_check::<8, P32>(&left_ops, &right_ops, "same N=8");
+        merge_check::<16, P32>(&left_ops, &right_ops, "same N=16");
+        merge_check_cross::<8, P32, 16>(&left_ops, &right_ops, "cross 8←16");
+        merge_check_cross::<16, P32, 8>(&left_ops, &right_ops, "cross 16←8");
     }
 
     /// Regression: three values with a subnormal, split across merge,
@@ -3879,42 +3749,10 @@ mod tests {
             (v3, 5), (v1, 1200), (v2, 20), (v3, 20), (v1, 19200), (v2, 320), (v3, 320),
         ];
 
-        fn check<const N: usize, P: Precision>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
-            let mut h1 = Histogram::<N, P>::new();
-            for &(v, incr) in left {
-                h1.update_by_incr(v, incr).unwrap();
-            }
-            let mut h2 = Histogram::<N, P>::new();
-            for &(v, incr) in right {
-                h2.update_by_incr(v, incr).unwrap();
-            }
-            h1.merge_from(&h2).unwrap();
-            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
-            assert_eq!(h1.count(), expected, "{label}: count");
-            let bt = { let b = h1.positive(); (0..b.len()).map(|i| b.at(i)).sum::<u64>() };
-            assert!(bt <= h1.count(), "{label}: bt={bt} > count={}", h1.count());
-        }
-
-        fn check_cross<const N: usize, P: Precision, const M: usize>(left: &[(f64, u64)], right: &[(f64, u64)], label: &str) {
-            let mut h1 = Histogram::<N, P>::new();
-            for &(v, incr) in left {
-                h1.update_by_incr(v, incr).unwrap();
-            }
-            let mut h2 = Histogram::<M, P>::new();
-            for &(v, incr) in right {
-                h2.update_by_incr(v, incr).unwrap();
-            }
-            h1.merge_from_other(&h2).unwrap();
-            let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
-            assert_eq!(h1.count(), expected, "{label}: count");
-            let bt = { let b = h1.positive(); (0..b.len()).map(|i| b.at(i)).sum::<u64>() };
-            assert!(bt <= h1.count(), "{label}: bt={bt} > count={}", h1.count());
-        }
-
-        check::<8, P32>(&left, &right, "same 8");
-        check::<16, P32>(&left, &right, "same 16");
-        check_cross::<8, P32, 16>(&left, &right, "cross 8←16");
-        check_cross::<16, P32, 8>(&left, &right, "cross 16←8");
+        merge_check::<8, P32>(&left, &right, "same 8");
+        merge_check::<16, P32>(&left, &right, "same 16");
+        merge_check_cross::<8, P32, 16>(&left, &right, "cross 8←16");
+        merge_check_cross::<16, P32, 8>(&left, &right, "cross 16←8");
     }
 
     #[test]
