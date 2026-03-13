@@ -108,6 +108,14 @@ fn decode_increment(sel: u8) -> u64 {
     }
 }
 
+fn try_insert(hist: &mut Histogram<8>, shadow: &mut Shadow, value_bits: u64, incr: u64) {
+    if let Some(v) = decode_value(value_bits) {
+        if hist.update_by_incr(v, incr).is_ok() {
+            shadow.ops.push(Obs { value: v, incr });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------
@@ -172,12 +180,7 @@ fuzz_target!(|data: &[u8]| {
                 incr_sel,
             } => {
                 let i = idx as usize % POOL;
-                if let Some(v) = decode_value(value_bits) {
-                    let incr = decode_increment(incr_sel);
-                    if pool[i].update_by_incr(v, incr).is_ok() {
-                        shadows[i].ops.push(Obs { value: v, incr });
-                    }
-                }
+                try_insert(&mut pool[i], &mut shadows[i], value_bits, decode_increment(incr_sel));
             }
 
             Op::Merge { dst, src } => {
@@ -223,12 +226,7 @@ fuzz_target!(|data: &[u8]| {
                 log_incr,
             } => {
                 let i = idx as usize % POOL;
-                if let Some(v) = decode_value(value_bits) {
-                    let incr = 1u64 << ((log_incr % 41) as u32);
-                    if pool[i].update_by_incr(v, incr).is_ok() {
-                        shadows[i].ops.push(Obs { value: v, incr });
-                    }
-                }
+                try_insert(&mut pool[i], &mut shadows[i], value_bits, 1u64 << ((log_incr % 41) as u32));
             }
         }
     }

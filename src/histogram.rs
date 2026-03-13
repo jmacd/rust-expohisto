@@ -3023,24 +3023,8 @@ mod tests {
         h.update_by_incr(2.0, 3).unwrap(); // index 0
         h.update_by_incr(4.0, 5).unwrap(); // index 1
 
-        let total_before = bucket_total(&mut h);
         let width_before = h.bucket_width();
-
-        // Drive to odd base by doing SWAR merges until base is odd.
-        // Start: base = (first_index) & !15. Let's just forcibly test
-        // the scalar path by calling do_downscale multiple times.
-        // At scale 0 with index_base = -16 (from index -1 & !15...
-        // actually index 0 at scale 0 maps to -1).
-        // Let's verify and use scalar directly if possible.
-
-        // Instead, test via do_downscale which will route to SWAR or scalar.
-        h.do_downscale(1).unwrap();
-
-        let total_after = bucket_total(&mut h);
-        assert_eq!(
-            total_before, total_after,
-            "bucket total changed: {total_before} → {total_after}"
-        );
+        assert_total_conserved(&mut h, 1);
         // Small counts (3+5=8 ≤ 15) → should stay at B4.
         assert_eq!(h.bucket_width(), width_before);
     }
@@ -3052,12 +3036,7 @@ mod tests {
         h.update_by_incr(2.0, 10).unwrap(); // index 0, count 10
         h.update_by_incr(4.0, 10).unwrap(); // index 1, count 10
 
-        let total_before = bucket_total(&mut h);
-
-        h.do_downscale(1).unwrap();
-
-        let total_after = bucket_total(&mut h);
-        assert_eq!(total_before, total_after);
+        assert_total_conserved(&mut h, 1);
         // 10+10=20 > 15 → must widen to U8.
         assert_eq!(h.bucket_width(), BucketWidth::U8);
     }
@@ -3109,19 +3088,10 @@ mod tests {
         for i in 0..4 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
-        let total_before = bucket_total(&mut h);
 
         // At B1, base = -64. After 6 steps: base = -64 >> 6 = -1 (odd).
         // Step 7 uses the odd SWAR-shift merge.
-        for _ in 0..7 {
-            h.do_downscale(1).unwrap();
-        }
-
-        let total_after = bucket_total(&mut h);
-        assert_eq!(
-            total_before, total_after,
-            "total changed after 7-step downscale through odd base"
-        );
+        assert_total_conserved(&mut h, 7);
     }
 
     // -----------------------------------------------------------------------
@@ -3212,11 +3182,8 @@ mod tests {
 
         h.update_by_incr(4.0, 200).unwrap();
         // Now at U8, do a merge: 200+200=400 > 255 → must widen to U16.
-        let total_before = bucket_total(&mut h);
-        h.do_downscale(1).unwrap();
+        assert_total_conserved(&mut h, 1);
         assert_eq!(h.bucket_width(), BucketWidth::U16);
-        let total_after = bucket_total(&mut h);
-        assert_eq!(total_before, total_after);
     }
 
     #[test]
@@ -3229,11 +3196,8 @@ mod tests {
 
         h.update_by_incr(4.0, 50).unwrap();
         // 100+50=150 ≤ 255 → should stay at U8.
-        let total_before = bucket_total(&mut h);
-        h.do_downscale(1).unwrap();
+        assert_total_conserved(&mut h, 1);
         assert_eq!(h.bucket_width(), BucketWidth::U8);
-        let total_after = bucket_total(&mut h);
-        assert_eq!(total_before, total_after);
     }
 
     // -----------------------------------------------------------------------
@@ -3249,28 +3213,14 @@ mod tests {
         h.update_by_incr(1.5, 500).unwrap();
         h.update_by_incr(1.6, 500).unwrap();
         // Start at U16 (500 > 255).
-        let total = bucket_total(&mut h);
-        assert_eq!(total, 1000);
+        assert_eq!(bucket_total(&mut h), 1000);
 
         // Add more to push into U32 territory.
         h.update_by_incr(1.7, 65000).unwrap();
         h.update_by_incr(1.8, 65000).unwrap();
-        let total = bucket_total(&mut h);
 
         // Downscale up to 10 steps, verify total at each.
-        for step in 1..=10 {
-            h.do_downscale(1).unwrap();
-            let current = bucket_total(&mut h);
-            assert_eq!(
-                current,
-                total,
-                "total changed at step {step} (width={:?}): {current} != {total}",
-                h.bucket_width()
-            );
-            if h.bucket_width() == BucketWidth::U64 {
-                break;
-            }
-        }
+        assert_total_conserved(&mut h, 10);
     }
 
     #[test]
@@ -3280,22 +3230,10 @@ mod tests {
         for i in 0..10 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
-        let total = 10u64;
 
         // Downscale 8 times — should cross the odd-base boundary
         // multiple times, exercising scalar and SWAR paths alternately.
-        for step in 1..=8 {
-            h.do_downscale(1).unwrap();
-            let current = bucket_total(&mut h);
-            assert_eq!(
-                current,
-                total,
-                "total changed at step {step}: {current} != {total}, \
-                 width={:?} base={}",
-                h.bucket_width(),
-                h.index_base
-            );
-        }
+        assert_total_conserved(&mut h, 8);
     }
 
     #[test]
@@ -3306,20 +3244,9 @@ mod tests {
         h.update_by_incr(4.0, 15).unwrap();
         h.update_by_incr(8.0, 15).unwrap();
         h.update_by_incr(16.0, 15).unwrap();
-        let total = bucket_total(&mut h);
-        assert_eq!(total, 60);
+        assert_eq!(bucket_total(&mut h), 60);
 
-        for step in 1..=6 {
-            h.do_downscale(1).unwrap();
-            let current = bucket_total(&mut h);
-            assert_eq!(
-                current,
-                total,
-                "total changed at step {step}: {current} != {total}, \
-                 width={:?}",
-                h.bucket_width()
-            );
-        }
+        assert_total_conserved(&mut h, 6);
     }
 
     // -----------------------------------------------------------------------
@@ -3456,6 +3383,23 @@ mod tests {
     /// Helper: count total across all positive buckets.
     fn bucket_total<const N: usize>(h: &mut Histogram<N>) -> u64 {
         h.positive().iter().sum()
+    }
+
+    /// Downscales `steps` times, asserting the bucket total is preserved
+    /// at each step.
+    fn assert_total_conserved<const N: usize>(h: &mut Histogram<N>, steps: i32) {
+        let total = bucket_total(h);
+        for step in 1..=steps {
+            h.do_downscale(1).unwrap();
+            let current = bucket_total(h);
+            assert_eq!(
+                current,
+                total,
+                "total changed at step {step}: {current} != {total}, \
+                 width={:?}",
+                h.bucket_width()
+            );
+        }
     }
 
     /// Helper: build two same-size histograms from ops, merge, and
