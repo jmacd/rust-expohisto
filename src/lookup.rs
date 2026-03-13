@@ -91,3 +91,167 @@ pub fn derive_index_table(boundaries: &[u64], count: usize, shift: u32) -> Vec<u
     }
     table
 }
+
+/// Shared tests for lookup table-based mapping algorithms.
+///
+/// Tests powers-of-two invariant, basic values, table_scale bounds,
+/// and cross-scale consistency. Used by both `newrelic` and `dynatrace`.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! lookup_tests {
+    ($map_fn:path, $table_scale:expr) => {
+        #[test]
+        fn test_powers_of_two() {
+            for scale in 1..=$table_scale {
+                for exp in -10..=10 {
+                    let value = 2.0_f64.powi(exp);
+                    let expected = (exp << scale) - 1;
+                    let actual = $map_fn(value, scale);
+                    assert_eq!(
+                        actual, expected,
+                        "power of two mismatch at scale={scale}, exp={exp}: got {actual}, expected {expected}",
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn test_basic_values() {
+            let scale = $table_scale.min(4);
+            assert_eq!($map_fn(1.0, scale), -1);
+            let expected = (1 << scale) - 1;
+            assert_eq!($map_fn(2.0, scale), expected);
+            let idx = $map_fn(1.5, scale);
+            let max_idx = (1 << scale) - 1;
+            assert!(
+                idx >= 0 && idx < max_idx,
+                "1.5 should be in [0, {max_idx}), got {idx}",
+            );
+        }
+
+        #[test]
+        fn test_table_scale() {
+            #[cfg(feature = "scale-4")]
+            const { assert!($table_scale >= 4) };
+            #[cfg(feature = "scale-6")]
+            const { assert!($table_scale >= 6) };
+            #[cfg(feature = "scale-8")]
+            const { assert!($table_scale >= 8) };
+            #[cfg(feature = "scale-10")]
+            const { assert!($table_scale >= 10) };
+            #[cfg(feature = "scale-12")]
+            const { assert!($table_scale >= 12) };
+            #[cfg(feature = "scale-14")]
+            const { assert!($table_scale >= 14) };
+        }
+
+        #[test]
+        fn test_all_scales_consistent() {
+            let test_values: &[f64] =
+                &[1.1, 1.5, 1.9, 2.5, 3.3, 7.7, 0.3, 0.7, 100.0, 1e-10, 1e10];
+            for scale in 1..$table_scale {
+                for &v in test_values {
+                    let direct = $map_fn(v, scale);
+                    let fine = $map_fn(v, $table_scale);
+                    let shifted = fine >> ($table_scale - scale);
+                    assert_eq!(
+                        direct, shifted,
+                        "scale {scale} mismatch for value {v}: direct={direct}, shifted={shifted}",
+                    );
+                }
+            }
+        }
+    };
+}
+
+// Re-export for use in sibling modules.
+pub use lookup_tests;
+///
+/// Both NR and DT algorithms use this structure; they differ only in
+/// `extra_bits` (NR=1 → 2N linear buckets, DT=0 → N linear buckets).
+pub struct ScaleTables {
+    data: Box<[u16]>,
+    /// `offsets[s]` = start index of scale-s table in `data`.
+    offsets: [u32; 16],
+    /// Extra significand bits used for linear indexing (NR=1, DT=0).
+    extra_bits: u32,
+}
+
+impl ScaleTables {
+    /// Builds packed index tables for all scales 1..=TABLE_SCALE.
+    ///
+    /// `extra_bits`: 1 for NewRelic (2N linear buckets), 0 for Dynatrace (N).
+    pub fn new(extra_bits: u32) -> Self {
+        let h = TABLE_SCALE as usize;
+        let total: usize = (1..=h).map(|s| 1usize << (s + extra_bits as usize)).sum();
+        let mut data = Vec::with_capacity(total);
+        let mut offsets = [0u32; 16];
+
+        #[allow(clippy::needless_range_loop)]
+        for s in 1..=h {
+            offsets[s] = data.len() as u32;
+            let count = 1usize << (s + extra_bits as usize);
+            let shift = 52 - s as u32 - extra_bits;
+            let b = boundaries(s as i32);
+            let table = derive_index_table(b, count, shift);
+            data.extend_from_slice(&table);
+        }
+
+        Self {
+            data: data.into_boxed_slice(),
+            offsets,
+            extra_bits,
+        }
+    }
+
+    /// Returns the index table for the given scale.
+    #[inline]
+    pub fn index_table(&self, scale: i32) -> &[u16] {
+        let s = scale as usize;
+        let start = self.offsets[s] as usize;
+        let len = 1usize << (s + self.extra_bits as usize);
+        &self.data[start..start + len]
+    }
+
+    /// Returns the significand shift for the given scale.
+    #[inline]
+    pub fn shift(&self, scale: i32) -> u32 {
+        52 - scale as u32 - self.extra_bits
+    }
+}
+
+/// Maps a positive f64 value to a bucket index using a lookup table.
+///
+/// `corrections`: number of boundary checks after the initial approximation
+/// (NR=1, DT=2).
+#[inline]
+pub fn table_map_to_index(
+    value: f64,
+    scale: i32,
+    tables: &ScaleTables,
+    corrections: u32,
+) -> i32 {
+    use crate::float64::{get_normal_base2, get_significand};
+
+    debug_assert!(scale > 0);
+    debug_assert!(scale <= TABLE_SCALE);
+    debug_assert!(value > 0.0);
+
+    let significand = get_significand(value);
+    let exponent = get_normal_base2(value);
+
+    let b = boundaries(scale);
+    let index = tables.index_table(scale);
+    let shift = tables.shift(scale);
+    let linear_idx = (significand >> shift) as usize;
+    let approx = index[linear_idx] as usize;
+
+    let mut bucket = approx as i32;
+    for c in 1..=corrections {
+        if significand >= b[approx + c as usize] {
+            bucket += 1;
+        }
+    }
+
+    (exponent << scale) + bucket - 1
+}

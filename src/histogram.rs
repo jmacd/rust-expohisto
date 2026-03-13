@@ -52,6 +52,16 @@ pub struct Stats {
     pub max: f64,
 }
 
+impl Stats {
+    /// Empty stats (all zeros).
+    pub const EMPTY: Self = Self {
+        count: 0,
+        sum: 0.0,
+        min: 0.0,
+        max: 0.0,
+    };
+}
+
 /// Describes the bucket layout of an exponential histogram.
 ///
 /// Used by [`Histogram::merge_from_raw`] to pass the source histogram's
@@ -1053,12 +1063,7 @@ impl<const N: usize> Histogram<N> {
             index_base: 0,
             index_start: 0,
             index_end: 0,
-            stats: Stats {
-                count: 0,
-                sum: 0.0,
-                min: 0.0,
-                max: 0.0,
-            },
+            stats: Stats::EMPTY,
             data: [0u64; N],
         }
     }
@@ -1212,12 +1217,7 @@ impl<const N: usize> Histogram<N> {
     /// Clears the histogram, resetting to initial state.
     pub fn clear(&mut self) {
         self.reset_bucket_state();
-        self.stats = Stats {
-            count: 0,
-            sum: 0.0,
-            min: 0.0,
-            max: 0.0,
-        };
+        self.stats = Stats::EMPTY;
         self.literal = self.literal_enabled;
         self.mapping = Mapping::new(self.limit_scale as i32).unwrap();
     }
