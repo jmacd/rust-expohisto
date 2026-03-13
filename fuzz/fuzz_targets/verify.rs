@@ -1,0 +1,89 @@
+use std::collections::BTreeMap;
+
+use otel_expohisto::{Histogram, Mapping};
+
+/// Verifies histogram state against expected (value, incr) operations.
+///
+/// Checks count, min, max, zero count, bucket distribution, and
+/// per-bucket counts at the histogram's current scale.
+pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u64)], label: &str) {
+    let total_count: u64 = ops.iter().map(|&(_, incr)| incr).sum();
+
+    assert_eq!(hist.count(), total_count, "{label}: count mismatch");
+
+    if total_count == 0 {
+        assert_eq!(hist.positive().len(), 0, "{label}: should have no buckets");
+        return;
+    }
+
+    // min / max
+    let expected_min = ops.iter().map(|&(v, _)| v).fold(f64::INFINITY, f64::min);
+    let expected_max = ops.iter().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
+    assert_eq!(hist.min(), expected_min, "{label}: min mismatch");
+    assert_eq!(hist.max(), expected_max, "{label}: max mismatch");
+
+    // zero count
+    let non_zero_total: u64 = ops
+        .iter()
+        .filter(|&&(v, _)| v != 0.0)
+        .map(|&(_, incr)| incr)
+        .sum();
+    let expected_zero_count = total_count - non_zero_total;
+
+    let count = hist.count();
+    let scale = hist.scale();
+    let buckets = hist.positive();
+    let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
+
+    assert!(
+        bucket_total <= count,
+        "{label}: bucket total ({bucket_total}) exceeds count ({count})"
+    );
+    let actual_zero_count = count - bucket_total;
+    assert_eq!(
+        actual_zero_count, expected_zero_count,
+        "{label}: zero count mismatch"
+    );
+
+    // bucket distribution at final scale
+    if non_zero_total == 0 {
+        assert_eq!(buckets.len(), 0, "{label}: expected no buckets");
+        return;
+    }
+
+    let mapping = Mapping::new(scale).expect("reported scale should be valid");
+    let mut expected: BTreeMap<i32, u64> = BTreeMap::new();
+    for &(value, incr) in ops {
+        if value != 0.0 {
+            let idx = mapping.map_to_index(value);
+            *expected.entry(idx).or_insert(0) += incr;
+        }
+    }
+
+    let exp_min_idx = *expected.keys().next().unwrap();
+    let exp_max_idx = *expected.keys().last().unwrap();
+    let exp_len = (exp_max_idx - exp_min_idx + 1) as u32;
+
+    assert_eq!(
+        buckets.offset(),
+        exp_min_idx,
+        "{label}: offset mismatch (scale={scale})"
+    );
+    assert_eq!(
+        buckets.len(),
+        exp_len,
+        "{label}: bucket len mismatch (scale={scale})"
+    );
+
+    for pos in 0..buckets.len() {
+        let idx = exp_min_idx + pos as i32;
+        let exp_count = expected.get(&idx).copied().unwrap_or(0);
+        let act_count = buckets.at(pos);
+        assert_eq!(
+            act_count,
+            exp_count,
+            "{label}: bucket[{pos}] (idx {idx}): hist={act_count} expected={exp_count} (scale={scale}, width={:?})",
+            buckets.width()
+        );
+    }
+}

@@ -14,8 +14,10 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::{Histogram, Mapping};
-use std::collections::BTreeMap;
+use otel_expohisto::Histogram;
+
+#[path = "verify.rs"]
+mod verify;
 
 /// Number of pooled Histogram<8> instances.
 const POOL: usize = 5;
@@ -34,9 +36,6 @@ struct Shadow {
 }
 
 impl Shadow {
-    fn count(&self) -> u64 {
-        self.ops.iter().map(|o| o.incr).sum()
-    }
     fn merge_from(&mut self, other: &Shadow) {
         self.ops.extend_from_slice(&other.ops);
     }
@@ -114,118 +113,12 @@ fn decode_increment(sel: u8) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn verify<const N: usize>(hist: &mut Histogram<N>, shadow: &Shadow, label: &str) {
-    let expected_count = shadow.count();
-    assert_eq!(
-        hist.count(),
-        expected_count,
-        "{}: count mismatch: hist={} expected={}",
-        label,
-        hist.count(),
-        expected_count,
-    );
-
-    if expected_count == 0 {
-        assert_eq!(hist.positive().len(), 0, "{}: should have no buckets", label);
-        return;
-    }
-
-    // -- min / max --
-    let expected_min = shadow.ops.iter().map(|o| o.value).fold(f64::INFINITY, f64::min);
-    let expected_max = shadow
+    let ops = shadow
         .ops
         .iter()
-        .map(|o| o.value)
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    assert_eq!(hist.min(), expected_min, "{}: min mismatch", label);
-    assert_eq!(hist.max(), expected_max, "{}: max mismatch", label);
-
-    // -- zero count --
-    let non_zero_total: u64 = shadow
-        .ops
-        .iter()
-        .filter(|o| o.value != 0.0)
-        .map(|o| o.incr)
-        .sum();
-    let expected_zero_count = expected_count - non_zero_total;
-
-    let count = hist.count();
-    let scale = hist.scale();
-    let buckets = hist.positive();
-    let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
-
-    assert!(
-        bucket_total <= count,
-        "{}: bucket total ({}) exceeds count ({})",
-        label,
-        bucket_total,
-        count,
-    );
-    let actual_zero_count = count - bucket_total;
-    assert_eq!(
-        actual_zero_count, expected_zero_count,
-        "{}: zero count mismatch (actual={}, expected={})",
-        label,
-        actual_zero_count,
-        expected_zero_count,
-    );
-
-    // -- bucket distribution at final scale --
-    if non_zero_total == 0 {
-        assert_eq!(buckets.len(), 0, "{}: expected no buckets", label);
-        return;
-    }
-
-    let mapping = Mapping::new(scale).expect("reported scale should be valid");
-
-    let mut expected_buckets: BTreeMap<i32, u64> = BTreeMap::new();
-    for op in &shadow.ops {
-        if op.value != 0.0 {
-            let idx = mapping.map_to_index(op.value);
-            *expected_buckets.entry(idx).or_insert(0) += op.incr;
-        }
-    }
-
-    let exp_min_idx = *expected_buckets.keys().next().unwrap();
-    let exp_max_idx = *expected_buckets.keys().last().unwrap();
-    let exp_len = (exp_max_idx - exp_min_idx + 1) as u32;
-
-    assert_eq!(
-        buckets.offset(),
-        exp_min_idx,
-        "{}: offset mismatch: hist={} expected={} (scale={})",
-        label,
-        buckets.offset(),
-        exp_min_idx,
-        scale,
-    );
-
-    assert_eq!(
-        buckets.len(),
-        exp_len,
-        "{}: bucket len mismatch: hist={} expected={} (scale={})",
-        label,
-        buckets.len(),
-        exp_len,
-        scale,
-    );
-
-    for pos in 0..buckets.len() {
-        let idx = exp_min_idx + pos as i32;
-        let exp_count = expected_buckets.get(&idx).copied().unwrap_or(0);
-        let act_count = buckets.at(pos);
-        assert_eq!(
-            act_count, exp_count,
-            "{}: bucket[{}] (idx {}): hist={} expected={} (scale={}, width={:?})",
-            label,
-            pos,
-            idx,
-            act_count,
-            exp_count,
-            scale,
-            buckets.width(),
-        );
-    }
+        .map(|o| (o.value, o.incr))
+        .collect::<Vec<_>>();
+    verify::verify_histogram(hist, &ops, label);
 }
 
 // ---------------------------------------------------------------------------

@@ -1915,8 +1915,7 @@ mod tests {
 
     #[test]
     fn test_auto_widen_u8_to_u16() {
-        let mut h: Histogram<16> = Histogram::new()
-            .with_literal_mode(false);
+        let mut h: Histogram<16> = Histogram::new().with_literal_mode(false);
         h.update_by_incr(1.0, 16).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
         h.update_by_incr(1.0, 239).unwrap();
@@ -1972,10 +1971,9 @@ mod tests {
 
     #[test]
     fn test_clear_resets_to_b4() {
-        let mut h: Histogram<16> =
-            Histogram::with_max_scale(3)
-                .with_min_bucket_width(BucketWidth::B4)
-                .with_literal_mode(false);
+        let mut h: Histogram<16> = Histogram::with_max_scale(3)
+            .with_min_bucket_width(BucketWidth::B4)
+            .with_literal_mode(false);
         h.update_by_incr(1.0, 16).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
         h.clear();
@@ -2499,116 +2497,66 @@ mod tests {
     }
 
     #[test]
-    fn test_narrow_u8_to_b4_all_ones() {
-        // 8 bytes, each = 1: should produce 8 nibbles each = 1 in low 32 bits
-        let input = pack_u8x8([1, 1, 1, 1, 1, 1, 1, 1]);
-        let result = narrow_u8_to_b4(input);
-        let expected = pack_b4x16([1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
+    fn test_narrow_u8_to_b4() {
+        let cases: &[([u8; 8], [u8; 16])] = &[
+            (
+                [1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                [15, 15, 15, 15, 15, 15, 15, 15],
+                [15, 15, 15, 15, 15, 15, 15, 15, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                [0, 1, 2, 3, 4, 5, 6, 7],
+                [0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                [15, 0, 8, 0, 3, 0, 1, 0],
+                [15, 0, 8, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ];
+        for (i, (input_bytes, expected_nibbles)) in cases.iter().enumerate() {
+            let result = narrow_u8_to_b4(pack_u8x8(*input_bytes));
+            let expected = pack_b4x16(*expected_nibbles);
+            assert_eq!(
+                result, expected,
+                "case {i}: got {result:#018x}, expected {expected:#018x}"
+            );
+        }
     }
 
     #[test]
-    fn test_narrow_u8_to_b4_max_values() {
-        // 8 bytes, each = 15 (max B4): should produce 8 nibbles each = 15
-        let input = pack_u8x8([15, 15, 15, 15, 15, 15, 15, 15]);
-        let result = narrow_u8_to_b4(input);
-        let expected = pack_b4x16([15, 15, 15, 15, 15, 15, 15, 15, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
-    }
-
-    #[test]
-    fn test_narrow_u8_to_b4_ascending() {
-        // 8 bytes: [0, 1, 2, 3, 4, 5, 6, 7] → 8 nibbles in order
-        let input = pack_u8x8([0, 1, 2, 3, 4, 5, 6, 7]);
-        let result = narrow_u8_to_b4(input);
-        let expected = pack_b4x16([0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
-    }
-
-    #[test]
-    fn test_narrow_u8_to_b4_scattered() {
-        // Specific pattern to test bit-compress ordering
-        let input = pack_u8x8([15, 0, 8, 0, 3, 0, 1, 0]);
-        let result = narrow_u8_to_b4(input);
-        let expected = pack_b4x16([15, 0, 8, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
-    }
-
-    #[test]
-    fn test_narrow_u16_to_u8_zeroes() {
+    fn test_narrow_u16_to_u8() {
         assert_eq!(narrow_u16_to_u8(0), 0);
+        let cases: &[([u16; 4], [u8; 8])] = &[
+            ([10, 20, 30, 40], [10, 20, 30, 40, 0, 0, 0, 0]),
+            ([255, 255, 255, 255], [255, 255, 255, 255, 0, 0, 0, 0]),
+        ];
+        for (i, (input_shorts, expected_bytes)) in cases.iter().enumerate() {
+            let result = narrow_u16_to_u8(pack_u16x4(*input_shorts));
+            let expected = pack_u8x8(*expected_bytes) & 0xFFFF_FFFF;
+            assert_eq!(
+                result, expected,
+                "case {i}: got {result:#018x}, expected {expected:#018x}"
+            );
+        }
     }
 
     #[test]
-    fn test_narrow_u16_to_u8_ascending() {
-        // 4 shorts: [10, 20, 30, 40] → 4 bytes in low 32 bits
-        let input = pack_u16x4([10, 20, 30, 40]);
-        let result = narrow_u16_to_u8(input);
-        let expected = pack_u8x8([10, 20, 30, 40, 0, 0, 0, 0]) & 0xFFFF_FFFF;
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
-    }
-
-    #[test]
-    fn test_narrow_u16_to_u8_max_values() {
-        // 4 shorts, each = 255 (max U8)
-        let input = pack_u16x4([255, 255, 255, 255]);
-        let result = narrow_u16_to_u8(input);
-        let expected = pack_u8x8([255, 255, 255, 255, 0, 0, 0, 0]) & 0xFFFF_FFFF;
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
-    }
-
-    #[test]
-    fn test_narrow_u32_to_u16_zeroes() {
+    fn test_narrow_u32_to_u16() {
         assert_eq!(narrow_u32_to_u16(0), 0);
-    }
-
-    #[test]
-    fn test_narrow_u32_to_u16_values() {
-        // 2 ints: [1000, 2000] → 2 shorts in low 32 bits
-        let input = pack_u32x2(1000, 2000);
-        let result = narrow_u32_to_u16(input);
-        let expected = (1000u64) | (2000u64 << 16);
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
-    }
-
-    #[test]
-    fn test_narrow_u32_to_u16_max_values() {
-        let input = pack_u32x2(65535, 65535);
-        let result = narrow_u32_to_u16(input);
-        let expected = (65535u64) | (65535u64 << 16);
-        assert_eq!(
-            result, expected,
-            "got {:#018x}, expected {:#018x}",
-            result, expected
-        );
+        let cases: &[(u32, u32, u64)] = &[
+            (1000, 2000, 1000 | (2000 << 16)),
+            (65535, 65535, 65535 | (65535 << 16)),
+        ];
+        for (i, &(a, b, expected)) in cases.iter().enumerate() {
+            let result = narrow_u32_to_u16(pack_u32x2(a, b));
+            assert_eq!(
+                result, expected,
+                "case {i}: got {result:#018x}, expected {expected:#018x}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2716,53 +2664,58 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_swar_has_overflow_b4_no_overflow() {
-        // All byte sums ≤ 15 → no overflow
-        let data = [pack_u8x8([15, 0, 8, 3, 1, 14, 7, 0])];
-        assert!(!swar_has_overflow(&data, BucketWidth::B4));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_b4_overflow() {
-        // One byte = 16 → overflow
-        let data = [pack_u8x8([15, 0, 16, 0, 0, 0, 0, 0])];
-        assert!(swar_has_overflow(&data, BucketWidth::B4));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u8_no_overflow() {
-        let data = [pack_u16x4([255, 0, 128, 1])];
-        assert!(!swar_has_overflow(&data, BucketWidth::U8));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u8_overflow() {
-        let data = [pack_u16x4([256, 0, 0, 0])];
-        assert!(swar_has_overflow(&data, BucketWidth::U8));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u16_no_overflow() {
-        let data = [pack_u32x2(65535, 0)];
-        assert!(!swar_has_overflow(&data, BucketWidth::U16));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u16_overflow() {
-        let data = [pack_u32x2(65536, 0)];
-        assert!(swar_has_overflow(&data, BucketWidth::U16));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u32_no_overflow() {
-        let data = [u32::MAX as u64];
-        assert!(!swar_has_overflow(&data, BucketWidth::U32));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u32_overflow() {
-        let data = [u32::MAX as u64 + 1];
-        assert!(swar_has_overflow(&data, BucketWidth::U32));
+    fn test_swar_has_overflow() {
+        let cases: &[(&[u64], BucketWidth, bool)] = &[
+            // B4: at-max → no overflow
+            (
+                &[pack_u8x8([15, 0, 8, 3, 1, 14, 7, 0])],
+                BucketWidth::B4,
+                false,
+            ),
+            // B4: one slot at 16 → overflow
+            (
+                &[pack_u8x8([15, 0, 16, 0, 0, 0, 0, 0])],
+                BucketWidth::B4,
+                true,
+            ),
+            // B4 boundary: all at max
+            (
+                &[pack_u8x8([15, 15, 15, 15, 15, 15, 15, 15])],
+                BucketWidth::B4,
+                false,
+            ),
+            // B4 boundary: one over
+            (
+                &[pack_u8x8([15, 15, 15, 16, 15, 15, 15, 15])],
+                BucketWidth::B4,
+                true,
+            ),
+            // U8: at-max
+            (&[pack_u16x4([255, 0, 128, 1])], BucketWidth::U8, false),
+            // U8: overflow
+            (&[pack_u16x4([256, 0, 0, 0])], BucketWidth::U8, true),
+            // U8 boundary: all at max
+            (&[pack_u16x4([255, 255, 255, 255])], BucketWidth::U8, false),
+            // U8 boundary: one over
+            (&[pack_u16x4([255, 255, 256, 255])], BucketWidth::U8, true),
+            // U16: at-max
+            (&[pack_u32x2(65535, 0)], BucketWidth::U16, false),
+            // U16: overflow
+            (&[pack_u32x2(65536, 0)], BucketWidth::U16, true),
+            // U16 boundary: all at max
+            (&[pack_u32x2(65535, 65535)], BucketWidth::U16, false),
+            // U32: at-max
+            (&[u32::MAX as u64], BucketWidth::U32, false),
+            // U32: overflow
+            (&[u32::MAX as u64 + 1], BucketWidth::U32, true),
+        ];
+        for (i, &(data, width, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                swar_has_overflow(data, width),
+                expected,
+                "case {i}: width={width:?} expected={expected}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3552,39 +3505,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_swar_has_overflow_b4_boundary_15() {
-        // Exactly 15 → not overflow
-        let data = [pack_u8x8([15, 15, 15, 15, 15, 15, 15, 15])];
-        assert!(!swar_has_overflow(&data, BucketWidth::B4));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_b4_boundary_16() {
-        // Exactly 16 in one slot → overflow
-        let data = [pack_u8x8([15, 15, 15, 16, 15, 15, 15, 15])];
-        assert!(swar_has_overflow(&data, BucketWidth::B4));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u8_boundary_255() {
-        let data = [pack_u16x4([255, 255, 255, 255])];
-        assert!(!swar_has_overflow(&data, BucketWidth::U8));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u8_boundary_256() {
-        let data = [pack_u16x4([255, 255, 256, 255])];
-        assert!(swar_has_overflow(&data, BucketWidth::U8));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_u16_boundary_65535() {
-        let data = [pack_u32x2(65535, 65535)];
-        assert!(!swar_has_overflow(&data, BucketWidth::U16));
-    }
-
-    #[test]
-    fn test_swar_has_overflow_multi_word_only_last() {
+    fn test_swar_has_overflow_multi_word() {
         // Overflow only in the last word — must still be detected.
         let data = [
             pack_u8x8([0, 0, 0, 0, 0, 0, 0, 0]),

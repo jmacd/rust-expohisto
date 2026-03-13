@@ -2,7 +2,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use otel_expohisto::{Histogram, Mapping, max_scale};
-use std::collections::BTreeMap;
+
+#[path = "verify.rs"]
+mod verify;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
@@ -40,98 +42,15 @@ fn check_histogram<const N: usize>(values: &[f64], literal_mode: bool) {
         }
     }
 
-    if inserted.is_empty() {
-        return;
-    }
+    let ops = inserted.iter().map(|&v| (v, 1u64)).collect::<Vec<_>>();
+    verify::verify_histogram(&mut hist, &ops, "histogram_oracle");
 
-    // ── 1. count ──────────────────────────────────────────────────────
-    assert_eq!(
-        hist.count(),
-        inserted.len() as u64,
-        "count mismatch: hist={} expected={}",
-        hist.count(),
-        inserted.len(),
-    );
-
-    // ── 2. min / max ──────────────────────────────────────────────────
-    let expected_min = inserted.iter().copied().fold(f64::INFINITY, f64::min);
-    let expected_max = inserted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
-    assert_eq!(hist.min(), expected_min, "min mismatch");
-    assert_eq!(hist.max(), expected_max, "max mismatch");
-
-    // ── 3. zero count ─────────────────────────────────────────────────
     let non_zero: Vec<f64> = inserted.iter().copied().filter(|&v| v != 0.0).collect();
-    let expected_zero_count = (inserted.len() - non_zero.len()) as u64;
-
-    let count = hist.count();
-    let scale = hist.scale();
-    let buckets = hist.positive();
-    let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
-
-    assert!(
-        bucket_total <= count,
-        "bucket total ({}) exceeds count ({})",
-        bucket_total,
-        count,
-    );
-    let actual_zero_count = count - bucket_total;
-
-    assert_eq!(
-        actual_zero_count, expected_zero_count,
-        "zero count mismatch",
-    );
-
-    // ── 4. bucket distribution at the final scale ─────────────────────
     if non_zero.is_empty() {
-        assert_eq!(buckets.len(), 0, "expected no buckets for all-zero input");
         return;
     }
 
-    let mapping = Mapping::new(scale).expect("reported scale should be valid");
-
-    // Build expected index → count map.
-    let mut expected: BTreeMap<i32, u64> = BTreeMap::new();
-    for &v in &non_zero {
-        let idx = mapping.map_to_index(v);
-        *expected.entry(idx).or_insert(0) += 1;
-    }
-
-    let exp_min_idx = *expected.keys().next().unwrap();
-    let exp_max_idx = *expected.keys().last().unwrap();
-    let exp_len = (exp_max_idx - exp_min_idx + 1) as u32;
-
-    // Compare offset.
-    assert_eq!(
-        buckets.offset(),
-        exp_min_idx,
-        "offset mismatch: hist={} expected={} (scale={})",
-        buckets.offset(),
-        exp_min_idx,
-        scale,
-    );
-
-    // Compare bucket count.
-    assert_eq!(
-        buckets.len(),
-        exp_len,
-        "bucket len mismatch: hist={} expected={} (scale={})",
-        buckets.len(),
-        exp_len,
-        scale,
-    );
-
-    // Compare each bucket value.
-    for pos in 0..buckets.len() {
-        let idx = exp_min_idx + pos as i32;
-        let exp_count = expected.get(&idx).copied().unwrap_or(0);
-        let act_count = buckets.at(pos);
-        assert_eq!(
-            act_count, exp_count,
-            "bucket[{}] (idx {}): hist={} expected={} (scale={}, width={:?})",
-            pos, idx, act_count, exp_count, scale, buckets.width(),
-        );
-    }
+    let scale = hist.scale();
 
     // ── 5. scale optimality ───────────────────────────────────────────
     // Verify that the scale is the highest one where the index span

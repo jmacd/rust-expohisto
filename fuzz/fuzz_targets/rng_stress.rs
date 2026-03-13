@@ -20,8 +20,10 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::{Histogram, Mapping};
-use std::collections::BTreeMap;
+use otel_expohisto::Histogram;
+
+#[path = "verify.rs"]
+mod verify;
 
 // ---------------------------------------------------------------------------
 // PRNG — xorshift64*: fast, deterministic, good distribution
@@ -232,14 +234,7 @@ fn run<const N: usize, const M: usize>(cfg: &Config) {
     }
 
     // ===== PASS 2: ORACLE =====
-    let scale = hist.scale();
-    let mapping = Mapping::new(scale).expect("scale should be valid");
-
-    let mut exp_count = 0u64;
-    let mut exp_zero_count = 0u64;
-    let mut exp_min = f64::INFINITY;
-    let mut exp_max = f64::NEG_INFINITY;
-    let mut exp_buckets: BTreeMap<i32, u64> = BTreeMap::new();
+    let mut ops = Vec::with_capacity((n_inserted + merge_inserted) as usize);
 
     // Replay primary values.
     let mut rng = Rng::new(cfg.seed);
@@ -250,15 +245,7 @@ fn run<const N: usize, const M: usize>(cfg: &Config) {
             if oracle_n > n_inserted {
                 break;
             }
-            exp_count += 1;
-            if v == 0.0 {
-                exp_zero_count += 1;
-            } else {
-                exp_min = exp_min.min(v);
-                exp_max = exp_max.max(v);
-                let idx = mapping.map_to_index(v);
-                *exp_buckets.entry(idx).or_insert(0) += 1;
-            }
+            ops.push((v, 1u64));
         }
     }
 
@@ -272,102 +259,23 @@ fn run<const N: usize, const M: usize>(cfg: &Config) {
                 if oracle_m > merge_inserted {
                     break;
                 }
-                exp_count += 1;
-                if v == 0.0 {
-                    exp_zero_count += 1;
-                } else {
-                    exp_min = exp_min.min(v);
-                    exp_max = exp_max.max(v);
-                    let idx = mapping.map_to_index(v);
-                    *exp_buckets.entry(idx).or_insert(0) += 1;
-                }
+                ops.push((v, 1u64));
             }
         }
     }
 
     // ===== COMPARE =====
-    assert_eq!(
-        hist.count(), exp_count,
-        "count mismatch: hist={} oracle={}",
-        hist.count(), exp_count,
-    );
-
-    if exp_count == 0 {
-        assert_eq!(hist.positive().len(), 0, "should have no buckets");
-        return;
-    }
-
-    assert_eq!(
-        hist.min(), exp_min,
-        "min mismatch: hist={} oracle={}",
-        hist.min(), exp_min,
-    );
-    assert_eq!(
-        hist.max(), exp_max,
-        "max mismatch: hist={} oracle={}",
-        hist.max(), exp_max,
-    );
-
-    // Bucket totals.
-    let count = hist.count();
-    let buckets = hist.positive();
-    let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
-
-    assert!(
-        bucket_total <= count,
-        "bucket total ({}) exceeds count ({})",
-        bucket_total, count,
-    );
-
-    let actual_zero_count = count - bucket_total;
-    assert_eq!(
-        actual_zero_count, exp_zero_count,
-        "zero count mismatch: hist={} oracle={}",
-        actual_zero_count, exp_zero_count,
-    );
-
-    // Bucket distribution at final scale.
-    let exp_non_zero: u64 = exp_buckets.values().sum();
-    if exp_non_zero == 0 {
-        assert_eq!(buckets.len(), 0, "expected no buckets");
-        return;
-    }
-
-    let exp_min_idx = *exp_buckets.keys().next().unwrap();
-    let exp_max_idx = *exp_buckets.keys().last().unwrap();
-    let exp_len = (exp_max_idx - exp_min_idx + 1) as u32;
-
-    assert_eq!(
-        buckets.offset(), exp_min_idx,
-        "offset mismatch: hist={} oracle={} (scale={})",
-        buckets.offset(), exp_min_idx, scale,
-    );
-
-    assert_eq!(
-        buckets.len(), exp_len,
-        "bucket len mismatch: hist={} oracle={} (scale={}, width={:?})",
-        buckets.len(), exp_len, scale, buckets.width(),
-    );
+    verify::verify_histogram(&mut hist, &ops, "rng_stress");
 
     // No trailing/leading zero buckets.
+    let scale = hist.scale();
+    let buckets = hist.positive();
     if buckets.len() > 0 {
         assert!(buckets.at(0) > 0, "leading zero bucket at scale={}", scale);
         assert!(
             buckets.at(buckets.len() - 1) > 0,
             "trailing zero bucket at scale={}",
             scale,
-        );
-    }
-
-    // Per-bucket verification.
-    for pos in 0..buckets.len() {
-        let idx = exp_min_idx + pos as i32;
-        let exp = exp_buckets.get(&idx).copied().unwrap_or(0);
-        let act = buckets.at(pos);
-        assert_eq!(
-            act, exp,
-            "bucket[{pos}] (idx {idx}): hist={act} oracle={exp}                      (scale={scale}, width={:?})",
-            buckets.width(),
         );
     }
 }

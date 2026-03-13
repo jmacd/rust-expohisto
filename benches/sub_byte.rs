@@ -16,21 +16,11 @@
 //!    including the benefit of starting wider (skip sub-byte entirely).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{BucketWidth, Histogram, Mapping};
+use otel_expohisto::{BucketWidth, Histogram};
 
-/// Generate `count` distinct values that each land in a unique bucket at
-/// the given scale. Uses lower_boundary midpoints to guarantee distinct indices.
-fn unique_values(scale: i32, count: usize) -> Vec<f64> {
-    let m = Mapping::new(scale).unwrap();
-    // Start from index 0, generate midpoints of consecutive buckets.
-    let mut vals = Vec::with_capacity(count);
-    for i in 0..count as i32 {
-        let lo = m.lower_boundary(i).unwrap_or(1.0);
-        let hi = m.lower_boundary(i + 1).unwrap_or(lo * 1.001);
-        vals.push((lo + hi) / 2.0);
-    }
-    vals
-}
+mod common;
+
+use common::unique_values;
 
 fn bench_sub_byte(c: &mut Criterion) {
     // Use scale 0 so bucket indices are small and we focus on counter ops.

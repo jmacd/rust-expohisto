@@ -1,8 +1,10 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::{Histogram, Mapping};
-use std::collections::BTreeMap;
+use otel_expohisto::Histogram;
+
+#[path = "verify.rs"]
+mod verify;
 
 /// A weighted insert operation: record `value` with multiplicity `incr`.
 #[derive(Clone, Copy)]
@@ -177,103 +179,9 @@ fn check_merge_different<const N: usize, const M: usize>(
 // ---------------------------------------------------------------------------
 
 fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, inserted: &[Op]) {
-    // ── 1. count ──────────────────────────────────────────────────────
-    let total_count: u64 = inserted.iter().map(|op| op.incr).sum();
-    if total_count == 0 {
-        assert_eq!(hist.count(), 0, "count should be 0 for empty input");
-        return;
-    }
-
-    assert_eq!(
-        hist.count(),
-        total_count,
-        "count mismatch: hist={} expected={}",
-        hist.count(),
-        total_count,
-    );
-
-    // ── 2. min / max ──────────────────────────────────────────────────
-    let expected_min = inserted.iter().map(|op| op.value).fold(f64::INFINITY, f64::min);
-    let expected_max = inserted
+    let ops = inserted
         .iter()
-        .map(|op| op.value)
-        .fold(f64::NEG_INFINITY, f64::max);
-
-    assert_eq!(hist.min(), expected_min, "min mismatch");
-    assert_eq!(hist.max(), expected_max, "max mismatch");
-
-    // ── 3. zero count ─────────────────────────────────────────────────
-    let non_zero_total: u64 = inserted
-        .iter()
-        .filter(|op| op.value != 0.0)
-        .map(|op| op.incr)
-        .sum();
-    let expected_zero_count = total_count - non_zero_total;
-
-    let count = hist.count();
-    let scale = hist.scale();
-    let buckets = hist.positive();
-    let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
-
-    assert!(
-        bucket_total <= count,
-        "bucket total ({}) exceeds count ({})",
-        bucket_total,
-        count,
-    );
-    let actual_zero_count = count - bucket_total;
-
-    assert_eq!(
-        actual_zero_count, expected_zero_count,
-        "zero count mismatch",
-    );
-
-    // ── 4. bucket distribution at the final scale ─────────────────────
-    if non_zero_total == 0 {
-        assert_eq!(buckets.len(), 0, "expected no buckets for all-zero input");
-        return;
-    }
-
-    let mapping = Mapping::new(scale).expect("reported scale should be valid");
-
-    let mut expected: BTreeMap<i32, u64> = BTreeMap::new();
-    for op in inserted {
-        if op.value != 0.0 {
-            let idx = mapping.map_to_index(op.value);
-            *expected.entry(idx).or_insert(0) += op.incr;
-        }
-    }
-
-    let exp_min_idx = *expected.keys().next().unwrap();
-    let exp_max_idx = *expected.keys().last().unwrap();
-    let exp_len = (exp_max_idx - exp_min_idx + 1) as u32;
-
-    assert_eq!(
-        buckets.offset(),
-        exp_min_idx,
-        "offset mismatch: hist={} expected={} (scale={})",
-        buckets.offset(),
-        exp_min_idx,
-        scale,
-    );
-
-    assert_eq!(
-        buckets.len(),
-        exp_len,
-        "bucket len mismatch: hist={} expected={} (scale={})",
-        buckets.len(),
-        exp_len,
-        scale,
-    );
-
-    for pos in 0..buckets.len() {
-        let idx = exp_min_idx + pos as i32;
-        let exp_count = expected.get(&idx).copied().unwrap_or(0);
-        let act_count = buckets.at(pos);
-        assert_eq!(
-            act_count, exp_count,
-            "bucket[{}] (idx {}): hist={} expected={} (scale={}, width={:?})",
-            pos, idx, act_count, exp_count, scale, buckets.width(),
-        );
-    }
+        .map(|op| (op.value, op.incr))
+        .collect::<Vec<_>>();
+    verify::verify_histogram(hist, &ops, "merge");
 }
