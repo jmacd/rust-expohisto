@@ -1717,22 +1717,20 @@ impl<const N: usize> Histogram<N> {
 mod tests {
     use super::*;
 
+    /// Helper: count total across all positive buckets.
+    fn bucket_total<const N: usize>(h: &mut Histogram<N>) -> u64 {
+        h.positive().iter().sum()
+    }
+
     fn derived_zero_count<const N: usize>(h: &mut Histogram<N>) -> u64 {
-        let non_zero: u64 = {
-            let buckets = h.positive();
-            (0..buckets.len()).map(|i| buckets.at(i)).sum()
-        };
-        h.count() - non_zero
+        h.count() - bucket_total(h)
     }
 
     #[test]
     fn test_histogram_basic() {
         let mut h: Histogram<16> = Histogram::new();
         h.update(1.0).unwrap();
-        assert_eq!(h.count(), 1);
-        assert_eq!(h.sum(), 1.0);
-        assert_eq!(h.min(), 1.0);
-        assert_eq!(h.max(), 1.0);
+        assert_stats(&h, 1, 1.0, 1.0, 1.0);
         assert_eq!(derived_zero_count(&mut h), 0);
         assert_eq!(h.bucket_width(), BucketWidth::B1);
     }
@@ -1752,10 +1750,7 @@ mod tests {
         h.update(1.0).unwrap();
         h.update(2.0).unwrap();
         h.update(4.0).unwrap();
-        assert_eq!(h.count(), 3);
-        assert_eq!(h.sum(), 7.0);
-        assert_eq!(h.min(), 1.0);
-        assert_eq!(h.max(), 4.0);
+        assert_stats(&h, 3, 7.0, 1.0, 4.0);
     }
 
     #[test]
@@ -1776,10 +1771,7 @@ mod tests {
         h2.update(3.0).unwrap();
         h2.update(4.0).unwrap();
         h1.merge_from(&h2).unwrap();
-        assert_eq!(h1.count(), 4);
-        assert_eq!(h1.sum(), 10.0);
-        assert_eq!(h1.min(), 1.0);
-        assert_eq!(h1.max(), 4.0);
+        assert_stats(&h1, 4, 10.0, 1.0, 4.0);
     }
 
     #[test]
@@ -1997,62 +1989,36 @@ mod tests {
     fn test_merge_equivalence_for_size<const K: usize>(test_sets: &[Vec<f64>]) {
         for (i, set_a) in test_sets.iter().enumerate() {
             for (j, set_b) in test_sets.iter().enumerate() {
-                let mut merged: Histogram<K> = Histogram::new();
-                for &v in set_a {
-                    merged.update(v).unwrap();
-                }
-                let mut other: Histogram<K> = Histogram::new();
-                for (vi, &v) in set_b.iter().enumerate() {
-                    if let Err(e) = other.update(v) {
-                        panic!("other.update failed for size={K} sets {i} x {j} val[{vi}]={v}: {e}\n  set_b: {set_b:?}\n  other: {:?}", other);
-                    }
-                }
+                let mut merged = build_from_values::<K>(set_a);
+                let other = build_from_values::<K>(set_b);
                 if let Err(e) = merged.merge_from(&other) {
                     panic!("merge_from failed for size={K} sets {i} x {j}: {e}\n  set_a: {set_a:?}\n  set_b: {set_b:?}\n  merged: {:?}\n  other: {:?}", merged, other);
                 }
 
-                let mut single: Histogram<K> = Histogram::new();
-                for &v in set_a {
-                    single.update(v).unwrap();
-                }
-                for &v in set_b {
+                let mut single = build_from_values::<K>(set_a);
+                for &v in set_b.iter() {
                     single.update(v).unwrap();
                 }
 
-                assert_eq!(
-                    merged.count(),
-                    single.count(),
-                    "count mismatch for size={K} sets {i} x {j}"
-                );
-                // Order-of-operations rounding can differ between merged
-                // and single paths. Use relative tolerance.
+                let label = format!("size={K} sets {i} x {j}");
+                assert_eq!(merged.count(), single.count(), "count mismatch for {label}");
                 let ms = merged.sum();
                 let ss = single.sum();
                 let sum_diff = (ms - ss).abs();
                 let denom = ms.abs().max(ss.abs()).max(1e-30);
                 assert!(
                     sum_diff / denom < 1e-5,
-                    "sum mismatch for size={K} sets {i} x {j}: {} vs {}",
-                    ms,
-                    ss
+                    "sum mismatch for {label}: {ms} vs {ss}"
                 );
                 assert_eq!(
                     derived_zero_count(&mut merged),
                     derived_zero_count(&mut single),
-                    "zero_count mismatch for size={K} sets {i} x {j}"
+                    "zero_count mismatch for {label}"
                 );
-
-                let m_total: u64 = {
-                    let mb = merged.positive();
-                    (0..mb.len()).map(|k| mb.at(k)).sum()
-                };
-                let s_total: u64 = {
-                    let sb = single.positive();
-                    (0..sb.len()).map(|k| sb.at(k)).sum()
-                };
                 assert_eq!(
-                    m_total, s_total,
-                    "bucket total mismatch for size={K} sets {i} x {j}"
+                    bucket_total(&mut merged),
+                    bucket_total(&mut single),
+                    "bucket total mismatch for {label}"
                 );
             }
         }
@@ -2069,42 +2035,28 @@ mod tests {
             16.963914020801518,
         ];
 
+        // Verify incremental bucket totals while building.
         let mut other: Histogram<8> = Histogram::new();
         for &v in set_b {
             other.update(v).unwrap();
-            let bv = other.positive();
-            let btotal: u64 = (0..bv.len()).map(|k| bv.at(k)).sum();
+            let bt = bucket_total(&mut other);
             let non_zero_count = other.count() - derived_zero_count(&mut other);
-            assert_eq!(
-                btotal, non_zero_count,
-                "bucket total mismatch after inserting {}",
-                v
-            );
+            assert_eq!(bt, non_zero_count, "bucket total mismatch after inserting {v}");
         }
 
         let set_a: &[f64] = &[1.0];
-        let mut merged: Histogram<8> = Histogram::new();
-        for &v in set_a {
-            merged.update(v).unwrap();
-        }
+        let mut merged = build_from_values::<8>(set_a);
         merged.merge_from(&other).unwrap();
 
-        let mut single: Histogram<8> = Histogram::new();
-        for &v in set_a {
-            single.update(v).unwrap();
-        }
+        let mut single = build_from_values::<8>(set_a);
         for &v in set_b {
             single.update(v).unwrap();
         }
 
-        let mb = merged.positive();
-        let sb = single.positive();
-        let m_total: u64 = (0..mb.len()).map(|k| mb.at(k)).sum();
-        let s_total: u64 = (0..sb.len()).map(|k| sb.at(k)).sum();
         assert_eq!(
-            m_total, s_total,
-            "bucket total mismatch: merged={} single={}",
-            m_total, s_total
+            bucket_total(&mut merged),
+            bucket_total(&mut single),
+            "bucket total mismatch: merged vs single"
         );
     }
 
@@ -2237,10 +2189,6 @@ mod tests {
         );
         assert_eq!(h.count(), target);
     }
-
-    // -----------------------------------------------------------------------
-    // Cross-size merge tests
-    // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // Cross-size merge tests
@@ -2394,6 +2342,104 @@ mod tests {
         (lo as u64) | ((hi as u64) << 32)
     }
 
+    /// Asserts `swar_narrow_compact` produces `expected` prefix words
+    /// and zeroes all freed tail words.
+    fn assert_compact(width: BucketWidth, input: &[u64], expected: &[u64]) {
+        let mut data = [0u64; 8];
+        data[..input.len()].copy_from_slice(input);
+        swar_narrow_compact(&mut data[..input.len()], width);
+        for (i, &exp) in expected.iter().enumerate() {
+            assert_eq!(
+                data[i], exp,
+                "word {i}: got {:#018x}, expected {:#018x}",
+                data[i], exp
+            );
+        }
+        for (i, word) in data[expected.len()..input.len()].iter().enumerate() {
+            assert_eq!(*word, 0, "word {} should be zeroed", expected.len() + i);
+        }
+    }
+
+    /// Runs the full SWAR pipeline (step → overflow check → optional compact)
+    /// and asserts the result.
+    fn assert_swar_roundtrip(
+        width: BucketWidth,
+        input: &[u64],
+        expect_overflow: bool,
+        expected_after_step: &[u64],
+        expected_after_compact: Option<&[u64]>,
+    ) {
+        let mut data = [0u64; 8];
+        data[..input.len()].copy_from_slice(input);
+        let slice = &mut data[..input.len()];
+
+        swar_step(slice, width);
+        for (i, &exp) in expected_after_step.iter().enumerate() {
+            assert_eq!(
+                slice[i], exp,
+                "swar_step word {i}: got {:#018x}, expected {:#018x}",
+                slice[i], exp
+            );
+        }
+
+        assert_eq!(
+            swar_has_overflow(slice, width),
+            expect_overflow,
+            "overflow mismatch"
+        );
+
+        if let Some(expected) = expected_after_compact {
+            swar_narrow_compact(slice, width);
+            for (i, &exp) in expected.iter().enumerate() {
+                assert_eq!(
+                    slice[i], exp,
+                    "compact word {i}: got {:#018x}, expected {:#018x}",
+                    slice[i], exp
+                );
+            }
+            for (i, word) in slice[expected.len()..input.len()].iter().enumerate() {
+                assert_eq!(*word, 0, "word {} should be zeroed after compact", expected.len() + i);
+            }
+        }
+    }
+
+    /// Helper for asserting `Stats` fields.
+    fn assert_stats<const N: usize>(
+        h: &Histogram<N>,
+        count: u64,
+        sum: f64,
+        min: f64,
+        max: f64,
+    ) {
+        assert_eq!(h.count(), count, "count");
+        assert_eq!(h.sum(), sum, "sum");
+        assert_eq!(h.min(), min, "min");
+        assert_eq!(h.max(), max, "max");
+    }
+
+    /// Builds a literal-mode and a bucket-mode histogram from the same
+    /// values and asserts they produce equivalent views.
+    fn assert_literal_matches_bucket(values: &[f64]) {
+        let mut lit: Histogram<8> = Histogram::new();
+        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
+        for &v in values {
+            lit.update(v).unwrap();
+            bkt.update(v).unwrap();
+        }
+        assert_eq!(lit.scale(), bkt.scale(), "scale mismatch");
+        assert_eq!(lit.count(), bkt.count(), "count mismatch");
+        assert_eq!(lit.sum(), bkt.sum(), "sum mismatch");
+        assert_eq!(lit.positive().offset(), bkt.positive().offset(), "offset");
+        assert_eq!(lit.positive().len(), bkt.positive().len(), "len");
+        for i in 0..lit.positive().len() {
+            assert_eq!(
+                lit.positive().at(i),
+                bkt.positive().at(i),
+                "bucket[{i}] mismatch"
+            );
+        }
+    }
+
     #[test]
     fn test_narrow_u8_to_b4_zeroes() {
         assert_eq!(narrow_word(0, BucketWidth::B4), 0);
@@ -2467,99 +2513,87 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_swar_narrow_compact_b4_two_words() {
-        // Two words of U8 data (result of swar_step on B4), each byte ≤ 15.
-        // Word 0: slots [0..7] = [1,2,3,4,5,6,7,8]
-        // Word 1: slots [8..15] = [9,10,11,12,13,14,15,0]
-        // After compact: one word of 16 nibbles in original B4 format.
-        let mut data = [
-            pack_u8x8([1, 2, 3, 4, 5, 6, 7, 8]),
-            pack_u8x8([9, 10, 11, 12, 13, 14, 15, 0]),
-        ];
-        swar_narrow_compact(&mut data, BucketWidth::B4);
-
-        // Expect one word with 16 nibbles: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0]
-        let expected = pack_b4x16([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0]);
-        assert_eq!(
-            data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}",
-            data[0], expected
+    fn test_swar_narrow_compact_two_words() {
+        // B4: 2 words of U8 → 1 word of B4
+        assert_compact(
+            BucketWidth::B4,
+            &[
+                pack_u8x8([1, 2, 3, 4, 5, 6, 7, 8]),
+                pack_u8x8([9, 10, 11, 12, 13, 14, 15, 0]),
+            ],
+            &[pack_b4x16([
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0,
+            ])],
         );
-        assert_eq!(data[1], 0, "word 1 should be zeroed");
+        // U8: 2 words of U16 → 1 word of U8
+        assert_compact(
+            BucketWidth::U8,
+            &[pack_u16x4([10, 20, 30, 40]), pack_u16x4([50, 60, 70, 80])],
+            &[pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80])],
+        );
+        // U16: 2 words of U32 → 1 word of U16
+        assert_compact(
+            BucketWidth::U16,
+            &[pack_u32x2(100, 200), pack_u32x2(300, 400)],
+            &[pack_u16x4([100, 200, 300, 400])],
+        );
+        // U32: 2 words of U64 → 1 word of U32
+        assert_compact(
+            BucketWidth::U32,
+            &[1000u64, 2000u64],
+            &[pack_u32x2(1000, 2000)],
+        );
     }
 
     #[test]
-    fn test_swar_narrow_compact_b4_four_words() {
-        // Four words of U8 data → two words of B4 data.
-        let mut data = [
-            pack_u8x8([1, 0, 0, 0, 0, 0, 0, 0]),
-            pack_u8x8([0, 0, 0, 0, 0, 0, 0, 2]),
-            pack_u8x8([3, 0, 0, 0, 0, 0, 0, 0]),
-            pack_u8x8([0, 0, 0, 0, 0, 0, 0, 4]),
-        ];
-        swar_narrow_compact(&mut data, BucketWidth::B4);
-
-        let expected0 = pack_b4x16([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
-        let expected1 = pack_b4x16([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]);
-        assert_eq!(
-            data[0], expected0,
-            "word 0: got {:#018x}, expected {:#018x}",
-            data[0], expected0
+    fn test_swar_narrow_compact_four_words() {
+        // B4: 4 words of U8 → 2 words of B4
+        assert_compact(
+            BucketWidth::B4,
+            &[
+                pack_u8x8([1, 0, 0, 0, 0, 0, 0, 0]),
+                pack_u8x8([0, 0, 0, 0, 0, 0, 0, 2]),
+                pack_u8x8([3, 0, 0, 0, 0, 0, 0, 0]),
+                pack_u8x8([0, 0, 0, 0, 0, 0, 0, 4]),
+            ],
+            &[
+                pack_b4x16([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+                pack_b4x16([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]),
+            ],
         );
-        assert_eq!(
-            data[1], expected1,
-            "word 1: got {:#018x}, expected {:#018x}",
-            data[1], expected1
-        );
-        assert_eq!(data[2], 0, "word 2 should be zeroed");
-        assert_eq!(data[3], 0, "word 3 should be zeroed");
     }
 
     #[test]
-    fn test_swar_narrow_compact_u8_two_words() {
-        // Two words of U16 data (result of swar_step on U8), each ≤ 255.
-        // Word 0: [10, 20, 30, 40]  Word 1: [50, 60, 70, 80]
-        // After compact: one word of 8 bytes.
-        let mut data = [pack_u16x4([10, 20, 30, 40]), pack_u16x4([50, 60, 70, 80])];
-        swar_narrow_compact(&mut data, BucketWidth::U8);
+    fn test_swar_narrow_compact_odd_word_counts() {
+        // B4: 1 word → in-place narrow
+        let input = [pack_u8x8([3, 7, 0, 15, 0, 0, 5, 6])];
+        let expected = narrow_word(input[0], BucketWidth::B4);
+        assert_compact(BucketWidth::B4, &input, &[expected]);
 
-        let expected = pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]);
-        assert_eq!(
-            data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}",
-            data[0], expected
+        // B4: 3 words → 2 compacted words
+        let w0 = pack_u8x8([1, 0, 0, 0, 0, 0, 0, 0]);
+        let w1 = pack_u8x8([0, 0, 0, 0, 0, 0, 0, 2]);
+        let w2 = pack_u8x8([3, 0, 0, 0, 0, 0, 0, 4]);
+        let lo0 = narrow_word(w0, BucketWidth::B4);
+        let hi0 = narrow_word(w1, BucketWidth::B4);
+        let lo1 = narrow_word(w2, BucketWidth::B4);
+        assert_compact(
+            BucketWidth::B4,
+            &[w0, w1, w2],
+            &[lo0 | (hi0 << 32), lo1],
         );
-        assert_eq!(data[1], 0, "word 1 should be zeroed");
-    }
 
-    #[test]
-    fn test_swar_narrow_compact_u16_two_words() {
-        // Two words of U32 data, each ≤ 65535.
-        let mut data = [pack_u32x2(100, 200), pack_u32x2(300, 400)];
-        swar_narrow_compact(&mut data, BucketWidth::U16);
-
-        let expected = pack_u16x4([100, 200, 300, 400]);
-        assert_eq!(
-            data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}",
-            data[0], expected
+        // U8: 3 words → 2 compacted words
+        let expected1 = narrow_word(pack_u16x4([255, 0, 128, 1]), BucketWidth::U8);
+        assert_compact(
+            BucketWidth::U8,
+            &[
+                pack_u16x4([10, 20, 30, 40]),
+                pack_u16x4([50, 60, 70, 80]),
+                pack_u16x4([255, 0, 128, 1]),
+            ],
+            &[pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]), expected1],
         );
-        assert_eq!(data[1], 0, "word 1 should be zeroed");
-    }
-
-    #[test]
-    fn test_swar_narrow_compact_u32_two_words() {
-        // Two words of U64 data, each ≤ u32::MAX.
-        let mut data = [1000u64, 2000u64];
-        swar_narrow_compact(&mut data, BucketWidth::U32);
-
-        let expected = pack_u32x2(1000, 2000);
-        assert_eq!(
-            data[0], expected,
-            "word 0: got {:#018x}, expected {:#018x}",
-            data[0], expected
-        );
-        assert_eq!(data[1], 0, "word 1 should be zeroed");
     }
 
     // -----------------------------------------------------------------------
@@ -2626,127 +2660,65 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_swar_step_then_narrow_compact_b4_roundtrip() {
-        // Start with 2 words of B4 data (32 nibbles).
-        // Pair sums: nibbles [0]+[1], [2]+[3], ... → 16 values in U8
-        // If all sums ≤ 15, narrow back to 1 word of B4 (16 nibbles).
-        //
-        // Word 0: nibbles [1,2,3,4, 0,0,0,0, 0,0,0,0, 0,0,0,0]
-        // Word 1: nibbles [0,0,0,0, 0,0,0,0, 0,0,0,0, 5,0,6,0]
-        let mut data = [
-            pack_b4x16([1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            pack_b4x16([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 6, 0]),
-        ];
-
-        // Step 1: SWAR pairwise sum (B4 → U8)
-        swar_step(&mut data, BucketWidth::B4);
-
-        // After swar_step, each word has 8 bytes = pairwise sums:
-        // Word 0: bytes [1+2, 3+4, 0+0, 0+0, 0+0, 0+0, 0+0, 0+0] = [3,7,0,0,0,0,0,0]
-        // Word 1: bytes [0+0, 0+0, 0+0, 0+0, 0+0, 0+0, 5+0, 6+0] = [0,0,0,0,0,0,5,6]
-        assert_eq!(
-            data[0],
-            pack_u8x8([3, 7, 0, 0, 0, 0, 0, 0]),
-            "swar_step word 0: got {:#018x}",
-            data[0]
-        );
-        assert_eq!(
-            data[1],
-            pack_u8x8([0, 0, 0, 0, 0, 0, 5, 6]),
-            "swar_step word 1: got {:#018x}",
-            data[1]
+    fn test_swar_step_then_narrow_compact_roundtrip() {
+        // B4: pair sums ≤ 15 → compact back to B4
+        assert_swar_roundtrip(
+            BucketWidth::B4,
+            &[
+                pack_b4x16([1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                pack_b4x16([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 6, 0]),
+            ],
+            false,
+            &[
+                pack_u8x8([3, 7, 0, 0, 0, 0, 0, 0]),
+                pack_u8x8([0, 0, 0, 0, 0, 0, 5, 6]),
+            ],
+            Some(&[pack_b4x16([
+                3, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6,
+            ])]),
         );
 
-        // Step 2: No overflow (all ≤ 15)
-        assert!(!swar_has_overflow(&data, BucketWidth::B4));
-
-        // Step 3: Narrow + compact (U8 → B4, 2 words → 1 word)
-        swar_narrow_compact(&mut data, BucketWidth::B4);
-
-        // Result: 1 word of 16 nibbles = [3,7,0,0,0,0,0,0, 0,0,0,0,0,0,5,6]
-        let expected = pack_b4x16([3, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6]);
-        assert_eq!(
-            data[0], expected,
-            "compact result: got {:#018x}, expected {:#018x}",
-            data[0], expected
+        // U8: pair sums ≤ 255 → compact back to U8
+        assert_swar_roundtrip(
+            BucketWidth::U8,
+            &[
+                pack_u8x8([100, 50, 30, 20, 10, 5, 3, 1]),
+                pack_u8x8([0, 0, 0, 0, 0, 0, 0, 0]),
+            ],
+            false,
+            &[pack_u16x4([150, 50, 15, 4]), pack_u16x4([0, 0, 0, 0])],
+            Some(&[pack_u8x8([150, 50, 15, 4, 0, 0, 0, 0])]),
         );
-        assert_eq!(data[1], 0, "freed word should be zero");
+
+        // U16: pair sums ≤ 65535 → compact back to U16
+        assert_swar_roundtrip(
+            BucketWidth::U16,
+            &[pack_u16x4([1000, 2000, 3000, 4000]), pack_u16x4([0; 4])],
+            false,
+            &[pack_u32x2(3000, 7000), pack_u32x2(0, 0)],
+            Some(&[pack_u16x4([3000, 7000, 0, 0])]),
+        );
+
+        // U32: pair sum fits → compact back to U32
+        assert_swar_roundtrip(
+            BucketWidth::U32,
+            &[pack_u32x2(100_000, 200_000), pack_u32x2(0, 0)],
+            false,
+            &[300_000u64, 0],
+            Some(&[pack_u32x2(300_000, 0)]),
+        );
     }
 
     #[test]
-    fn test_swar_step_then_narrow_compact_b4_overflow() {
-        // Pair sums > 15 → overflow detected, keep widened result.
-        // Word 0: nibbles [8, 9, ...] → sum = 17, overflows B4.
+    fn test_swar_step_then_narrow_compact_overflow() {
+        // B4 pair sums > 15 → overflow, keep widened result
         let mut data = [
             pack_b4x16([8, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             pack_b4x16([0; 16]),
         ];
-
         swar_step(&mut data, BucketWidth::B4);
-        // Word 0 byte 0 = 8+9 = 17 > 15
         assert!(swar_has_overflow(&data, BucketWidth::B4));
-        // Do NOT compact — the widened U8 data is the final result.
         assert_eq!(data[0] & 0xFF, 17, "first byte sum should be 17");
-    }
-
-    #[test]
-    fn test_swar_step_then_narrow_compact_u8_roundtrip() {
-        // 2 words of U8 data (16 bytes). Pair sums each ≤ 255.
-        let mut data = [
-            pack_u8x8([100, 50, 30, 20, 10, 5, 3, 1]),
-            pack_u8x8([0, 0, 0, 0, 0, 0, 0, 0]),
-        ];
-
-        swar_step(&mut data, BucketWidth::U8);
-        // Pair sums: [150, 50, 15, 4, 0, 0, 0, 0] as U16
-        assert!(!swar_has_overflow(&data, BucketWidth::U8));
-
-        swar_narrow_compact(&mut data, BucketWidth::U8);
-        // 1 word of 8 bytes: [150, 50, 15, 4, 0, 0, 0, 0]
-        assert_eq!(
-            data[0],
-            pack_u8x8([150, 50, 15, 4, 0, 0, 0, 0]),
-            "compact result: got {:#018x}",
-            data[0]
-        );
-        assert_eq!(data[1], 0);
-    }
-
-    #[test]
-    fn test_swar_step_then_narrow_compact_u16_roundtrip() {
-        let mut data = [pack_u16x4([1000, 2000, 3000, 4000]), pack_u16x4([0; 4])];
-
-        swar_step(&mut data, BucketWidth::U16);
-        // Pair sums: [3000, 7000, 0, 0] as U32
-        assert!(!swar_has_overflow(&data, BucketWidth::U16));
-
-        swar_narrow_compact(&mut data, BucketWidth::U16);
-        // 1 word: [3000, 7000, 0, 0] as U16
-        assert_eq!(
-            data[0],
-            pack_u16x4([3000, 7000, 0, 0]),
-            "compact result: got {:#018x}",
-            data[0]
-        );
-        assert_eq!(data[1], 0);
-    }
-
-    #[test]
-    fn test_swar_step_then_narrow_compact_u32_roundtrip() {
-        let mut data = [pack_u32x2(100_000, 200_000), pack_u32x2(0, 0)];
-
-        swar_step(&mut data, BucketWidth::U32);
-        // Sum = 300_000 as U64
-        assert!(!swar_has_overflow(&data, BucketWidth::U32));
-
-        swar_narrow_compact(&mut data, BucketWidth::U32);
-        assert_eq!(
-            data[0],
-            pack_u32x2(300_000, 0),
-            "compact result: got {:#018x}",
-            data[0]
-        );
-        assert_eq!(data[1], 0);
     }
 
     // -----------------------------------------------------------------------
@@ -2754,76 +2726,37 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_do_downscale_merge_stays_b4() {
-        // Insert small values at adjacent indices so pair sums ≤ 15.
-        let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
-        // At scale 0, map_to_index(2.0) = 0, map_to_index(4.0) = 1.
-        // These are a pair (even, odd) that will sum via SWAR.
-        h.update_by_incr(2.0, 5).unwrap(); // index 0, count 5
-        h.update_by_incr(4.0, 7).unwrap(); // index 1, count 7
-        assert_eq!(h.bucket_width(), BucketWidth::B4);
+    fn test_do_downscale_width_behavior() {
+        // Helper: insert ops into a B4 histogram at scale 0,
+        // downscale(1), and verify the expected final width.
+        let check = |ops: &[(f64, u64)], expected_width: BucketWidth, label: &str| {
+            let mut h: Histogram<16> =
+                Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
+            for &(v, incr) in ops {
+                h.update_by_incr(v, incr).unwrap();
+            }
+            assert_eq!(h.bucket_width(), BucketWidth::B4, "{label}: pre-check");
+            assert_total_conserved(&mut h, 1);
+            assert_eq!(h.bucket_width(), expected_width, "{label}");
+        };
 
-        // Merge: 5+7=12 ≤ 15, should stay at B4.
-        h.do_downscale(1).unwrap();
-        assert_eq!(
-            h.bucket_width(),
-            BucketWidth::B4,
-            "width should be preserved when pair sums fit"
-        );
+        check(&[(2.0, 5), (4.0, 7)], BucketWidth::B4, "small sums stay B4");
+        check(&[(2.0, 10), (4.0, 10)], BucketWidth::U8, "overflow widens to U8");
+        check(&[(2.0, 15), (4.0, 15)], BucketWidth::U8, "max B4 overflow widens to U8");
     }
 
     #[test]
-    fn test_do_downscale_merge_widens_b4() {
-        // Insert values that sum to > 15 at B4.
-        let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
-        h.update_by_incr(2.0, 10).unwrap(); // index 0, count 10
-        h.update_by_incr(4.0, 10).unwrap(); // index 1, count 10
-        assert_eq!(h.bucket_width(), BucketWidth::B4);
-
-        // Merge: 10+10=20 > 15, should widen to U8.
-        h.do_downscale(1).unwrap();
-        assert_eq!(
-            h.bucket_width(),
-            BucketWidth::U8,
-            "width should widen when pair sums overflow"
-        );
-    }
-
-    #[test]
-    fn test_do_downscale_preserves_width_when_possible() {
-        // Fill histogram with small counts at many indices.
-        // Downscale should merge pairs without widening.
+    fn test_do_downscale_many_indices_preserves_width() {
+        // Many small counts at spread-out indices → pair sums ≤ 2, stays B4.
         let mut h: Histogram<16> = Histogram::with_scale(0)
             .with_min_bucket_width(BucketWidth::B4)
             .with_literal_mode(false);
-        // Insert 1 at each of several indices (all count=1, sums ≤ 2).
         for i in 0..8 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
         assert_eq!(h.bucket_width(), BucketWidth::B4);
-
-        let width_before = h.bucket_width();
-        h.do_downscale(1).unwrap();
-        assert_eq!(
-            h.bucket_width(),
-            width_before,
-            "width should be preserved when pair sums fit"
-        );
-    }
-
-    #[test]
-    fn test_do_downscale_widens_on_overflow() {
-        // Fill histogram with counts that will overflow on merge.
-        let mut h: Histogram<16> = Histogram::with_scale(0)
-            .with_min_bucket_width(BucketWidth::B4)
-            .with_literal_mode(false);
-        h.update_by_incr(2.0, 15).unwrap(); // index 0, count 15
-        h.update_by_incr(4.0, 15).unwrap(); // index 1, count 15
+        assert_total_conserved(&mut h, 1);
         assert_eq!(h.bucket_width(), BucketWidth::B4);
-
-        h.do_downscale(1).unwrap();
-        // 15+15=30 > 15, must widen to U8.
-        assert_eq!(h.bucket_width(), BucketWidth::U8);
     }
 
     // -----------------------------------------------------------------------
@@ -2832,38 +2765,10 @@ mod tests {
 
     #[test]
     fn test_merge_sets_6_x_10_bucket_totals() {
-        // set_a = [0.5, 1.5, 2.5], set_b = [5.0, 10.0, 15.0, 20.0]
-        // Merged via merge_from must equal sequential inserts.
-        let set_a = [0.5, 1.5, 2.5];
-        let set_b = [5.0, 10.0, 15.0, 20.0];
-
-        let mut merged: Histogram<8> = Histogram::new();
-        for &v in &set_a {
-            merged.update(v).unwrap();
-        }
-        let mut other: Histogram<8> = Histogram::new();
-        for &v in &set_b {
-            other.update(v).unwrap();
-        }
-        merged.merge_from(&other).unwrap();
-
-        let mut single: Histogram<8> = Histogram::new();
-        for &v in &set_a {
-            single.update(v).unwrap();
-        }
-        for &v in &set_b {
-            single.update(v).unwrap();
-        }
-
-        let mb = merged.positive();
-        let sb = single.positive();
-        let m_buckets: Vec<u64> = (0..mb.len()).map(|k| mb.at(k)).collect();
-        let s_buckets: Vec<u64> = (0..sb.len()).map(|k| sb.at(k)).collect();
-        let m_total: u64 = m_buckets.iter().sum();
-        let s_total: u64 = s_buckets.iter().sum();
-
-        assert_eq!(m_total, s_total,
-            "bucket total mismatch: merged={m_buckets:?} (sum={m_total}) vs single={s_buckets:?} (sum={s_total})");
+        // Merged via merge_from must produce same bucket total as sequential inserts.
+        let left: &[(f64, u64)] = &[(0.5, 1), (1.5, 1), (2.5, 1)];
+        let right: &[(f64, u64)] = &[(5.0, 1), (10.0, 1), (15.0, 1), (20.0, 1)];
+        merge_check::<8>(left, right, "sets_6_x_10");
     }
 
     // -----------------------------------------------------------------------
@@ -2871,51 +2776,42 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_swar_step_b4_single_word() {
-        // 16 nibbles: [1,2, 3,0, 0,0, 15,0, 0,0, 0,0, 0,0, 0,0]
-        // Pair sums → 8 bytes: [3, 3, 0, 15, 0, 0, 0, 0]
-        let mut data = [pack_b4x16([
-            1, 2, 3, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ])];
-        swar_step(&mut data, BucketWidth::B4);
-        assert_eq!(
-            data[0],
-            pack_u8x8([3, 3, 0, 15, 0, 0, 0, 0]),
-            "got {:#018x}",
-            data[0]
-        );
-    }
-
-    #[test]
-    fn test_swar_step_u8_single_word() {
-        // 8 bytes: [100, 200, 50, 50, 0, 0, 0, 0]
-        // Pair sums → 4 shorts: [300, 100, 0, 0]
-        let mut data = [pack_u8x8([100, 200, 50, 50, 0, 0, 0, 0])];
-        swar_step(&mut data, BucketWidth::U8);
-        assert_eq!(
-            data[0],
-            pack_u16x4([300, 100, 0, 0]),
-            "got {:#018x}",
-            data[0]
-        );
-    }
-
-    #[test]
-    fn test_swar_step_u16_single_word() {
-        // 4 shorts: [1000, 2000, 3000, 4000]
-        // Pair sums → 2 ints: [3000, 7000]
-        let mut data = [pack_u16x4([1000, 2000, 3000, 4000])];
-        swar_step(&mut data, BucketWidth::U16);
-        assert_eq!(data[0], pack_u32x2(3000, 7000), "got {:#018x}", data[0]);
-    }
-
-    #[test]
-    fn test_swar_step_u32_single_word() {
-        // 2 ints: [100000, 200000]
-        // Sum → 1 u64: 300000
-        let mut data = [pack_u32x2(100000, 200000)];
-        swar_step(&mut data, BucketWidth::U32);
-        assert_eq!(data[0], 300000);
+    fn test_swar_step_single_word() {
+        let cases: &[(BucketWidth, u64, u64, &str)] = &[
+            // B4: 16 nibbles → 8 byte pair sums
+            (
+                BucketWidth::B4,
+                pack_b4x16([1, 2, 3, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                pack_u8x8([3, 3, 0, 15, 0, 0, 0, 0]),
+                "b4",
+            ),
+            // U8: 8 bytes → 4 short pair sums
+            (
+                BucketWidth::U8,
+                pack_u8x8([100, 200, 50, 50, 0, 0, 0, 0]),
+                pack_u16x4([300, 100, 0, 0]),
+                "u8",
+            ),
+            // U16: 4 shorts → 2 int pair sums
+            (
+                BucketWidth::U16,
+                pack_u16x4([1000, 2000, 3000, 4000]),
+                pack_u32x2(3000, 7000),
+                "u16",
+            ),
+            // U32: 2 ints → 1 u64 sum
+            (
+                BucketWidth::U32,
+                pack_u32x2(100000, 200000),
+                300000,
+                "u32",
+            ),
+        ];
+        for &(width, input, expected, label) in cases {
+            let mut data = [input];
+            swar_step(&mut data, width);
+            assert_eq!(data[0], expected, "{label}: got {:#018x}", data[0]);
+        }
     }
 
     #[test]
@@ -2926,67 +2822,6 @@ mod tests {
         ])];
         swar_step(&mut data, BucketWidth::B4);
         assert_eq!(data[0] & 0xFF, 30);
-    }
-
-    // -----------------------------------------------------------------------
-    // swar_narrow_compact with odd word counts
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_swar_narrow_compact_b4_one_word() {
-        // Single word of U8 data → half a word of B4 data (low 32 bits).
-        // The 8 bytes each ≤ 15 become 8 nibbles in the low 32 bits.
-        let mut data = [pack_u8x8([3, 7, 0, 15, 0, 0, 5, 6])];
-        swar_narrow_compact(&mut data, BucketWidth::B4);
-        // With 1 word, step_by(2) produces i=0 only. lo=narrow(data[0]),
-        // hi=0 (i+1 >= n). data[0] = lo | (0 << 32) = lo.
-        let expected = narrow_word(pack_u8x8([3, 7, 0, 15, 0, 0, 5, 6]), BucketWidth::B4);
-        assert_eq!(
-            data[0], expected,
-            "got {:#018x}, expected {:#018x}",
-            data[0], expected
-        );
-    }
-
-    #[test]
-    fn test_swar_narrow_compact_b4_three_words() {
-        // 3 words of U8 → 2 compacted + zero the freed word.
-        // Word 0: [1,0,0,0,0,0,0,0]
-        // Word 1: [0,0,0,0,0,0,0,2]
-        // Word 2: [3,0,0,0,0,0,0,4]
-        let mut data = [
-            pack_u8x8([1, 0, 0, 0, 0, 0, 0, 0]),
-            pack_u8x8([0, 0, 0, 0, 0, 0, 0, 2]),
-            pack_u8x8([3, 0, 0, 0, 0, 0, 0, 4]),
-        ];
-        swar_narrow_compact(&mut data, BucketWidth::B4);
-        // step_by(2): i=0 → data[0]=narrow(w0)|narrow(w1)<<32
-        //             i=2 → data[1]=narrow(w2)|0<<32
-        let lo0 = narrow_word(pack_u8x8([1, 0, 0, 0, 0, 0, 0, 0]), BucketWidth::B4);
-        let hi0 = narrow_word(pack_u8x8([0, 0, 0, 0, 0, 0, 0, 2]), BucketWidth::B4);
-        let lo1 = narrow_word(pack_u8x8([3, 0, 0, 0, 0, 0, 0, 4]), BucketWidth::B4);
-        assert_eq!(data[0], lo0 | (hi0 << 32), "word 0: got {:#018x}", data[0]);
-        assert_eq!(data[1], lo1, "word 1: got {:#018x}", data[1]);
-        assert_eq!(data[2], 0, "word 2 should be zeroed");
-    }
-
-    #[test]
-    fn test_swar_narrow_compact_u8_three_words() {
-        let mut data = [
-            pack_u16x4([10, 20, 30, 40]),
-            pack_u16x4([50, 60, 70, 80]),
-            pack_u16x4([255, 0, 128, 1]),
-        ];
-        swar_narrow_compact(&mut data, BucketWidth::U8);
-        assert_eq!(
-            data[0],
-            pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]),
-            "word 0: got {:#018x}",
-            data[0]
-        );
-        let expected1 = narrow_word(pack_u16x4([255, 0, 128, 1]), BucketWidth::U8);
-        assert_eq!(data[1], expected1, "word 1: got {:#018x}", data[1]);
-        assert_eq!(data[2], 0, "word 2 should be zeroed");
     }
 
     // -----------------------------------------------------------------------
@@ -3141,63 +2976,39 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_speculative_merge_b4_sparse_stays_b4() {
-        // Many single-count buckets. All pair sums ≤ 2, so B4 stays.
-        let mut h: Histogram<16> = Histogram::with_scale(0)
-            .with_min_bucket_width(BucketWidth::B4)
-            .with_literal_mode(false);
-        for i in 0..16 {
-            h.update(2.0_f64.powi(i)).unwrap();
+    fn test_speculative_merge_width_behavior() {
+        // B4 sparse: many single-count buckets, pair sums ≤ 2 → stays B4
+        {
+            let mut h: Histogram<16> = Histogram::with_scale(0)
+                .with_min_bucket_width(BucketWidth::B4)
+                .with_literal_mode(false);
+            for i in 0..16 {
+                h.update(2.0_f64.powi(i)).unwrap();
+            }
+            assert_eq!(h.bucket_width(), BucketWidth::B4);
+            assert_total_conserved(&mut h, 1);
+            assert_eq!(h.bucket_width(), BucketWidth::B4, "b4 sparse stays");
         }
-        assert_eq!(h.bucket_width(), BucketWidth::B4);
 
-        h.do_downscale(1).unwrap();
-        // Each pair sums to at most 2. B4 max is 15. Stays.
-        assert_eq!(h.bucket_width(), BucketWidth::B4);
-    }
+        // U8 dense: 200+200=400 > 255 → widens to U16
+        {
+            let mut h: Histogram<16> = Histogram::with_scale(0);
+            h.update_by_incr(2.0, 200).unwrap();
+            assert_eq!(h.bucket_width(), BucketWidth::U8);
+            h.update_by_incr(4.0, 200).unwrap();
+            assert_total_conserved(&mut h, 1);
+            assert_eq!(h.bucket_width(), BucketWidth::U16, "u8 dense widens to u16");
+        }
 
-    #[test]
-    fn test_speculative_merge_b4_dense_widens_to_u8() {
-        // Same bucket hit 10 times, its neighbor 10 times → sum 20 > 15.
-        let mut h: Histogram<16> = Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
-        h.update_by_incr(2.0, 10).unwrap();
-        h.update_by_incr(4.0, 10).unwrap();
-        assert_eq!(h.bucket_width(), BucketWidth::B4);
-
-        h.do_downscale(1).unwrap();
-        assert_eq!(
-            h.bucket_width(),
-            BucketWidth::U8,
-            "10+10=20 > 15, must widen"
-        );
-    }
-
-    #[test]
-    fn test_speculative_merge_u8_dense_widens_to_u16() {
-        // At U8, max = 255. Two adjacent buckets each with count 200 → 400 > 255.
-        let mut h: Histogram<16> = Histogram::with_scale(0);
-        h.update_by_incr(2.0, 200).unwrap();
-        // This first update at B4 will overflow (200 > 15) → widen to U8.
-        assert_eq!(h.bucket_width(), BucketWidth::U8);
-
-        h.update_by_incr(4.0, 200).unwrap();
-        // Now at U8, do a merge: 200+200=400 > 255 → must widen to U16.
-        assert_total_conserved(&mut h, 1);
-        assert_eq!(h.bucket_width(), BucketWidth::U16);
-    }
-
-    #[test]
-    fn test_speculative_merge_u8_sparse_stays_u8() {
-        // At U8 with counts far below 255, pair sums should fit.
-        let mut h: Histogram<16> = Histogram::with_scale(0);
-        h.update_by_incr(2.0, 100).unwrap();
-        // 100 > 15 → widens B4→U8 on counter overflow path.
-        assert_eq!(h.bucket_width(), BucketWidth::U8);
-
-        h.update_by_incr(4.0, 50).unwrap();
-        // 100+50=150 ≤ 255 → should stay at U8.
-        assert_total_conserved(&mut h, 1);
-        assert_eq!(h.bucket_width(), BucketWidth::U8);
+        // U8 sparse: 100+50=150 ≤ 255 → stays U8
+        {
+            let mut h: Histogram<16> = Histogram::with_scale(0);
+            h.update_by_incr(2.0, 100).unwrap();
+            assert_eq!(h.bucket_width(), BucketWidth::U8);
+            h.update_by_incr(4.0, 50).unwrap();
+            assert_total_conserved(&mut h, 1);
+            assert_eq!(h.bucket_width(), BucketWidth::U8, "u8 sparse stays");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3380,11 +3191,6 @@ mod tests {
     // Regression tests (formerly in regression_stat_widen)
     // -----------------------------------------------------------------------
 
-    /// Helper: count total across all positive buckets.
-    fn bucket_total<const N: usize>(h: &mut Histogram<N>) -> u64 {
-        h.positive().iter().sum()
-    }
-
     /// Downscales `steps` times, asserting the bucket total is preserved
     /// at each step.
     fn assert_total_conserved<const N: usize>(h: &mut Histogram<N>, steps: i32) {
@@ -3408,6 +3214,24 @@ mod tests {
         let mut h = Histogram::<N>::new();
         for &(v, incr) in ops {
             h.update_by_incr(v, incr).unwrap();
+        }
+        h
+    }
+
+    /// Helper: build a histogram from plain f64 values (each inserted once).
+    fn build_from_values<const N: usize>(values: &[f64]) -> Histogram<N> {
+        let mut h = Histogram::<N>::new();
+        for &v in values {
+            h.update(v).unwrap();
+        }
+        h
+    }
+
+    /// Helper: build a bucket-mode (non-literal) histogram from plain f64 values.
+    fn build_bucket<const N: usize>(values: &[f64]) -> Histogram<N> {
+        let mut h = Histogram::<N>::new().with_literal_mode(false);
+        for &v in values {
+            h.update(v).unwrap();
         }
         h
     }
@@ -3695,60 +3519,15 @@ mod tests {
     #[test]
     fn test_literal_mode_bucket_view() {
         // Compare literal-mode virtual view to bucket-mode actual view.
-        let mut lit: Histogram<8> = Histogram::new();
-        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
-
-        let values = [1.0, 2.0, 4.0];
-        for &v in &values {
-            lit.update(v).unwrap();
-            bkt.update(v).unwrap();
-        }
-
-        assert!(lit.is_literal());
-        assert!(!bkt.is_literal());
-
-        // Both should report the same scale, offset, len, and counts.
-        assert_eq!(lit.scale(), bkt.scale());
-        assert_eq!(lit.positive().offset(), bkt.positive().offset());
-        assert_eq!(lit.positive().len(), bkt.positive().len());
-        for i in 0..lit.positive().len() {
-            assert_eq!(
-                lit.positive().at(i),
-                bkt.positive().at(i),
-                "bucket[{i}] mismatch"
-            );
-        }
+        assert_literal_matches_bucket(&[1.0, 2.0, 4.0]);
     }
 
     #[test]
     fn test_literal_promotion_optimal_scale() {
         // Verify that promotion picks the optimal scale (matching what
         // bucket mode would choose given the same values).
-        let mut h: Histogram<8> = Histogram::new();
-        // Insert values that span a wide range to force downscaling.
-        let values = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
-        for &v in &values {
-            h.update(v).unwrap();
-        }
-        assert!(h.is_literal());
-
-        // Now promote by inserting one more.
-        h.update(256.0).unwrap();
-        assert!(!h.is_literal());
-
-        // Compare to bucket-mode histogram with same values.
-        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
-        for &v in &values {
-            bkt.update(v).unwrap();
-        }
-        bkt.update(256.0).unwrap();
-
-        // The total counts should match.
-        let lit_total = bucket_total(&mut h);
-        let bkt_total = bucket_total(&mut bkt);
-        assert_eq!(lit_total, bkt_total);
-        assert_eq!(h.count(), bkt.count());
-        assert_eq!(h.sum(), bkt.sum());
+        let values = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
+        assert_literal_matches_bucket(&values);
     }
 
     #[test]
@@ -3772,91 +3551,48 @@ mod tests {
 
     #[test]
     fn test_literal_merge_literal_into_literal() {
-        let mut a: Histogram<8> = Histogram::new();
-        a.update(1.0).unwrap();
-        a.update(2.0).unwrap();
-
-        let mut b: Histogram<8> = Histogram::new();
-        b.update(4.0).unwrap();
-        b.update(8.0).unwrap();
-
+        let mut a = build_from_values::<8>(&[1.0, 2.0]);
+        let b = build_from_values::<8>(&[4.0, 8.0]);
         a.merge_from(&b).unwrap();
-
-        // After merge, `a` may or may not still be literal depending on
-        // total count vs capacity. With 4 values and capacity 6, it could
-        // remain literal if merge-from-literal inserts one by one. But our
-        // implementation promotes `a` first, so `a` is now bucket mode.
-        assert_eq!(a.count(), 4);
-        assert_eq!(a.sum(), 15.0);
-        assert_eq!(a.min(), 1.0);
-        assert_eq!(a.max(), 8.0);
+        assert_stats(&a, 4, 15.0, 1.0, 8.0);
     }
 
     #[test]
     fn test_literal_merge_literal_into_bucket() {
-        let mut collector: Histogram<16> = Histogram::new().with_literal_mode(false);
-        collector.update(1.0).unwrap();
-        collector.update(2.0).unwrap();
-
-        let mut source: Histogram<16> = Histogram::new();
-        source.update(4.0).unwrap();
-        source.update(8.0).unwrap();
+        let mut collector = build_bucket::<16>(&[1.0, 2.0]);
+        let source = build_from_values::<16>(&[4.0, 8.0]);
         assert!(source.is_literal());
-
         collector.merge_from(&source).unwrap();
-        assert_eq!(collector.count(), 4);
-        assert_eq!(collector.sum(), 15.0);
+        assert_stats(&collector, 4, 15.0, 1.0, 8.0);
     }
 
     #[test]
     fn test_literal_merge_bucket_into_literal() {
-        let mut collector: Histogram<16> = Histogram::new();
-        collector.update(1.0).unwrap();
+        let mut collector = build_from_values::<16>(&[1.0]);
         assert!(collector.is_literal());
-
-        let mut source: Histogram<16> = Histogram::new().with_literal_mode(false);
-        source.update(4.0).unwrap();
-        source.update(8.0).unwrap();
-
+        let source = build_bucket::<16>(&[4.0, 8.0]);
         collector.merge_from(&source).unwrap();
-        // collector should have promoted to accept bucket data.
         assert!(!collector.is_literal());
-        assert_eq!(collector.count(), 3);
-        assert_eq!(collector.sum(), 13.0);
+        assert_stats(&collector, 3, 13.0, 1.0, 8.0);
     }
 
     #[test]
     fn test_literal_merge_preserves_source() {
-        // Source stays literal after merge (it's &self).
-        let mut collector: Histogram<16> = Histogram::new().with_literal_mode(false);
-        collector.update(1.0).unwrap();
-
-        let mut source: Histogram<16> = Histogram::new();
-        source.update(4.0).unwrap();
+        let mut collector = build_bucket::<16>(&[1.0]);
+        let source = build_from_values::<16>(&[4.0]);
         assert!(source.is_literal());
-
         collector.merge_from(&source).unwrap();
-
-        // Source should still be literal and unchanged.
         assert!(source.is_literal());
-        assert_eq!(source.count(), 1);
-        assert_eq!(source.sum(), 4.0);
+        assert_stats(&source, 1, 4.0, 4.0, 4.0);
     }
 
     #[test]
     fn test_literal_merge_cross_size() {
-        // Merge a literal Histogram<8> into a larger Histogram<16>.
-        let mut collector: Histogram<16> = Histogram::new().with_literal_mode(false);
-        collector.update(1.0).unwrap();
-
-        let mut source: Histogram<8> = Histogram::new();
-        source.update(4.0).unwrap();
-        source.update(8.0).unwrap();
+        let mut collector = build_bucket::<16>(&[1.0]);
+        let source = build_from_values::<8>(&[4.0, 8.0]);
         assert!(source.is_literal());
-
         collector.merge_from_other(&source).unwrap();
-        assert_eq!(collector.count(), 3);
-        assert_eq!(collector.sum(), 13.0);
+        assert_stats(&collector, 3, 13.0, 1.0, 8.0);
     }
 
     #[test]
@@ -3866,96 +3602,39 @@ mod tests {
         // The source must remain in literal mode after merge.
 
         // Same-size merge: literal source into bucket dest.
-        let mut dest: Histogram<16> = Histogram::new().with_literal_mode(false);
-        for v in [1.0, 2.0, 3.0] {
-            dest.update(v).unwrap();
-        }
-        assert!(!dest.is_literal());
-
-        let mut source: Histogram<16> = Histogram::new();
-        for v in [10.0, 20.0, 30.0] {
-            source.update(v).unwrap();
-        }
+        let mut dest = build_bucket::<16>(&[1.0, 2.0, 3.0]);
+        let source = build_from_values::<16>(&[10.0, 20.0, 30.0]);
         assert!(source.is_literal());
-
         dest.merge_from(&source).unwrap();
-        assert!(
-            source.is_literal(),
-            "same-size merge must not promote source"
-        );
+        assert!(source.is_literal(), "same-size merge must not promote source");
         assert_eq!(dest.count(), 6);
 
         // Cross-size merge: small literal source into large bucket dest.
-        let mut big: Histogram<16> = Histogram::new().with_literal_mode(false);
-        for v in [1.0, 2.0, 3.0] {
-            big.update(v).unwrap();
-        }
-
-        let mut small: Histogram<8> = Histogram::new();
-        for v in [100.0, 200.0] {
-            small.update(v).unwrap();
-        }
+        let mut big = build_bucket::<16>(&[1.0, 2.0, 3.0]);
+        let small = build_from_values::<8>(&[100.0, 200.0]);
         assert!(small.is_literal());
-
         big.merge_from_other(&small).unwrap();
-        assert!(
-            small.is_literal(),
-            "cross-size merge must not promote source"
-        );
+        assert!(small.is_literal(), "cross-size merge must not promote source");
         assert_eq!(big.count(), 5);
 
         // Wide-range literal values: ensure even with values spanning
         // many scales, the source stays literal and dest absorbs them
         // correctly through incremental insertion.
-        let mut dest2: Histogram<16> = Histogram::new().with_literal_mode(false);
-        dest2.update(1.0).unwrap();
-
-        let mut source2: Histogram<16> = Histogram::new();
-        source2.update(1e-200).unwrap();
-        source2.update(1e200).unwrap();
+        let mut dest2 = build_bucket::<16>(&[1.0]);
+        let source2 = build_from_values::<16>(&[1e-200, 1e200]);
         assert!(source2.is_literal());
-
         dest2.merge_from(&source2).unwrap();
-        assert!(
-            source2.is_literal(),
-            "wide-range merge must not promote source"
-        );
+        assert!(source2.is_literal(), "wide-range merge must not promote source");
         assert_eq!(dest2.count(), 3);
-
-        // Verify bucket totals match count minus zeros.
-        let total = bucket_total(&mut dest2);
-        assert_eq!(total, 3, "all three non-zero values should be in buckets");
+        assert_eq!(bucket_total(&mut dest2), 3, "all three non-zero values should be in buckets");
     }
 
     #[test]
     fn test_literal_equivalence_with_bucket_mode() {
         // Verify that a promoted literal histogram and a bucket-mode
         // histogram produce the same bucket totals for the same inputs.
-        let values = [1.5, 2.7, 0.3, 100.0, 42.0, 7.7, 13.0, 55.5];
-
-        let mut lit: Histogram<8> = Histogram::new();
-        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
-
-        for &v in &values {
-            lit.update(v).unwrap();
-            bkt.update(v).unwrap();
-        }
-
-        // All 8 values fit in literal mode.
-        assert!(lit.is_literal());
-
-        // Force promotion by inserting one more.
-        lit.update(999.0).unwrap();
-        bkt.update(999.0).unwrap();
-        assert!(!lit.is_literal());
-
-        let lit_total = bucket_total(&mut lit);
-        let bkt_total = bucket_total(&mut bkt);
-        assert_eq!(lit_total, bkt_total, "bucket totals should match");
-        assert_eq!(lit.count(), bkt.count());
-        assert_eq!(lit.sum(), bkt.sum());
-        assert_eq!(lit.min(), bkt.min());
-        assert_eq!(lit.max(), bkt.max());
+        let values = [1.5, 2.7, 0.3, 100.0, 42.0, 7.7, 13.0, 55.5, 999.0];
+        assert_literal_matches_bucket(&values);
     }
 
     #[test]
@@ -3981,18 +3660,7 @@ mod tests {
 
     #[test]
     fn test_literal_scale_matches_bucket() {
-        let values = [1.0, 1024.0]; // wide range
-        let mut lit: Histogram<8> = Histogram::new();
-        let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
-
-        for &v in &values {
-            lit.update(v).unwrap();
-            bkt.update(v).unwrap();
-        }
-        assert!(lit.is_literal());
-
-        // Effective scales should match.
-        assert_eq!(lit.scale(), bkt.scale());
+        assert_literal_matches_bucket(&[1.0, 1024.0]);
     }
 
     #[test]
