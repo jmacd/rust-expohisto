@@ -5,10 +5,10 @@
 //!
 //! This module provides the `Mapping` struct which converts f64 values to
 //! bucket indices. For scale <= 0, it uses direct exponent mapping. For
-//! scale > 0, it delegates to the compile-time selected algorithm:
-//!
-//! - `logarithm` feature: pure logarithm-based mapping
-//! - `newrelic` / `dynatrace` features: lookup table-based mapping (exact, no FP errors)
+//! scale > 0, it uses the compile-time selected lookup table algorithm
+//! (NewRelic or Dynatrace) when available and in range, falling back to
+//! the built-in logarithm mapper for higher scales or when no lookup
+//! tables are compiled.
 
 use crate::float64::{
     MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE,
@@ -32,8 +32,6 @@ pub enum MappingError {
     Overflow,
     /// Invalid scale parameter.
     InvalidScale,
-    /// Scale exceeds what the selected algorithm supports.
-    ScaleNotSupported,
 }
 
 impl fmt::Display for MappingError {
@@ -42,30 +40,20 @@ impl fmt::Display for MappingError {
             Self::Underflow => f.write_str("bucket index corresponds to a subnormal value"),
             Self::Overflow => f.write_str("bucket index corresponds to +Inf"),
             Self::InvalidScale => f.write_str("invalid scale parameter"),
-            Self::ScaleNotSupported => {
-                f.write_str("scale exceeds what the selected algorithm supports")
-            }
         }
     }
 }
 
 impl std::error::Error for MappingError {}
 
-/// Returns the maximum scale supported by the selected mapping algorithm.
+/// Returns the maximum scale supported by the mapping.
 ///
-/// - `logarithm`: supports all scales up to MAX_SCALE (20)
-/// - `newrelic` / `dynatrace`: supports scales up to the compiled table scale
+/// All scales from 1 to MAX_SCALE (20) are always supported: lookup
+/// tables cover scales up to the compiled table scale, and the built-in
+/// logarithm mapper handles the rest.
 #[inline]
 pub const fn max_scale() -> i32 {
-    #[cfg(has_lookup_table)]
-    {
-        crate::lookup::TABLE_SCALE
-    }
-
-    #[cfg(not(has_lookup_table))]
-    {
-        MAX_SCALE
-    }
+    MAX_SCALE
 }
 
 /// Converts values to bucket indices at a given scale.
@@ -80,16 +68,9 @@ impl Mapping {
     /// Creates a new mapping for the given scale.
     ///
     /// Returns `MappingError::InvalidScale` if scale is outside [-10, 20].
-    /// Returns `MappingError::ScaleNotSupported` if the scale exceeds what
-    /// the selected algorithm supports (e.g., scale-8 only supports scales 1-8).
     pub fn new(scale: i32) -> Result<Self, MappingError> {
         if !(MIN_SCALE..=MAX_SCALE).contains(&scale) {
             return Err(MappingError::InvalidScale);
-        }
-
-        // Check if the selected algorithm supports this scale
-        if scale > 0 && scale > max_scale() {
-            return Err(MappingError::ScaleNotSupported);
         }
 
         let inverse_factor = if scale > 0 {
@@ -122,42 +103,24 @@ impl Mapping {
     }
 
     /// Mapping for positive scales - delegates to selected algorithm.
+    ///
+    /// Uses lookup tables when available and the scale is within table range,
+    /// otherwise falls back to the built-in logarithm mapper.
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
-        // NewRelic lookup table takes precedence if enabled
-        #[cfg(feature = "newrelic")]
-        {
-            crate::newrelic::map_to_index(value, self.scale as i32)
+        let scale = self.scale as i32;
+
+        #[cfg(all(has_lookup_table, feature = "newrelic"))]
+        if scale <= crate::lookup::TABLE_SCALE {
+            return crate::newrelic::map_to_index(value, scale);
         }
 
-        // Dynatrace lookup table next
-        #[cfg(all(feature = "dynatrace", not(feature = "newrelic")))]
-        {
-            crate::dynatrace::map_to_index(value, self.scale as i32)
+        #[cfg(all(has_lookup_table, feature = "dynatrace", not(feature = "newrelic")))]
+        if scale <= crate::lookup::TABLE_SCALE {
+            return crate::dynatrace::map_to_index(value, scale);
         }
 
-        // Fallback to logarithm
-        #[cfg(all(
-            feature = "logarithm",
-            not(feature = "newrelic"),
-            not(feature = "dynatrace")
-        ))]
-        {
-            crate::logarithm::map_to_index(value, self.scale as i32)
-        }
-
-        // No algorithm selected — fail at compile time.
-        #[cfg(not(any(
-            feature = "logarithm",
-            feature = "newrelic",
-            feature = "dynatrace"
-        )))]
-        {
-            compile_error!(
-                "No mapping algorithm feature enabled. \
-                 Enable one of: \"logarithm\", \"newrelic\", or \"dynatrace\"."
-            );
-        }
+        crate::logarithm::map_to_index(value, scale)
     }
 
     /// Returns the lower boundary of a bucket at the given index.
@@ -220,16 +183,9 @@ mod tests {
         assert!(Mapping::new(21).is_err());
         assert!(Mapping::new(-11).is_err());
         
-        // Test max_scale() is supported
-        assert!(Mapping::new(max_scale()).is_ok());
-    }
-
-    #[test]
-    fn test_scale_not_supported() {
-        // Scales above max_scale() should return ScaleNotSupported
-        if max_scale() < MAX_SCALE {
-            let result = Mapping::new(max_scale() + 1);
-            assert_eq!(result.unwrap_err(), MappingError::ScaleNotSupported);
+        // All scales up to MAX_SCALE are supported
+        for scale in MIN_SCALE..=MAX_SCALE {
+            assert!(Mapping::new(scale).is_ok(), "scale {} should be supported", scale);
         }
     }
 

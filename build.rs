@@ -7,7 +7,6 @@
 //! both NewRelic and Dynatrace algorithms. Lower scales are derived at runtime
 //! by right-shifting the result: `map_at_S(v) = map_at_H(v) >> (H - S)`.
 
-use expohisto_mapping_gen::LookupTables;
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -23,7 +22,7 @@ fn main() {
 
     if let Some(scale) = table_scale() {
         println!("cargo:rustc-cfg=has_lookup_table");
-        generate_tables(&mut file, scale).unwrap();
+        expohisto_mapping_gen::generate_shared_boundaries(&mut file, scale).unwrap();
     } else {
         writeln!(file, "// No table features enabled").unwrap();
         writeln!(file, "pub const TABLE_SCALE: i32 = 0;").unwrap();
@@ -32,76 +31,35 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 }
 
+/// Returns the highest enabled scale feature, or None.
 fn table_scale() -> Option<u32> {
-    if cfg!(feature = "scale-14") {
-        Some(14)
-    } else if cfg!(feature = "scale-12") {
-        Some(12)
-    } else if cfg!(feature = "scale-10") {
-        Some(10)
-    } else if cfg!(feature = "scale-8") {
-        Some(8)
-    } else if cfg!(feature = "scale-6") {
-        Some(6)
-    } else if cfg!(feature = "scale-4") {
-        Some(4)
-    } else {
-        None
-    }
+    // Check from highest to lowest; features are additive so the highest wins.
+    (1..=20).rev().find(|&s| has_scale_feature(s))
 }
 
-fn generate_tables<W: Write>(w: &mut W, table_scale: u32) -> std::io::Result<()> {
-    let tables = LookupTables::generate(table_scale);
-    let n = tables.n;
-
-    writeln!(
-        w,
-        "// Auto-generated lookup tables at scale {} ({} log buckets)",
-        table_scale, n
-    )?;
-    writeln!(w)?;
-
-    writeln!(
-        w,
-        "/// Maximum histogram scale supported by this lookup table."
-    )?;
-    writeln!(w, "pub const TABLE_SCALE: i32 = {};", table_scale)?;
-    writeln!(w)?;
-
-    let raw_boundaries = &tables.log_bucket_end[..n];
-
-    let mut shared_boundaries = Vec::with_capacity(n + 3);
-    shared_boundaries.push(0u64);
-    shared_boundaries.extend_from_slice(raw_boundaries);
-    shared_boundaries.push(1u64 << 52);
-    shared_boundaries.push(1u64 << 52);
-
-    writeln!(
-        w,
-        "/// Boundary significands for exponential histogram mapping."
-    )?;
-    writeln!(
-        w,
-        "/// Layout: \\[sentinel=0, b\\[0\\]=1, b\\[1\\], ..., b\\[N-1\\], sentinel=2^52, sentinel=2^52\\]"
-    )?;
-    writeln!(w, "/// where N = 2^TABLE_SCALE = {}.", n)?;
-    writeln!(w, "pub static BOUNDARIES: [u64; {}] = [", n + 3)?;
-    for (i, &b) in shared_boundaries.iter().enumerate() {
-        if i % 4 == 0 {
-            write!(w, "    ")?;
-        }
-        if i == 0 {
-            writeln!(w, "0x{:013X}, // sentinel", b)?;
-        } else if i > n {
-            writeln!(w, "0x{:013X}, // sentinel = 2^52", b)?;
-        } else {
-            write!(w, "0x{:013X},", b)?;
-            if i % 4 == 3 {
-                writeln!(w)?;
-            }
-        }
+#[allow(clippy::match_like_matches_macro)] // each arm evaluates a distinct cfg!()
+fn has_scale_feature(s: u32) -> bool {
+    match s {
+        1 => cfg!(feature = "scale-1"),
+        2 => cfg!(feature = "scale-2"),
+        3 => cfg!(feature = "scale-3"),
+        4 => cfg!(feature = "scale-4"),
+        5 => cfg!(feature = "scale-5"),
+        6 => cfg!(feature = "scale-6"),
+        7 => cfg!(feature = "scale-7"),
+        8 => cfg!(feature = "scale-8"),
+        9 => cfg!(feature = "scale-9"),
+        10 => cfg!(feature = "scale-10"),
+        11 => cfg!(feature = "scale-11"),
+        12 => cfg!(feature = "scale-12"),
+        13 => cfg!(feature = "scale-13"),
+        14 => cfg!(feature = "scale-14"),
+        15 => cfg!(feature = "scale-15"),
+        16 => cfg!(feature = "scale-16"),
+        17 => cfg!(feature = "scale-17"),
+        18 => cfg!(feature = "scale-18"),
+        19 => cfg!(feature = "scale-19"),
+        20 => cfg!(feature = "scale-20"),
+        _ => false,
     }
-    writeln!(w, "];")?;
-
-    Ok(())
 }

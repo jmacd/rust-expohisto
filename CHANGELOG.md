@@ -14,9 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pool fills, then promote to bucket mode at the optimal scale in one shot
 - **Sub-byte bucket widths** — counters start at 1-bit and widen through
   B1→B2→B4→U8→U16→U32→U64 via SWAR (SIMD Within A Register) operations
-- **Three mapping algorithms** — `newrelic` (default), `dynatrace`, and
-  `logarithm`, selected at compile time via Cargo features
-- **Configurable lookup table scale** — `scale-4` through `scale-14` features
+- **Two lookup table algorithms** — `newrelic` (default) and `dynatrace`,
+  selected at compile time via Cargo features; a built-in `logarithm` mapper
+  is always available for scales above the table maximum (or as the sole mapper
+  when no lookup table is enabled)
+- **Configurable lookup table scale** — `scale-1` through `scale-20` features
   trade binary size for finer resolution support
 - `Histogram::merge_from()` — same-size in-place merge with atomicity
 - `Histogram::merge_from_other()` — cross-size merge (different `N` values)

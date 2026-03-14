@@ -27,7 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --all-targets --features bench-all -- -D warnings
 
   test:
     name: Test
@@ -35,10 +35,10 @@ jobs:
     strategy:
       matrix:
         features:
-          - "--all-features"
+          - "--features bench-all"
           - "--features newrelic,scale-8"
           - "--features dynatrace,scale-8"
-          - "--features logarithm"
+          - "--no-default-features"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo bench --no-run --all-features
+      - run: cargo bench --no-run --features bench-all
 
   doc:
     name: Documentation
@@ -58,7 +58,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo doc --no-deps --all-features
+      - run: cargo doc --no-deps --features bench-all
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -70,7 +70,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.73"
-      - run: cargo check --all-features
+      - run: cargo check --features bench-all
 
   examples:
     name: Examples

@@ -48,7 +48,7 @@ Benchmark results — `map_to_index` over 100 random f64 values (criterion, medi
 | NewRelic lookup | 1–14 | ~7.3 ns | Integer-only, 2N linear buckets, 1 correction |
 | Logarithm | 1–20 | ~10.5 ns | `ln()`-based, works at any scale |
 
-The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected at construction time (`Mapping::new` returns `ScaleNotSupported`).
+The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum automatically fall back to the built-in logarithm mapper.
 
 ## Lookup Table Features
 
@@ -61,14 +61,18 @@ otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # defa
 
 ### Scale (table size)
 
+Scale features `scale-1` through `scale-20` control the lookup table size.
+Each table supports all scales from 1 up to its maximum; higher scales
+fall back to the built-in logarithm mapper. Selected examples:
+
 | Feature | Table Size | Scales Accelerated | Use Case |
 |---------|------------|-------------------|----------|
-| `scale-4` | 0.2 KB | 1–4 | Minimal memory |
-| `scale-6` | 0.6–0.8 KB | 1–6 | Embedded systems |
-| `scale-8` | 2.5–3.0 KB | 1–8 | **Default** |
-| `scale-10` | 10–12 KB | 1–10 | Recommended |
-| `scale-12` | 40–48 KB | 1–12 | High resolution |
-| `scale-14` | 160–192 KB | 1–14 | Maximum coverage |
+| `scale-4` | 152 B | 1–4 | Minimal memory |
+| `scale-6` | 536 B | 1–6 | Embedded systems |
+| `scale-8` | 2 KB | 1–8 | **Default** |
+| `scale-10` | 8 KB | 1–10 | Recommended |
+| `scale-12` | 32 KB | 1–12 | High resolution |
+| `scale-14` | 128 KB | 1–14 | Maximum practical coverage |
 
 ### Algorithm
 
@@ -76,9 +80,9 @@ otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # defa
 |---------|---------------|-----------------|-------|
 | `newrelic` | 2N | 1 | Slightly larger index table |
 | `dynatrace` | N | 2 | ~50% smaller index table |
-| `logarithm` | — | — | No table needed, FP precision errors |
+| *(none)* | — | — | Pure logarithm, no table needed, FP precision errors |
 
-The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](#lookup-table-design)).
+The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](#lookup-table-design)). When neither is enabled (or when the scale exceeds the table maximum), the built-in logarithm mapper handles all scales.
 
 ## Exponential Scale
 
@@ -164,11 +168,11 @@ When a lookup feature is enabled (default: `newrelic` + `scale-8`), mapping uses
 3. Apply boundary check(s) to correct the approximation
 4. Combine with exponent to produce the final index
 
-For scales beyond the table's maximum, `Mapping::new` returns `ScaleNotSupported`.
+For scales beyond the table's maximum, the mapping automatically falls back to the built-in logarithm mapper.
 
-### Scale > 0: Logarithm
+### Scale > 0: Logarithm (fallback)
 
-When the `logarithm` feature is enabled instead of a lookup table, the standard formula is used:
+The logarithm mapper is always available and handles scales above the compiled table maximum (or all scales when no lookup table is enabled). It uses the standard formula:
 
 ```text
 index = ceil(ln(value) × 2^scale / ln(2)) - 1
@@ -592,7 +596,7 @@ The spec defines three configuration parameters:
 | Parameter | Spec Default | This Implementation | Notes |
 |-----------|-------------|---------------------|-------|
 | **MaxSize** | 160 | Any compile-time `N` via `Histogram<N>` | `N` is the data pool size in u64 words. Bucket capacity depends on the current counter width. |
-| **MaxScale** | 20 | 20 (`MAX_SCALE`) | Effective max depends on the mapping feature: table-based features cap at `TABLE_SCALE` (e.g. 8 for `scale-8`); the `logarithm` feature reaches 20. `Histogram::with_max_scale()` lets the user set a lower cap. |
+| **MaxScale** | 20 | 20 (`MAX_SCALE`) | All scales 1–20 are always supported. Scales within the compiled table range use exact lookup; higher scales fall back to the built-in logarithm mapper. `Histogram::with_max_scale()` lets the user set a lower cap. |
 | **RecordMinMax** | true | Always on | `min` and `max` are tracked on every update. There is no option to disable them. |
 
 ### Collected Fields

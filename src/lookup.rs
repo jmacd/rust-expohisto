@@ -131,18 +131,46 @@ macro_rules! lookup_tests {
 
         #[test]
         fn test_table_scale() {
+            #[cfg(feature = "scale-1")]
+            const { assert!($table_scale >= 1) };
+            #[cfg(feature = "scale-2")]
+            const { assert!($table_scale >= 2) };
+            #[cfg(feature = "scale-3")]
+            const { assert!($table_scale >= 3) };
             #[cfg(feature = "scale-4")]
             const { assert!($table_scale >= 4) };
+            #[cfg(feature = "scale-5")]
+            const { assert!($table_scale >= 5) };
             #[cfg(feature = "scale-6")]
             const { assert!($table_scale >= 6) };
+            #[cfg(feature = "scale-7")]
+            const { assert!($table_scale >= 7) };
             #[cfg(feature = "scale-8")]
             const { assert!($table_scale >= 8) };
+            #[cfg(feature = "scale-9")]
+            const { assert!($table_scale >= 9) };
             #[cfg(feature = "scale-10")]
             const { assert!($table_scale >= 10) };
+            #[cfg(feature = "scale-11")]
+            const { assert!($table_scale >= 11) };
             #[cfg(feature = "scale-12")]
             const { assert!($table_scale >= 12) };
+            #[cfg(feature = "scale-13")]
+            const { assert!($table_scale >= 13) };
             #[cfg(feature = "scale-14")]
             const { assert!($table_scale >= 14) };
+            #[cfg(feature = "scale-15")]
+            const { assert!($table_scale >= 15) };
+            #[cfg(feature = "scale-16")]
+            const { assert!($table_scale >= 16) };
+            #[cfg(feature = "scale-17")]
+            const { assert!($table_scale >= 17) };
+            #[cfg(feature = "scale-18")]
+            const { assert!($table_scale >= 18) };
+            #[cfg(feature = "scale-19")]
+            const { assert!($table_scale >= 19) };
+            #[cfg(feature = "scale-20")]
+            const { assert!($table_scale >= 20) };
         }
 
         #[test]

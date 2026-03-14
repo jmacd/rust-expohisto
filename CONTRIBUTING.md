@@ -84,15 +84,16 @@ examples/            # Runnable examples
 - **Literal mode**: New histograms store raw f64 values until the pool fills,
   then promote to bucket mode at the optimal scale.
 - **Compile-time algorithm selection**: Mapping algorithms (`newrelic`,
-  `dynatrace`, `logarithm`) and table scales (`scale-4`..`scale-14`) are
-  Cargo features — no runtime dispatch overhead.
+  `dynatrace`) and table scales (`scale-1`..`scale-20`) are
+  Cargo features — no runtime dispatch overhead. The built-in `logarithm`
+  mapper is always available for scales above the table maximum.
 
 ## Pull Request Checklist
 
-- [ ] `cargo test --all-features` passes
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` is clean
-- [ ] `cargo doc --no-deps --all-features` builds without warnings
+- [ ] `cargo test --features bench-all` passes
+- [ ] `cargo clippy --all-targets --features bench-all -- -D warnings` is clean
+- [ ] `cargo doc --no-deps --features bench-all` builds without warnings
 - [ ] New public API has doc comments with `# Panics` and `# Errors` sections
-- [ ] Benchmarks still compile: `cargo bench --no-run --all-features`
+- [ ] Benchmarks still compile: `cargo bench --no-run --features bench-all`
 - [ ] Consider running `cargo +nightly fuzz run stateful_oracle` for a few
   minutes if your change touches histogram internals

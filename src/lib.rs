@@ -11,7 +11,6 @@ pub mod mapping;
 // Algorithm modules - conditionally compiled.
 // These are public for benchmark access but hidden from docs since users
 // should go through `Mapping` rather than calling algorithms directly.
-#[cfg(feature = "logarithm")]
 #[doc(hidden)]
 pub mod logarithm;
 

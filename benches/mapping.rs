@@ -101,7 +101,6 @@ fn bench_map_to_index(c: &mut Criterion) {
         }
 
         // Logarithm direct
-        #[cfg(feature = "logarithm")]
         {
             let log_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20].to_vec();
 
