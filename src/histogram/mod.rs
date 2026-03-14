@@ -685,10 +685,14 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
-            if self.literal {
-                self.update_literal(value, incr)?;
+            let snapshot = self.clone();
+            if let Err(e) = if self.literal {
+                self.update_literal(value, incr)
             } else {
-                self.update_buckets(value, incr)?;
+                self.update_buckets(value, incr)
+            } {
+                *self = snapshot;
+                return Err(e);
             }
         }
 

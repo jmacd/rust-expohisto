@@ -2333,3 +2333,48 @@ fn repro_fuzz_stateful_bucket_total() {
             "failed merge must not change count");
     }
 }
+
+/// Reproducer for stateful_oracle crash: bucket len mismatch at scale=-10
+/// after a failed update_by_incr (Hammer with huge increment).
+///
+/// Root cause: update_by_incr lacked snapshot/rollback, so a failed
+/// widen_one_step (Overflow at MIN_SCALE) left buckets corrupted.
+#[test]
+fn repro_fuzz_stateful_update_atomicity() {
+    let v1 = f64::from_bits(0x002f233d41000000); // 8.66e-308
+    let v2 = f64::from_bits(0x2c2c2cac2c2c2c2c); // 6.595e-96
+    let v3 = f64::from_bits(0x78ffffdb58585858); // 6.924e+274
+
+    // Build pool[0]: two small values via insert + merge
+    let mut h: Histogram<8> = Histogram::new();
+    h.update(v1).unwrap();
+
+    let mut donor: Histogram<8> = Histogram::new();
+    donor.update(v2).unwrap();
+    donor.update(v1).unwrap();
+    h.merge_from(&donor).unwrap();
+
+    // Snapshot before hammer
+    let before = h.clone();
+
+    // Hammer: huge increment at a wildly different exponent
+    let result = h.update_by_incr(v3, 8388608);
+
+    if result.is_err() {
+        // On failure the histogram MUST be unchanged.
+        let hv = h.view();
+        let mut bv = before.clone();
+        let bvv = bv.view();
+        assert_eq!(
+            hv.positive().len(),
+            bvv.positive().len(),
+            "failed update must not change bucket len (scale={})",
+            hv.scale()
+        );
+        assert_eq!(
+            hv.count(),
+            bvv.count(),
+            "failed update must not change count"
+        );
+    }
+}
