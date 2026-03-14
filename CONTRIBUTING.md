@@ -43,6 +43,7 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run histogram_oracle
 cargo +nightly fuzz run merge_oracle
 cargo +nightly fuzz run stateful_oracle
+cargo +nightly fuzz run rng_stress
 ```
 
 - **`histogram_oracle`** — Feeds arbitrary values to a histogram and checks
@@ -51,6 +52,8 @@ cargo +nightly fuzz run stateful_oracle
   random configurations
 - **`stateful_oracle`** — State-machine fuzzer that interleaves update, merge,
   clear, and read operations in arbitrary order
+- **`rng_stress`** — Large-histogram (N=160) stress test with millions of
+  random values from configurable distributions
 
 ## Architecture
 

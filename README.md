@@ -5,7 +5,7 @@
 [![docs.rs](https://docs.rs/otel-expohisto/badge.svg)](https://docs.rs/otel-expohisto)
 [![License](https://img.shields.io/crates/l/otel-expohisto.svg)](https://github.com/open-telemetry/otel-expohisto/blob/main/LICENSE)
 
-An allocation-free, table-lookup based implementation of the
+An allocation-free (after one-time table init), table-lookup based implementation of the
 [OpenTelemetry Exponential Histogram](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
 in Rust.
 
@@ -32,9 +32,10 @@ hist.update(1.5).unwrap();
 hist.update(2.7).unwrap();
 hist.update(100.0).unwrap();
 
-// Access statistics
-println!("count: {}, sum: {}", hist.count(), hist.sum());
-println!("scale: {}", hist.scale());
+// Access statistics through a view
+let v = hist.view();
+println!("count: {}, sum: {}", v.count(), v.sum());
+println!("scale: {}", v.scale());
 ```
 
 ## Performance

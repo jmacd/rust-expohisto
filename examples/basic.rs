@@ -19,16 +19,17 @@ fn main() {
         hist.update(ms).unwrap();
     }
 
-    // Access aggregate statistics
+    // Access aggregate statistics and bucket data through a view
+    let v = hist.view();
     println!("=== Histogram Statistics ===");
-    println!("  count: {}", hist.count());
-    println!("  sum:   {:.1}", hist.sum());
-    println!("  min:   {:.1}", hist.min());
-    println!("  max:   {:.1}", hist.max());
-    println!("  scale: {}", hist.scale());
+    println!("  count: {}", v.count());
+    println!("  sum:   {:.1}", v.sum());
+    println!("  min:   {:.1}", v.min());
+    println!("  max:   {:.1}", v.max());
+    println!("  scale: {}", v.scale());
 
     // Iterate over non-empty buckets
-    let buckets = hist.positive();
+    let buckets = v.positive();
     println!("\n=== Bucket Data ===");
     println!("  offset: {}", buckets.offset());
     println!("  width:  {:?}", buckets.width());

@@ -9,18 +9,19 @@ use otel_expohisto::{Histogram, Mapping};
 pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u64)], label: &str) {
     let total_count: u64 = ops.iter().map(|&(_, incr)| incr).sum();
 
-    assert_eq!(hist.count(), total_count, "{label}: count mismatch");
+    let v = hist.view();
+    assert_eq!(v.count(), total_count, "{label}: count mismatch");
 
     if total_count == 0 {
-        assert_eq!(hist.positive().len(), 0, "{label}: should have no buckets");
+        assert_eq!(v.positive().len(), 0, "{label}: should have no buckets");
         return;
     }
 
     // min / max
     let expected_min = ops.iter().map(|&(v, _)| v).fold(f64::INFINITY, f64::min);
     let expected_max = ops.iter().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
-    assert_eq!(hist.min(), expected_min, "{label}: min mismatch");
-    assert_eq!(hist.max(), expected_max, "{label}: max mismatch");
+    assert_eq!(v.min(), expected_min, "{label}: min mismatch");
+    assert_eq!(v.max(), expected_max, "{label}: max mismatch");
 
     // zero count
     let non_zero_total: u64 = ops
@@ -30,9 +31,9 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         .sum();
     let expected_zero_count = total_count - non_zero_total;
 
-    let count = hist.count();
-    let scale = hist.scale();
-    let buckets = hist.positive();
+    let count = v.count();
+    let scale = v.scale();
+    let buckets = v.positive();
     let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
 
     assert!(

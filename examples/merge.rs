@@ -8,16 +8,17 @@
 use otel_expohisto::Histogram;
 
 fn print_histogram<const N: usize>(label: &str, h: &mut Histogram<N>) {
+    let v = h.view();
     println!("{label}:");
     println!(
         "  count={}, sum={:.1}, min={:.1}, max={:.1}, scale={}",
-        h.count(),
-        h.sum(),
-        h.min(),
-        h.max(),
-        h.scale()
+        v.count(),
+        v.sum(),
+        v.min(),
+        v.max(),
+        v.scale()
     );
-    let b = h.positive();
+    let b = v.positive();
     println!(
         "  buckets: {} slots at {:?}, offset={}",
         b.len(),

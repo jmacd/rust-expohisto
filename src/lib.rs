@@ -27,7 +27,7 @@ pub mod newrelic;
 pub mod dynatrace;
 
 pub use histogram::{
-    BucketDescriptor, BucketView, BucketWidth, BucketsIter, Histogram, Overflow, QuantileIter,
-    QuantileValue, Stats,
+    BucketDescriptor, BucketView, BucketWidth, BucketsIter, Histogram, HistogramView, Overflow,
+    QuantileIter, QuantileValue, Stats,
 };
 pub use mapping::{max_scale, Mapping, MappingError, MAX_SCALE, MIN_SCALE};

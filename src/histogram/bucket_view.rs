@@ -8,10 +8,8 @@ use super::Histogram;
 
 /// Read-only view of bucket data in a histogram.
 ///
-/// Obtaining a `BucketView` via [`positive()`](Histogram::positive)
-/// requires `&mut self` because literal-mode histograms are lazily
-/// promoted to bucket mode on first read. After promotion, subsequent
-/// reads are normal bucket lookups with no extra cost.
+/// Obtained via [`HistogramView::positive()`](super::HistogramView::positive).
+/// All accessors take `&self`.
 #[derive(Debug)]
 pub struct BucketView<'a, const N: usize> {
     pub(super) hist: &'a Histogram<N>,

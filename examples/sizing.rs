@@ -72,18 +72,20 @@ fn main() {
         h.update(v).unwrap();
     }
 
+    let v = h.view();
     println!(
         "Histogram<16> with max_scale=4 after {} values spanning {:.0}x range:",
-        h.count(),
-        h.max() / h.min()
+        v.count(),
+        v.max() / v.min()
     );
+    let bw = v.positive().width();
     println!(
         "  scale: {}, width: {:?}, capacity: {}",
-        h.scale(),
-        h.bucket_width(),
-        h.positive().capacity()
+        v.scale(),
+        bw,
+        v.positive().capacity()
     );
-    let b = h.positive();
+    let b = v.positive();
     println!(
         "  using {} of {} buckets ({:.0}% utilization)",
         b.len(),
@@ -101,8 +103,8 @@ fn main() {
 
     println!(
         "with_min_bucket_width(U8): {} buckets at {:?}",
-        fast.positive().capacity(),
-        fast.bucket_width()
+        fast.view().positive().capacity(),
+        fast.view().positive().width()
     );
 
     let mut dense: Histogram<16> = Histogram::new();
@@ -111,7 +113,7 @@ fn main() {
     }
     println!(
         "default (B1 start):        {} buckets at {:?}",
-        dense.positive().capacity(),
-        dense.bucket_width()
+        dense.view().positive().capacity(),
+        dense.view().positive().width()
     );
 }

@@ -3,7 +3,7 @@ name = "otel-expohisto"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.73"
-description = "Allocation-free OpenTelemetry Exponential Histogram"
+description = "Allocation-free (after init) OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/open-telemetry/otel-expohisto"
@@ -54,7 +54,10 @@ newrelic = ["scale-4"]
 dynatrace = ["scale-4"]
 
 # For benchmarking all algorithms together
-bench-all = ["newrelic", "dynatrace", "scale-8"]
+bench-all = ["newrelic", "dynatrace", "scale-8", "bench-internals"]
+
+# Expose internal methods (e.g. do_downscale) for benchmarking
+bench-internals = []
 
 [dependencies]
 
