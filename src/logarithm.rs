@@ -35,17 +35,26 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
     debug_assert!(value > 0.0);
 
+    let significand = get_significand(value);
+    let exp = get_normal_base2(value);
+
     // Exact power-of-two: significand is 0, index is (exp << scale) - 1.
     // We use the exponent directly rather than ln() to avoid FP imprecision.
     // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
-    let significand = get_significand(value);
     if significand == 0 {
-        let exp = get_normal_base2(value);
         return (exp << scale) - 1;
     }
 
-    // General case: use floor(log(value) * scaleFactor)
-    (value.ln() * SCALE_FACTORS[scale as usize]).floor() as i32
+    // General case: use floor(log(value) * scaleFactor), then clamp
+    // to the valid range for this exponent to correct FP imprecision
+    // near power-of-two boundaries.
+    //
+    // For a non-power-of-two with exponent E, log2(value) is in
+    // (E, E+1), so the index must be in [E << scale, (E+1) << scale - 1].
+    let raw = (value.ln() * SCALE_FACTORS[scale as usize]).floor() as i32;
+    let lo = exp << scale;
+    let hi = ((exp + 1) << scale) - 1;
+    raw.clamp(lo, hi)
 }
 
 #[cfg(test)]
