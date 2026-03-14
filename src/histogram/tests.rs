@@ -2229,3 +2229,107 @@ fn test_goodness_of_fit() {
         );
     }
 }
+
+#[test]
+fn repro_fuzz_histogram_oracle_offset() {
+    // Regression: subnormals must map to the same bucket as MIN_VALUE
+    // at all positive scales. Previously, logarithm and lookup-table
+    // mappers treated subnormals as distinct values, producing wrong
+    // bucket indices that disagreed across scales.
+    let subnormal = 1.3633843689306e-310f64;
+    let normal = 2.2251438848883923e-308f64;
+    let min_value = crate::float64::MIN_VALUE;
+
+    // At every scale, the subnormal must have the same index as MIN_VALUE.
+    for s in 0..=20 {
+        let m = Mapping::new(s).unwrap();
+        assert_eq!(
+            m.map_to_index(subnormal),
+            m.map_to_index(min_value),
+            "subnormal must map to MIN_VALUE bucket at scale={s}"
+        );
+    }
+
+    // Bucket mode and literal mode must agree.
+    for literal in [true, false] {
+        let mut h = Histogram::<8>::new().with_literal_mode(literal);
+        h.update(subnormal).unwrap();
+        h.update(normal).unwrap();
+
+        let v = h.view();
+        let mapping = Mapping::new(v.scale()).unwrap();
+        let exp_offset = mapping.map_to_index(min_value)
+            .min(mapping.map_to_index(normal));
+
+        assert_eq!(
+            v.positive().offset(),
+            exp_offset,
+            "literal={literal}: offset mismatch at scale={}",
+            v.scale()
+        );
+    }
+}
+
+#[test]
+fn repro_fuzz_merge_oracle_offset() {
+    // Regression: subnormal value with large increments, merged across
+    // histograms. The subnormal must map to MIN_VALUE's bucket.
+    let subnormal = 5.580682928875e-312f64;
+    let incrs: &[u64] = &[4194304, 16777216, 268435456, 4294967296];
+
+    for literal in [true, false] {
+        let mut right = Histogram::<8>::new().with_literal_mode(literal);
+        for &incr in incrs {
+            right.update_by_incr(subnormal, incr).unwrap();
+        }
+
+        let mut left = Histogram::<8>::new().with_literal_mode(literal);
+        left.merge_from(&right).unwrap();
+
+        let v = left.view();
+        let buckets = v.positive();
+        let mapping = Mapping::new(v.scale()).unwrap();
+        let exp_idx = mapping.map_to_index(crate::float64::MIN_VALUE);
+
+        assert_eq!(
+            buckets.offset(), exp_idx,
+            "literal={literal}: offset mismatch at scale={}", v.scale()
+        );
+        let bt: u64 = buckets.iter().sum();
+        assert!(bt <= v.count(),
+            "literal={literal}: bucket total ({bt}) > count ({})", v.count());
+    }
+}
+
+#[test]
+fn repro_fuzz_stateful_bucket_total() {
+    // Regression: merge atomicity. When a cross-size merge fails
+    // (Overflow at MIN_SCALE), the destination must be unchanged.
+    let v1: f64 = f64::from_bits(0x5829f8b15858ff40);
+    let v2: f64 = f64::from_bits(0x004b000000000000);
+    let v3: f64 = f64::from_bits(0x56562c0000000000);
+
+    let mut pool0 = Histogram::<8>::new().with_literal_mode(false);
+    pool0.update_by_incr(v1, 12).unwrap();
+    pool0.update_by_incr(v2, 1).unwrap();
+    pool0.update_by_incr(v3, 1).unwrap();
+
+    let mut big = Histogram::<16>::new().with_literal_mode(false);
+    big.merge_from_other(&pool0).unwrap();
+
+    // Snapshot big before the second (failing) merge.
+    let big_before = big.clone();
+    let merge2 = big.merge_from_other(&pool0);
+
+    let vb = big.view();
+    let bt: u64 = vb.positive().iter().sum();
+    assert!(bt <= vb.count(),
+        "bucket total ({bt}) exceeds count ({})", vb.count());
+
+    if merge2.is_err() {
+        // On failure, histogram must be unchanged.
+        let mut vbefore = big_before.clone();
+        assert_eq!(vb.count(), vbefore.view().count(),
+            "failed merge must not change count");
+    }
+}

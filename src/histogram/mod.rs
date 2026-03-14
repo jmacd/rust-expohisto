@@ -1059,6 +1059,22 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
+        let snapshot = self.clone();
+        match self.merge_from_raw_inner(stats, buckets, at) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                *self = snapshot;
+                Err(e)
+            }
+        }
+    }
+
+    fn merge_from_raw_inner(
+        &mut self,
+        stats: &Stats,
+        buckets: &BucketDescriptor,
+        at: &dyn Fn(u32) -> u64,
+    ) -> Result<(), Overflow> {
         let new_count = self.checked_add_count(stats.count).ok_or(Overflow)?;
         let new_sum = self.sum() + stats.sum;
 
@@ -1108,6 +1124,20 @@ impl<const N: usize> Histogram<N> {
         if other.count() == 0 {
             return Ok(());
         }
+        let snapshot = self.clone();
+        match self.merge_literal_from_inner(other) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                *self = snapshot;
+                Err(e)
+            }
+        }
+    }
+
+    fn merge_literal_from_inner<const M: usize>(
+        &mut self,
+        other: &Histogram<M>,
+    ) -> Result<(), Overflow> {
         let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
         let new_sum = self.sum() + other.sum();
         if self.literal {
