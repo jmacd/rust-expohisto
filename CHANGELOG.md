@@ -8,8 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- `Histogram<N, P>` — allocation-free exponential histogram with const-generic
-  pool size `N` and precision tier `P` (`P32` or `P64`)
+- `Histogram<N>` — allocation-free exponential histogram with const-generic
+  pool size `N` (in u64 words)
 - **Literal mode cold start** — new histograms store raw f64 values until the
   pool fills, then promote to bucket mode at the optimal scale in one shot
 - **Sub-byte bucket widths** — counters start at 1-bit and widen through
