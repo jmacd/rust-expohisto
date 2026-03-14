@@ -863,9 +863,17 @@ impl<const N: usize> Histogram<N> {
 
     /// Widens bucket counters by one step, adjusting the mapping scale
     /// to account for any implicit downscale during widening.
+    /// Re-inserts any deferred value displaced by an odd-base shift.
     fn widen_one_step(&mut self) -> Result<(), Overflow> {
-        let by = self.bucket_widen(1).ok_or(Overflow)?;
-        self.adjust_scale(by)
+        let (by, deferred) = self.bucket_widen().ok_or(Overflow)?;
+        self.adjust_scale(by)?;
+        if let Some((idx, val)) = deferred {
+            let base_scale = self.mapping.scale();
+            self.retry_increment(val, |h| {
+                idx >> (base_scale - h.mapping.scale())
+            })?;
+        }
+        Ok(())
     }
 
     /// Downscales by `change` scale-steps using adaptive SWAR merge.
@@ -879,9 +887,10 @@ impl<const N: usize> Histogram<N> {
     ///   width. This simultaneously merges AND widens in one SWAR pass.
     ///
     /// If `index_base` is odd (possible after several no-overflow
-    /// merges), shifts data up by one slot to restore even alignment
-    /// before the SWAR step. Falls back to scalar gather-scatter for
-    /// the rare case where the top slot is occupied.
+    /// merges or after a widen that fills all post-widen capacity),
+    /// shifts data up by one slot to restore even alignment. When
+    /// the top slot is occupied, that slot's value is saved and
+    /// re-inserted after all downscale steps complete.
     ///
     /// At U64 width, remaining steps use `bucket_downscale_u64`
     /// (scatter-write collapse).
@@ -898,9 +907,27 @@ impl<const N: usize> Histogram<N> {
 
         let mut remaining = change;
 
+        // Deferred values: up to 6 (one per sub-U64 width level).
+        let mut deferred: [(i32, u64); 6] = [(0, 0); 6];
+        let mut n_deferred = 0usize;
+
         // Phase 1: Adaptive SWAR merge at sub-U64 widths.
         while remaining > 0 && self.bucket_width != BucketWidth::U64 {
-            let steps = self.swar_merge_step(false).ok_or(Overflow)?;
+            let (steps, overflow) =
+                self.swar_merge_step(false).ok_or(Overflow)?;
+
+            // Shift all previously deferred indices by this step.
+            for d in &mut deferred[..n_deferred] {
+                d.0 >>= steps;
+            }
+
+            // Collect new deferred (already at post-step scale).
+            if let Some(d) = overflow {
+                debug_assert!(n_deferred < deferred.len());
+                deferred[n_deferred] = d;
+                n_deferred += 1;
+            }
+
             self.adjust_scale(steps)?;
             remaining -= steps;
         }
@@ -908,11 +935,28 @@ impl<const N: usize> Histogram<N> {
         // Phase 2: At U64, scatter-write for remaining steps.
         if remaining > 0 {
             debug_assert_eq!(self.bucket_width, BucketWidth::U64);
+
+            // Shift deferred indices by U64 steps.
+            for d in &mut deferred[..n_deferred] {
+                d.0 >>= remaining;
+            }
+
             self.bucket_downscale_u64(remaining);
             self.adjust_scale(remaining)?;
         }
 
         self.trim_bucket_range();
+
+        // Phase 3: Re-insert deferred values.
+        // All deferred indices are relative to the scale at this point.
+        // Use a single reference scale so that if re-inserting one value
+        // triggers a further downscale, subsequent indices adjust correctly.
+        let deferred_scale = self.mapping.scale();
+        for &(idx, val) in &deferred[..n_deferred] {
+            self.retry_increment(val, |h| {
+                idx >> (deferred_scale - h.mapping.scale())
+            })?;
+        }
 
         Ok(())
     }
@@ -2426,13 +2470,19 @@ mod tests {
             // Now force a widen at odd base.
             let width_before = h.bucket_width();
             if width_before != BucketWidth::U64 {
-                h.bucket_widen(1).unwrap();
+                let (by, deferred) = h.bucket_widen().unwrap();
+                assert_eq!(by, 1);
                 assert!(
                     h.bucket_width() > width_before,
                     "width should increase: {:?} → {:?}",
                     width_before,
                     h.bucket_width()
                 );
+
+                // Re-insert any deferred value.
+                if let Some((idx, val)) = deferred {
+                    h.retry_increment(val, |_| idx).unwrap();
+                }
 
                 let total_after = bucket_total(&mut h);
                 assert_eq!(
@@ -2773,8 +2823,7 @@ mod tests {
     }
 
     /// Regression: large weighted inserts of subnormal + normal value
-    /// trigger bucket_widen during downscale, corrupting bucket totals
-    /// when scalar_merge_step produced len > cap.
+    /// trigger bucket_widen during downscale, corrupting bucket totals.
     #[test]
     fn test_weighted_subnormal_merge_bucket_total() {
         let v1 = f64::from_le_bytes([32, 0, 66, 0, 0, 98, 65, 3]); // ~5.44e-293, subnormal as f32
