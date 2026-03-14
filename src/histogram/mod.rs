@@ -705,23 +705,6 @@ impl<const N: usize> Histogram<N> {
         core::mem::swap(self, other);
     }
 
-    // -- Rollback helper --
-
-    /// Executes `f`, rolling back to the pre-call state on error.
-    fn with_rollback<F>(&mut self, f: F) -> Result<(), Overflow>
-    where
-        F: FnOnce(&mut Self) -> Result<(), Overflow>,
-    {
-        let snapshot = self.clone();
-        match f(self) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                *self = snapshot;
-                Err(e)
-            }
-        }
-    }
-
     /// Records a single value.
     ///
     /// # Errors
@@ -735,7 +718,6 @@ impl<const N: usize> Histogram<N> {
     /// Records a value with a specified increment.
     ///
     /// Returns `Err(Overflow)` if the count or bucket counters would overflow.
-    /// On error, the histogram is unchanged.
     pub fn update_by_incr(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
         debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
 
@@ -746,13 +728,11 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
-            self.with_rollback(|h| {
-                if h.literal {
-                    h.update_literal(value, incr)
-                } else {
-                    h.update_buckets(value, incr)
-                }
-            })?;
+            if self.literal {
+                self.update_literal(value, incr)?;
+            } else {
+                self.update_buckets(value, incr)?;
+            }
         }
 
         let new_sum = self.sum() + value * incr as f64;
@@ -1108,7 +1088,6 @@ impl<const N: usize> Histogram<N> {
     /// # Errors
     ///
     /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
-    /// On error, the histogram is unchanged.
     pub fn merge_from_raw(
         &mut self,
         stats: &Stats,
@@ -1122,46 +1101,44 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(stats.count).ok_or(Overflow)?;
         let new_sum = self.sum() + stats.sum;
 
-        self.with_rollback(|h| {
-            if buckets.len > 0 {
-                if h.literal {
-                    h.promote()?;
-                }
-
-                let other_end = buckets.offset + buckets.len as i32 - 1;
-                let cap = h.bucket_capacity() as i32;
-                let min_scale = h.mapping.scale().min(buckets.scale);
-
-                let self_hl = h.high_low_at_scale(min_scale);
-                let other_hl = {
-                    let shift = buckets.scale - min_scale;
-                    HighLow {
-                        low: buckets.offset >> shift,
-                        high: other_end >> shift,
-                    }
-                };
-                let hlp = self_hl.merge(other_hl);
-                let min_scale = min_scale - change_scale(hlp, cap);
-
-                h.downscale_to(min_scale)?;
-
-                for i in 0..buckets.len {
-                    let count = at(i);
-                    if count == 0 {
-                        continue;
-                    }
-                    h.retry_increment(count, |h| {
-                        let shift = buckets.scale - h.mapping.scale();
-                        (buckets.offset + i as i32) >> shift
-                    })?;
-                }
-
-                h.trim_bucket_range();
+        if buckets.len > 0 {
+            if self.literal {
+                self.promote()?;
             }
 
-            h.commit_stats(new_sum, new_count, stats.min, stats.max);
-            Ok(())
-        })
+            let other_end = buckets.offset + buckets.len as i32 - 1;
+            let cap = self.bucket_capacity() as i32;
+            let min_scale = self.mapping.scale().min(buckets.scale);
+
+            let self_hl = self.high_low_at_scale(min_scale);
+            let other_hl = {
+                let shift = buckets.scale - min_scale;
+                HighLow {
+                    low: buckets.offset >> shift,
+                    high: other_end >> shift,
+                }
+            };
+            let hlp = self_hl.merge(other_hl);
+            let min_scale = min_scale - change_scale(hlp, cap);
+
+            self.downscale_to(min_scale)?;
+
+            for i in 0..buckets.len {
+                let count = at(i);
+                if count == 0 {
+                    continue;
+                }
+                self.retry_increment(count, |h| {
+                    let shift = buckets.scale - h.mapping.scale();
+                    (buckets.offset + i as i32) >> shift
+                })?;
+            }
+
+            self.trim_bucket_range();
+        }
+
+        self.commit_stats(new_sum, new_count, stats.min, stats.max);
+        Ok(())
     }
 
     /// Merges literal values from another histogram into this one.
@@ -1172,16 +1149,14 @@ impl<const N: usize> Histogram<N> {
         }
         let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
         let new_sum = self.sum() + other.sum();
-        self.with_rollback(|h| {
-            if h.literal {
-                h.promote()?;
-            }
-            for &bits in other.literal_values() {
-                h.update_buckets(f64::from_bits(bits), 1)?;
-            }
-            h.commit_stats(new_sum, new_count, other.min(), other.max());
-            Ok(())
-        })
+        if self.literal {
+            self.promote()?;
+        }
+        for &bits in other.literal_values() {
+            self.update_buckets(f64::from_bits(bits), 1)?;
+        }
+        self.commit_stats(new_sum, new_count, other.min(), other.max());
+        Ok(())
     }
 
     /// Builds [`Stats`] + [`BucketDescriptor`] from a histogram and
