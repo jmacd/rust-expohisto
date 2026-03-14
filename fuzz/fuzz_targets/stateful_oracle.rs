@@ -180,7 +180,8 @@ fuzz_target!(|data: &[u8]| {
                 incr_sel,
             } => {
                 let i = idx as usize % POOL;
-                try_insert(&mut pool[i], &mut shadows[i], value_bits, decode_increment(incr_sel));
+                let incr = decode_increment(incr_sel);
+                try_insert(&mut pool[i], &mut shadows[i], value_bits, incr);
             }
 
             Op::Merge { dst, src } => {
@@ -189,7 +190,6 @@ fuzz_target!(|data: &[u8]| {
                 if d == s {
                     continue;
                 }
-
                 if big.merge_from_other(&pool[s]).is_ok() {
                     let src_shadow = shadows[s].clone();
                     big_shadow.merge_from(&src_shadow);
@@ -226,7 +226,8 @@ fuzz_target!(|data: &[u8]| {
                 log_incr,
             } => {
                 let i = idx as usize % POOL;
-                try_insert(&mut pool[i], &mut shadows[i], value_bits, 1u64 << ((log_incr % 41) as u32));
+                let incr = 1u64 << ((log_incr % 41) as u32);
+                try_insert(&mut pool[i], &mut shadows[i], value_bits, incr);
             }
         }
     }

@@ -806,7 +806,7 @@ impl<const N: usize> Histogram<N> {
         self.reset_bucket_state();
         self.mapping = Mapping::new(self.limit_scale as i32).map_err(|_| Overflow)?;
 
-        for &bits in &literals[..count] {
+        for &bits in literals[..count].iter() {
             let v = f64::from_bits(bits);
             self.update_buckets(v, 1)?;
         }
@@ -1155,9 +1155,10 @@ impl<const N: usize> Histogram<N> {
                         (buckets.offset + i as i32) >> shift
                     })?;
                 }
+
+                h.trim_bucket_range();
             }
 
-            h.trim_bucket_range();
             h.commit_stats(new_sum, new_count, stats.min, stats.max);
             Ok(())
         })
@@ -3416,5 +3417,31 @@ mod tests {
                 p50_err * 100.0,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+
+    /// Regression: merge_from_raw called trim_bucket_range() on literal-mode
+    /// histograms, corrupting literal_count by interpreting f64 bit patterns
+    /// as B1 counters.
+    #[test]
+    fn trim_bucket_range_preserves_literal_mode() {
+        let v = f64::from_bits(0x4078014421f8ff58_u64.swap_bytes());
+
+        let mut h: Histogram<8> = Histogram::new().with_literal_mode(true);
+
+        // Insert non-zero value with incr=2
+        assert!(h.update_by_incr(v, 2).is_ok());
+
+        // Insert zero with incr=12
+        assert!(h.update_by_incr(0.0, 12).is_ok());
+
+        let buckets = h.positive();
+        let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
+        assert_eq!(h.count(), 14);
+        assert_eq!(bucket_total, 2, "non-zero observations should be in buckets");
     }
 }
