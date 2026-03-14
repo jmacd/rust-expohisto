@@ -22,6 +22,12 @@ mod verify;
 /// Number of pooled Histogram<8> instances.
 const POOL: usize = 5;
 
+/// Maximum shadow ops before skipping exact verification.
+/// Back-and-forth merges cause Fibonacci growth in ops lists;
+/// we cap to keep fuzz throughput high while still verifying
+/// small/medium inputs exactly.
+const MAX_SHADOW_OPS: usize = 50_000;
+
 /// A weighted observation.
 #[derive(Clone, Copy)]
 struct Obs {
@@ -30,20 +36,34 @@ struct Obs {
 }
 
 /// Shadow state tracking what a histogram *should* contain.
+/// When ops exceeds MAX_SHADOW_OPS the shadow is poisoned and
+/// exact verification is skipped (the histogram is still exercised).
 #[derive(Clone, Default)]
 struct Shadow {
     ops: Vec<Obs>,
+    poisoned: bool,
 }
 
 impl Shadow {
     fn merge_from(&mut self, other: &Shadow) {
+        if self.poisoned || other.poisoned
+            || self.ops.len() + other.ops.len() > MAX_SHADOW_OPS
+        {
+            self.poisoned = true;
+            self.ops.clear();
+            return;
+        }
         self.ops.extend_from_slice(&other.ops);
     }
     fn clear(&mut self) {
         self.ops.clear();
+        self.poisoned = false;
     }
     fn swap(&mut self, other: &mut Shadow) {
         core::mem::swap(self, other);
+    }
+    fn can_verify(&self) -> bool {
+        !self.poisoned
     }
 }
 
@@ -110,7 +130,7 @@ fn decode_increment(sel: u8) -> u64 {
 
 fn try_insert(hist: &mut Histogram<8>, shadow: &mut Shadow, value_bits: u64, incr: u64) {
     if let Some(v) = decode_value(value_bits) {
-        if hist.update_by_incr(v, incr).is_ok() {
+        if hist.update_by_incr(v, incr).is_ok() && !shadow.poisoned {
             shadow.ops.push(Obs { value: v, incr });
         }
     }
@@ -121,6 +141,9 @@ fn try_insert(hist: &mut Histogram<8>, shadow: &mut Shadow, value_bits: u64, inc
 // ---------------------------------------------------------------------------
 
 fn verify<const N: usize>(hist: &mut Histogram<N>, shadow: &Shadow, label: &str) {
+    if !shadow.can_verify() {
+        return;
+    }
     let ops = shadow
         .ops
         .iter()
