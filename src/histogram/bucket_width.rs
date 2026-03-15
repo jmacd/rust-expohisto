@@ -74,18 +74,6 @@ impl BucketWidth {
         }
     }
 
-    /// Returns the width `steps` levels wider, or `None` if it would
-    /// exceed U64.
-    #[inline]
-    pub(crate) const fn widen_by(self, steps: i32) -> Option<BucketWidth> {
-        let target = self.level() + steps as usize;
-        if target > 6 {
-            None
-        } else {
-            Some(ALL_WIDTHS[target])
-        }
-    }
-
     /// Returns the maximum value storable in one counter at this width.
     #[inline]
     pub(crate) const fn counter_max(self) -> u64 {

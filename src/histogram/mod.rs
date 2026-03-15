@@ -8,9 +8,10 @@
 //! promotion).
 //!
 //! Bucket counters start at 1-bit and widen through the chain
-//! 1→2→4→8→16→32→64 bits via combined downscale+widen when a counter
-//! saturates. Sub-byte transitions use parallel bit-sum (SWAR) — the
-//! popcount algorithm's building blocks.
+//! 1→2→4→8→16→32→64 bits.  Both downscale and counter-overflow use SWAR
+//! (SIMD-within-a-register) pairwise-merge steps at sub-U64 widths, then
+//! scatter-write at U64.  Each merge step is self-contained: any value
+//! displaced by an odd-base alignment shift is fixed up immediately.
 
 use core::fmt;
 
@@ -282,22 +283,14 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Commits sum, count, min, and max from incoming values.
-    ///
-    /// If the histogram is currently empty (count == 0), min and max
-    /// are set directly.  Otherwise min and max are merged via the
-    /// respective comparison.
     fn commit_stats(&mut self, sum: f64, count: u64, min: f64, max: f64) {
         self.stats.sum = sum;
         if self.stats.count == 0 {
             self.stats.min = min;
             self.stats.max = max;
         } else {
-            if min < self.stats.min {
-                self.stats.min = min;
-            }
-            if max > self.stats.max {
-                self.stats.max = max;
-            }
+            self.stats.min = self.stats.min.min(min);
+            self.stats.max = self.stats.max.max(max);
         }
         self.stats.count = count;
     }
@@ -342,24 +335,6 @@ impl<const N: usize> Histogram<N> {
         self.index_end >>= by;
         self.index_base >>= by;
     }
-
-    /// Clamps `index_end` so the live range does not exceed capacity.
-    #[inline]
-    fn clamp_index_end(&mut self) {
-        let cap = self.bucket_capacity() as i32;
-        let max_end = self.index_start + cap - 1;
-        if self.index_end > max_end {
-            self.index_end = max_end;
-        }
-    }
-
-    /// Returns true if the topmost slot in the last data word is occupied.
-    #[inline]
-    fn top_slot_occupied(&self) -> bool {
-        let bits = self.bucket_width.bits();
-        let n = self.bucket_word_count();
-        n > 0 && self.bucket_data()[n - 1] >> (64 - bits) != 0
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -367,12 +342,6 @@ impl<const N: usize> Histogram<N> {
 // ---------------------------------------------------------------------------
 
 impl<const N: usize> Histogram<N> {
-    /// Returns the number of u64 words available for bucket data.
-    #[inline]
-    fn bucket_word_count(&self) -> usize {
-        N
-    }
-
     /// Returns the bucket data as a slice.
     #[inline]
     fn bucket_data(&self) -> &[u64] {
@@ -388,7 +357,7 @@ impl<const N: usize> Histogram<N> {
     /// Number of logical buckets available at the current width.
     #[inline]
     pub fn bucket_capacity(&self) -> usize {
-        self.bucket_width.capacity(self.bucket_word_count())
+        self.bucket_width.capacity(N)
     }
 
     /// Eagerly promotes from literal mode to bucket mode.
@@ -612,7 +581,7 @@ impl<const N: usize> Histogram<N> {
     /// Maximum number of literals that can be stored.
     #[inline]
     fn literal_capacity(&self) -> usize {
-        self.bucket_word_count()
+        N
     }
 
     /// Returns the stored literal values as a slice.
@@ -675,6 +644,7 @@ impl<const N: usize> Histogram<N> {
     /// Records a value with a specified increment.
     ///
     /// Returns `Err(Overflow)` if the count or bucket counters would overflow.
+    /// On error the histogram is left unchanged (snapshot/rollback).
     pub fn update_by_incr(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
         debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
 
@@ -686,11 +656,12 @@ impl<const N: usize> Histogram<N> {
 
         if value != 0.0 {
             let snapshot = self.clone();
-            if let Err(e) = if self.literal {
+            let result = if self.literal {
                 self.update_literal(value, incr)
             } else {
                 self.update_buckets(value, incr)
-            } {
+            };
+            if let Err(e) = result {
                 *self = snapshot;
                 return Err(e);
             }
@@ -706,20 +677,13 @@ impl<const N: usize> Histogram<N> {
         debug_assert!(self.literal);
 
         let count = self.literal_count();
-        let cap = self.literal_capacity();
         let needed = incr as usize;
 
-        if count + needed <= cap {
-            // Fits — store `incr` copies of the value's bit pattern.
-            let start = count;
-            let bits = value.to_bits();
-            for i in 0..needed {
-                self.data[start + i] = bits;
-            }
+        if count + needed <= self.literal_capacity() {
+            self.data[count..count + needed].fill(value.to_bits());
             self.index_end += incr as i32;
             Ok(())
         } else {
-            // Overflow — promote with the trigger value included.
             self.promote_with(value, incr)
         }
     }
@@ -747,7 +711,7 @@ impl<const N: usize> Histogram<N> {
         self.reset_bucket_state();
         self.mapping = Mapping::new(self.limit_scale as i32).map_err(|_| Overflow)?;
 
-        for &bits in literals[..count].iter() {
+        for &bits in &literals[..count] {
             let v = f64::from_bits(bits);
             self.update_buckets(v, 1)?;
         }
@@ -803,35 +767,27 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Widens bucket counters by one step, adjusting the mapping scale
-    /// to account for any implicit downscale during widening.
-    /// Re-inserts any deferred value displaced by an odd-base shift.
+    /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Overflow> {
-        let (by, deferred) = self.bucket_widen().ok_or(Overflow)?;
-        self.adjust_scale(by)?;
-        if let Some((idx, val)) = deferred {
-            let base_scale = self.mapping.scale();
-            self.retry_increment(val, |h| {
-                idx >> (base_scale - h.mapping.scale())
-            })?;
+        if self.is_effectively_empty() {
+            self.bucket_width = self.bucket_width.wider().ok_or(Overflow)?;
+            self.shift_indices(1);
+            return self.adjust_scale(1);
         }
-        Ok(())
+        let displaced = self.swar_merge_step(true).ok_or(Overflow)?;
+        self.adjust_scale(1)?;
+        self.reinsert_displaced(displaced)
     }
 
-    /// Downscales by `change` scale-steps using adaptive SWAR merge.
+    /// Downscales by `change` scale-steps.
     ///
-    /// Processes one merge step at a time. Each step does a SWAR
-    /// pairwise sum and checks for overflow:
+    /// At sub-U64 widths, processes one SWAR merge step at a time.
+    /// Each step does a pairwise sum and checks for overflow:
     ///
     /// - **No overflow**: narrows back to the original width (preserving
     ///   bucket capacity) and continues to the next step.
     /// - **Overflow**: accepts the wider format and continues at the new
-    ///   width. This simultaneously merges AND widens in one SWAR pass.
-    ///
-    /// If `index_base` is odd (possible after several no-overflow
-    /// merges or after a widen that fills all post-widen capacity),
-    /// shifts data up by one slot to restore even alignment. When
-    /// the top slot is occupied, that slot's value is saved and
-    /// re-inserted after all downscale steps complete.
+    ///   width.
     ///
     /// At U64 width, remaining steps use `bucket_downscale_u64`
     /// (scatter-write collapse).
@@ -852,57 +808,33 @@ impl<const N: usize> Histogram<N> {
 
         let mut remaining = change;
 
-        // Deferred values: up to 6 (one per sub-U64 width level).
-        let mut deferred: [(i32, u64); 6] = [(0, 0); 6];
-        let mut n_deferred = 0usize;
-
-        // Phase 1: Adaptive SWAR merge at sub-U64 widths.
+        // Phase 1: SWAR merge at sub-U64 widths, one step at a time.
         while remaining > 0 && self.bucket_width != BucketWidth::U64 {
-            let (steps, overflow) =
-                self.swar_merge_step(false).ok_or(Overflow)?;
-
-            // Shift all previously deferred indices by this step.
-            for d in &mut deferred[..n_deferred] {
-                d.0 >>= steps;
-            }
-
-            // Collect new deferred (already at post-step scale).
-            if let Some(d) = overflow {
-                debug_assert!(n_deferred < deferred.len());
-                deferred[n_deferred] = d;
-                n_deferred += 1;
-            }
-
-            self.adjust_scale(steps)?;
-            remaining -= steps;
+            let displaced = self.swar_merge_step(false).ok_or(Overflow)?;
+            self.adjust_scale(1)?;
+            remaining -= 1;
+            self.reinsert_displaced(displaced)?;
         }
 
         // Phase 2: At U64, scatter-write for remaining steps.
         if remaining > 0 {
             debug_assert_eq!(self.bucket_width, BucketWidth::U64);
-
-            // Shift deferred indices by U64 steps.
-            for d in &mut deferred[..n_deferred] {
-                d.0 >>= remaining;
-            }
-
             self.bucket_downscale_u64(remaining);
             self.adjust_scale(remaining)?;
         }
 
         self.trim_bucket_range();
+        Ok(())
+    }
 
-        // Phase 3: Re-insert deferred values.
-        // All deferred indices are relative to the scale at this point.
-        // Use a single reference scale so that if re-inserting one value
-        // triggers a further downscale, subsequent indices adjust correctly.
-        let deferred_scale = self.mapping.scale();
-        for &(idx, val) in &deferred[..n_deferred] {
-            self.retry_increment(val, |h| {
-                idx >> (deferred_scale - h.mapping.scale())
-            })?;
+    /// Re-inserts a value displaced by an odd-base SWAR shift that could
+    /// not be placed after a widen (capacity halved, target wrapped).
+    /// This may trigger a further downscale to make room.
+    fn reinsert_displaced(&mut self, displaced: Option<(i32, u64)>) -> Result<(), Overflow> {
+        if let Some((idx, val)) = displaced {
+            let scale = self.mapping.scale();
+            self.retry_increment(val, |h| idx >> (scale - h.mapping.scale()))?;
         }
-
         Ok(())
     }
 
@@ -914,33 +846,35 @@ impl<const N: usize> Histogram<N> {
         self.do_downscale_impl(change)
     }
 
-    /// Attempts to increment at the given index.
+    /// Attempts to place `incr` into the bucket at `index`.
+    ///
+    /// Returns `NeedsDownscale` if the index doesn't fit in the current
+    /// range, or `CounterOverflow` if the counter at `index` can't hold
+    /// the addition.  The caller retries after adjusting scale or width.
     fn increment_index_by(&mut self, index: i32, incr: u64) -> IncrResult {
         if incr == 0 {
             return IncrResult::Ok;
         }
 
-        let max_size = self.bucket_capacity() as i32;
+        let cap = self.bucket_capacity() as i32;
 
         if self.buckets_empty() {
             self.index_start = index;
             self.index_end = index;
-            // Align base to one word of slots at the current width
-            // so that counter pairs always share a word for SWAR widening.
+            // Align base to a word boundary so that SWAR pairwise ops
+            // never split a counter pair across u64 words.
             let spw = self.bucket_width.slots_per_word() as i32;
             self.index_base = index & !(spw - 1);
         } else if index < self.index_start {
-            // At sub-U64, indices below index_base would wrap and break
-            // SWAR. Force a downscale (which widens to U64 first, where
-            // wrapping is safe).
+            // At sub-U64 widths, the ring buffer must not wrap below
+            // index_base (SWAR requires contiguous physical layout).
             if self.bucket_width != BucketWidth::U64 && index < self.index_base {
                 return IncrResult::NeedsDownscale(HighLow {
                     low: index,
                     high: self.index_end,
                 });
             }
-            let span = self.index_end.saturating_sub(index);
-            if span >= max_size {
+            if self.index_end - index >= cap {
                 return IncrResult::NeedsDownscale(HighLow {
                     low: index,
                     high: self.index_end,
@@ -951,16 +885,13 @@ impl<const N: usize> Histogram<N> {
             }
             self.index_start = index;
         } else if index > self.index_end {
-            // At sub-U64, indices at or above index_base + cap would
-            // wrap and break SWAR.
-            if self.bucket_width != BucketWidth::U64 && index >= self.index_base + max_size {
+            if self.bucket_width != BucketWidth::U64 && index >= self.index_base + cap {
                 return IncrResult::NeedsDownscale(HighLow {
                     low: self.index_start,
                     high: index,
                 });
             }
-            let span = index.saturating_sub(self.index_start);
-            if span >= max_size {
+            if index - self.index_start >= cap {
                 return IncrResult::NeedsDownscale(HighLow {
                     low: self.index_start,
                     high: index,
@@ -979,7 +910,7 @@ impl<const N: usize> Histogram<N> {
         IncrResult::Ok
     }
 
-    /// Handles the result of [`increment_index_by`], performing downscale
+    /// Handles the result of `increment_index_by`, performing downscale
     /// or widen as needed.  Returns `Ok(true)` when the increment
     /// succeeded, `Ok(false)` when the caller should retry.
     fn handle_incr_result(&mut self, result: IncrResult) -> Result<bool, Overflow> {
@@ -994,6 +925,10 @@ impl<const N: usize> Histogram<N> {
                 if change > 0 {
                     self.do_downscale_impl(change)?;
                 } else if self.bucket_width != BucketWidth::U64 {
+                    // Range fits in capacity but the index falls outside
+                    // [index_base, index_base + cap) — the contiguous-layout
+                    // constraint for SWAR at sub-U64 widths.  Widen to U64
+                    // (where wrapping is safe) via a 1-step merge.
                     self.widen_one_step()?;
                 } else {
                     self.do_downscale_impl(1)?;
@@ -1100,9 +1035,9 @@ impl<const N: usize> Histogram<N> {
                 }
             };
             let hlp = self_hl.merge(other_hl);
-            let min_scale = min_scale - change_scale(hlp, cap);
+            let target_scale = min_scale - change_scale(hlp, cap);
 
-            self.downscale_to(min_scale)?;
+            self.downscale_to(target_scale)?;
 
             for i in 0..buckets.len {
                 let count = at(i);

@@ -592,14 +592,12 @@ mod flat_layout {
     #[test]
     fn test_capacity() {
         let h: Histogram<16> = Histogram::new();
-        assert_eq!(h.bucket_word_count(), 16);
         assert_eq!(h.bucket_capacity(), 1024); // 16 * 64 at B1
     }
 
     #[test]
     fn test_minimum_n() {
         let h: Histogram<8> = Histogram::new();
-        assert_eq!(h.bucket_word_count(), 8);
         assert_eq!(h.bucket_capacity(), 512); // 8 * 64 at B1
     }
 
@@ -1240,12 +1238,11 @@ fn test_do_downscale_odd_base_preserves_total() {
 }
 
 // -----------------------------------------------------------------------
-// bucket_widen at odd base
+// Odd-base downscale preserves totals (no deferred mechanism)
 // -----------------------------------------------------------------------
 
 #[test]
-fn test_bucket_widen_odd_base_uses_scalar() {
-    // Construct a scenario where base is odd, then verify widen works.
+fn test_odd_base_downscale_preserves_total() {
     // Start at max scale so we have room to downscale.
     let mut h: Histogram<16> = Histogram::with_scale(8);
     h.update_by_incr(1.5, 5).unwrap();
@@ -1261,29 +1258,15 @@ fn test_bucket_widen_odd_base_uses_scalar() {
     }
 
     if h.index_base & 1 != 0 {
-        // Now force a widen at odd base.
-        let width_before = h.bucket_width();
-        if width_before != BucketWidth::U64 {
-            let (by, deferred) = h.bucket_widen().unwrap();
-            assert_eq!(by, 1);
-            assert!(
-                h.bucket_width() > width_before,
-                "width should increase: {:?} → {:?}",
-                width_before,
-                h.bucket_width()
-            );
+        // One more downscale at odd base — the saved-value fix-up
+        // is handled internally by swar_merge_step.
+        h.do_downscale(1).unwrap();
 
-            // Re-insert any deferred value.
-            if let Some((idx, val)) = deferred {
-                h.retry_increment(val, |_| idx).unwrap();
-            }
-
-            let total_after = bucket_total(&mut h);
-            assert_eq!(
-                total_before, total_after,
-                "bucket total changed on odd-base widen"
-            );
-        }
+        let total_after = bucket_total(&mut h);
+        assert_eq!(
+            total_before, total_after,
+            "bucket total changed on odd-base downscale"
+        );
     }
 }
 

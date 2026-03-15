@@ -1,37 +1,42 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bucket operations — widen (SWAR) and downscale.
+//! Bucket operations — widen and downscale.
+//!
+//! Both widen and downscale use SWAR pairwise-merge steps at sub-U64
+//! widths, then scatter-write at U64.  Each step is self-contained:
+//! any value displaced by an odd-base alignment shift is fixed up
+//! immediately rather than being deferred to a later phase.
 
 use super::bucket_width::BucketWidth;
 use super::swar::{swar_has_overflow, swar_narrow_compact, swar_shift_up_one, swar_step};
 use super::Histogram;
 
 impl<const N: usize> Histogram<N> {
-    /// Widens bucket counters by one scale-step using SWAR pairwise
-    /// summation. Doubles the counter width and halves the index range
-    /// (equivalent to a 1-step downscale).
+    /// Performs one SWAR pairwise-merge step (1-step downscale).
     ///
-    /// At sub-U64, data never wraps (indices are always in
-    /// `[index_base, index_base + cap)`), so SWAR operates on a
-    /// contiguous linear layout.
+    /// When `index_base` is odd, the data must be shifted up by one
+    /// physical slot before the SWAR step so that logical pairs align
+    /// with physical pairs.  If the top slot is occupied, its value is
+    /// saved, zeroed (freeing room for the shift), and re-inserted
+    /// immediately after the step completes.
     ///
-    /// Returns `None` if already at U64.
-    /// Returns `Some((steps, deferred))` on success: `steps` is always 1,
-    /// and `deferred` is an optional `(index, count)` displaced during
-    /// an odd-base shift that the caller must re-insert.
-    pub(super) fn bucket_widen(&mut self) -> Option<(i32, Option<(i32, u64)>)> {
-        if self.is_effectively_empty() {
-            let target = self.bucket_width.widen_by(1)?;
-            self.bucket_width = target;
-            self.shift_indices(1);
-            return Some((1, None));
+    /// When `force_widen` is true, always accepts the wider format
+    /// (used on counter overflow).  Otherwise narrows back to the
+    /// original width when possible (preserving bucket capacity).
+    ///
+    /// Returns `None` if already at U64.  Returns `Some(displaced)` on
+    /// success, where `displaced` is an optional `(index, count)` that
+    /// could not be placed after a widen (the caller must re-insert it).
+    pub(super) fn swar_merge_step(
+        &mut self,
+        force_widen: bool,
+    ) -> Option<Option<(i32, u64)>> {
+        let width = self.bucket_width;
+        if width == BucketWidth::U64 {
+            return None;
         }
 
-        debug_assert!(
-            self.bucket_width != BucketWidth::U64,
-            "cannot widen past U64",
-        );
         debug_assert!(
             self.index_start >= self.index_base,
             "sub-U64 data must not wrap: start={} base={}",
@@ -39,60 +44,37 @@ impl<const N: usize> Histogram<N> {
             self.index_base,
         );
 
-        self.swar_merge_step(true)
-    }
+        let odd_base = self.index_base & 1 != 0;
 
-    /// Performs one SWAR pairwise-merge step.
-    ///
-    /// If `index_base` is odd, shifts data up by one slot to restore
-    /// even alignment before the SWAR step.
-    ///
-    /// When the top slot is occupied (possible after a widen that filled
-    /// all post-widen capacity), the top slot is saved, zeroed, and
-    /// returned as a deferred value for the caller to re-insert.
-    ///
-    /// When `force_widen` is true, always accepts the wider format
-    /// (used by `bucket_widen`). Otherwise checks for overflow and
-    /// narrows back to the original width when possible (used by
-    /// `do_downscale` to preserve bucket capacity).
-    ///
-    /// Returns `None` if already at U64.
-    /// Returns `Some((steps, deferred))` on success: `steps` is always 1,
-    /// and `deferred` is an optional `(index, count)` that was displaced
-    /// by the shift and must be re-inserted at `index >> 1` by the caller.
-    pub(super) fn swar_merge_step(
-        &mut self,
-        force_widen: bool,
-    ) -> Option<(i32, Option<(i32, u64)>)> {
-        let width = self.bucket_width;
-        if width == BucketWidth::U64 {
-            return None;
-        }
+        // Save the top slot if it would be clobbered by the shift.
+        let saved = if odd_base {
+            let cap = self.bucket_capacity() as i32;
+            let top_physical = (cap - 1) as usize;
 
-        let shifted = self.index_base & 1 != 0;
-        let mut deferred = None;
+            // If the live range spans the full physical capacity, the
+            // top slot holds a real value that must be preserved.
+            let saved = if self.index_end == self.index_base + cap - 1 {
+                let top_idx = self.index_end;
+                let val = self.bucket_get(top_physical);
+                self.index_end -= 1;
+                Some((top_idx, val))
+            } else {
+                None
+            };
 
-        if shifted {
-            if self.top_slot_occupied() {
-                // Save the top slot value (standalone at even index,
-                // partner is out of range) and zero it so shift has room.
-                let top_index = self.index_end;
-                debug_assert_eq!(
-                    top_index,
-                    self.index_base + self.bucket_capacity() as i32 - 1,
-                    "index_end must equal physical top when top_slot_occupied"
-                );
-                let top_slot = self.slot_for(top_index);
-                let top_val = self.bucket_get(top_slot);
-                self.bucket_set(top_slot, 0);
-                deferred = Some((top_index, top_val));
-            }
+            // The top slot must be empty for shift_up_one.  It may hold
+            // the saved live value or stale data from a previous trim.
+            self.bucket_set(top_physical, 0);
             swar_shift_up_one(self.bucket_data_mut(), width);
-        }
+            saved
+        } else {
+            None
+        };
 
         swar_step(self.bucket_data_mut(), width);
 
-        if force_widen || swar_has_overflow(self.bucket_data(), width) {
+        let widened = force_widen || swar_has_overflow(self.bucket_data(), width);
+        if widened {
             self.bucket_width = width.wider().unwrap();
         } else {
             swar_narrow_compact(self.bucket_data_mut(), width);
@@ -100,25 +82,42 @@ impl<const N: usize> Histogram<N> {
 
         self.shift_indices(1);
 
-        if shifted {
-            self.clamp_index_end();
+        // Fix up the saved value.  After the SWAR step, the output
+        // occupies the first ~half of the physical capacity; the saved
+        // value's target is always in the empty second half (no-widen)
+        // or wraps to slot 0 (widen — collision with the first pair sum).
+        if let Some((idx, val)) = saved {
+            let new_idx = idx >> 1;
+            if !widened {
+                // No widen → capacity unchanged → target slot is in the
+                // zeroed second half of the buffer.
+                if new_idx > self.index_end {
+                    self.index_end = new_idx;
+                }
+                let slot = self.slot_for(new_idx);
+                debug_assert_eq!(self.bucket_get(slot), 0);
+                self.bucket_set(slot, val);
+                Some(None)
+            } else {
+                // Widen → capacity halved → target wraps to slot 0, which
+                // already holds a different bucket's data.  Return the
+                // value so the caller can re-insert it (which may trigger
+                // a further downscale to make room).
+                Some(Some((new_idx, val)))
+            }
+        } else {
+            Some(None)
         }
-
-        // Adjust deferred index for this merge step.
-        let deferred = deferred.map(|(idx, val)| (idx >> 1, val));
-
-        Some((1, deferred))
     }
 
-    /// Clears bucket data and writes `sums` into the new index range.
-    pub(super) fn rewrite_buckets(&mut self, start: i32, end: i32, base: i32, sums: &[u64]) {
+    /// Clears bucket data and writes `sums` into a new contiguous range.
+    pub(super) fn rewrite_buckets(&mut self, start: i32, end: i32, sums: &[u64]) {
         self.bucket_data_mut().fill(0);
         self.index_start = start;
         self.index_end = end;
-        self.index_base = base;
+        self.index_base = start;
         for (i, &v) in sums.iter().enumerate() {
-            let idx = start + i as i32;
-            self.bucket_set(self.slot_for(idx), v);
+            self.bucket_set(self.slot_for(start + i as i32), v);
         }
     }
 
@@ -148,6 +147,6 @@ impl<const N: usize> Histogram<N> {
             sums[out] = sums[out].saturating_add(val);
         }
 
-        self.rewrite_buckets(new_start, new_end, new_start, &sums[..new_len]);
+        self.rewrite_buckets(new_start, new_end, &sums[..new_len]);
     }
 }
