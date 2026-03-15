@@ -335,6 +335,16 @@ impl<const N: usize> Histogram<N> {
         self.index_end >>= by;
         self.index_base >>= by;
     }
+
+    /// Returns true if `index` falls outside the contiguous physical range
+    /// `[index_base, index_base + cap)` required by SWAR at sub-U64 widths.
+    /// At U64 the ring buffer handles wrapping, so this always returns false.
+    #[inline]
+    fn swar_would_wrap(&self, index: i32) -> bool {
+        self.bucket_width != BucketWidth::U64
+            && (index < self.index_base
+                || index >= self.index_base + self.bucket_capacity() as i32)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +414,14 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
+    /// Returns the (word_index, bit_shift, mask) for a physical slot.
+    #[inline]
+    fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
+        let bits = self.bucket_width.bits();
+        let spw = 64 / bits;
+        (slot / spw, (slot % spw) * bits, self.bucket_width.counter_max())
+    }
+
     /// Gets the value at a physical slot index.
     ///
     /// All widths use the same shift-and-mask formula on the underlying
@@ -412,20 +430,15 @@ impl<const N: usize> Histogram<N> {
     /// a direct typed read.
     #[inline]
     fn bucket_get(&self, slot: usize) -> u64 {
-        let data = self.bucket_data();
-        let bits = self.bucket_width.bits();
-        let spw = 64 / bits;
-        (data[slot / spw] >> ((slot % spw) * bits)) & self.bucket_width.counter_max()
+        let (wi, shift, mask) = self.slot_addr(slot);
+        (self.bucket_data()[wi] >> shift) & mask
     }
 
     /// Sets the value at a physical slot index.
     #[inline]
     fn bucket_set(&mut self, slot: usize, value: u64) {
-        let bits = self.bucket_width.bits();
-        let spw = 64 / bits;
-        let mask = self.bucket_width.counter_max();
-        let word = &mut self.bucket_data_mut()[slot / spw];
-        let shift = (slot % spw) * bits;
+        let (wi, shift, mask) = self.slot_addr(slot);
+        let word = &mut self.bucket_data_mut()[wi];
         *word = (*word & !(mask << shift)) | ((value & mask) << shift);
     }
 
@@ -625,6 +638,18 @@ impl<const N: usize> Histogram<N> {
         self.index_base = 0;
     }
 
+    /// Runs `f`, rolling back to a snapshot on error.
+    fn with_rollback(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<(), Overflow>,
+    ) -> Result<(), Overflow> {
+        let snapshot = self.clone();
+        f(self).map_err(|e| {
+            *self = snapshot;
+            e
+        })
+    }
+
     /// Swaps contents with another histogram.
     #[inline]
     pub fn swap(&mut self, other: &mut Self) {
@@ -655,16 +680,13 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
-            let snapshot = self.clone();
-            let result = if self.literal {
-                self.update_literal(value, incr)
-            } else {
-                self.update_buckets(value, incr)
-            };
-            if let Err(e) = result {
-                *self = snapshot;
-                return Err(e);
-            }
+            self.with_rollback(|h| {
+                if h.literal {
+                    h.update_literal(value, incr)
+                } else {
+                    h.update_buckets(value, incr)
+                }
+            })?;
         }
 
         let new_sum = self.sum() + value * incr as f64;
@@ -866,9 +888,7 @@ impl<const N: usize> Histogram<N> {
             let spw = self.bucket_width.slots_per_word() as i32;
             self.index_base = index & !(spw - 1);
         } else if index < self.index_start {
-            // At sub-U64 widths, the ring buffer must not wrap below
-            // index_base (SWAR requires contiguous physical layout).
-            if self.bucket_width != BucketWidth::U64 && index < self.index_base {
+            if self.swar_would_wrap(index) {
                 return IncrResult::NeedsDownscale(HighLow {
                     low: index,
                     high: self.index_end,
@@ -885,7 +905,7 @@ impl<const N: usize> Histogram<N> {
             }
             self.index_start = index;
         } else if index > self.index_end {
-            if self.bucket_width != BucketWidth::U64 && index >= self.index_base + cap {
+            if self.swar_would_wrap(index) {
                 return IncrResult::NeedsDownscale(HighLow {
                     low: self.index_start,
                     high: index,
@@ -924,11 +944,10 @@ impl<const N: usize> Histogram<N> {
                 let change = scale_reduction(hl, self.bucket_capacity() as i32);
                 if change > 0 {
                     self.downscale_by(change)?;
-                } else if self.bucket_width != BucketWidth::U64 {
-                    // Range fits in capacity but the index falls outside
-                    // [index_base, index_base + cap) — the contiguous-layout
-                    // constraint for SWAR at sub-U64 widths.  Widen to U64
-                    // (where wrapping is safe) via a 1-step merge.
+                } else if self.swar_would_wrap(hl.low) || self.swar_would_wrap(hl.high) {
+                    // Range fits in capacity but wraps outside the
+                    // contiguous SWAR region.  Widen to U64 (where
+                    // wrapping is safe) via a 1-step merge.
                     self.widen_one_step()?;
                 } else {
                     self.downscale_by(1)?;
@@ -968,16 +987,39 @@ impl<const N: usize> Histogram<N> {
         if adopt_width && !other.buckets_empty() && self.buckets_empty() {
             let saved_width = self.bucket_width;
             self.bucket_width = self.bucket_width.max(other.bucket_width);
-            let result = self.merge_from_histogram(other);
+            let result = self.merge_as_raw(other);
             if result.is_err() {
                 self.bucket_width = saved_width;
             }
             return result;
         }
-        self.merge_from_histogram(other)
+        self.merge_as_raw(other)
     }
 
-    /// Merges from raw histogram data, enabling cross-size merging.
+    /// Extracts stats and bucket data from `other` and delegates to
+    /// [`merge_from_raw`](Self::merge_from_raw).
+    fn merge_as_raw<const M: usize>(
+        &mut self,
+        other: &Histogram<M>,
+    ) -> Result<(), Overflow> {
+        self.merge_from_raw(
+            &Stats {
+                count: other.count(),
+                sum: other.sum(),
+                min: other.min(),
+                max: other.max(),
+            },
+            &BucketDescriptor {
+                scale: other.mapping.scale(),
+                offset: other.index_start,
+                len: other.range_len(),
+            },
+            &|i| {
+                let index = other.index_start + i as i32;
+                other.bucket_get(other.slot_for(index))
+            },
+        )
+    }
     ///
     /// # Arguments
     ///
@@ -997,15 +1039,7 @@ impl<const N: usize> Histogram<N> {
         if stats.count == 0 {
             return Ok(());
         }
-
-        let snapshot = self.clone();
-        match self.merge_raw_buckets(stats, buckets, at) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                *self = snapshot;
-                Err(e)
-            }
-        }
+        self.with_rollback(|h| h.merge_raw_buckets(stats, buckets, at))
     }
 
     fn merge_raw_buckets(
@@ -1063,14 +1097,7 @@ impl<const N: usize> Histogram<N> {
         if other.count() == 0 {
             return Ok(());
         }
-        let snapshot = self.clone();
-        match self.merge_literal_values(other) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                *self = snapshot;
-                Err(e)
-            }
-        }
+        self.with_rollback(|h| h.merge_literal_values(other))
     }
 
     fn merge_literal_values<const M: usize>(
@@ -1087,31 +1114,6 @@ impl<const N: usize> Histogram<N> {
         }
         self.commit_stats(new_sum, new_count, other.min(), other.max());
         Ok(())
-    }
-
-    /// Builds [`Stats`] + [`BucketDescriptor`] from a histogram and
-    /// delegates to [`merge_from_raw`](Self::merge_from_raw).
-    fn merge_from_histogram<const M: usize>(
-        &mut self,
-        other: &Histogram<M>,
-    ) -> Result<(), Overflow> {
-        self.merge_from_raw(
-            &Stats {
-                count: other.count(),
-                sum: other.sum(),
-                min: other.min(),
-                max: other.max(),
-            },
-            &BucketDescriptor {
-                scale: other.mapping.scale(),
-                offset: other.index_start,
-                len: other.range_len(),
-            },
-            &|i| {
-                let index = other.index_start + i as i32;
-                other.bucket_get(other.slot_for(index))
-            },
-        )
     }
 
     fn index_range_at_scale(&self, target_scale: i32) -> HighLow {
