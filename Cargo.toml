@@ -12,7 +12,10 @@ categories = ["data-structures"]
 exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md"]
 
 [features]
-default = ["newrelic", "scale-8"]
+default = ["std", "newrelic", "scale-8"]
+
+# Enable std::error::Error impls. Disable for #[no_std] builds.
+std = []
 
 # Lookup table scale — choose the maximum accelerated scale.
 # Each table supports all scales from 1 up to its maximum.
@@ -60,6 +63,7 @@ bench-all = ["newrelic", "dynatrace", "scale-8", "bench-internals"]
 bench-internals = []
 
 [dependencies]
+libm = { version = "0.2", default-features = false }
 
 [build-dependencies]
 expohisto-mapping-gen = { path = "mapping-gen" }

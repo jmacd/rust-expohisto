@@ -24,6 +24,17 @@ fn main() {
         println!("cargo:rustc-cfg=has_lookup_table");
         println!("cargo:rustc-env=EXPECTED_TABLE_SCALE={scale}");
         expohisto_mapping_gen::generate_shared_boundaries(&mut file, scale).unwrap();
+
+        // Generate algorithm-specific index tables at TABLE_SCALE.
+        // Each algorithm compiles in exactly one index table; the mapping
+        // function always computes at TABLE_SCALE and right-shifts to the
+        // requested scale.
+        if env::var("CARGO_FEATURE_NEWRELIC").is_ok() {
+            expohisto_mapping_gen::generate_index_table(&mut file, scale, 1, "NR").unwrap();
+        }
+        if env::var("CARGO_FEATURE_DYNATRACE").is_ok() {
+            expohisto_mapping_gen::generate_index_table(&mut file, scale, 0, "DT").unwrap();
+        }
     } else {
         writeln!(file, "// No table features enabled").unwrap();
         writeln!(file, "pub const TABLE_SCALE: i32 = 0;").unwrap();

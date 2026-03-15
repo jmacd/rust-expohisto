@@ -5,9 +5,9 @@
 //!
 //! Uses N linear buckets per scale with two branch corrections.
 //! ~50% smaller index table than NewRelic at the cost of one extra comparison.
-//! See [`crate::lookup::ScaleTables`] for shared infrastructure.
+//! See [`crate::lookup`] for shared infrastructure.
 
-crate::lookup::define_lookup_module!(extra_bits = 0, corrections = 2);
+crate::lookup::define_lookup_module!(index_table = DT_INDEX, shift = DT_SHIFT, corrections = 2);
 
 #[cfg(test)]
 mod tests {

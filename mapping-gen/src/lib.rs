@@ -84,3 +84,85 @@ pub fn generate_shared_boundaries<W: Write>(w: &mut W, table_scale: u32) -> std:
 
     Ok(())
 }
+
+/// Derives a linear-to-log index table from a sentinel-wrapped boundaries slice.
+///
+/// For `count` equidistant linear buckets (each of width `1 << shift`
+/// in significand space), stores the approximate log bucket containing
+/// each linear bucket's lower bound.
+fn derive_index_table(boundaries: &[u64], count: usize, shift: u32) -> Vec<u16> {
+    let mut table = vec![0u16; count];
+    let mut j: u16 = 0;
+    for i in 0..count {
+        let lower_bound = (i as u64) << shift;
+        while lower_bound >= boundaries[j as usize + 1] {
+            j += 1;
+        }
+        table[i] = j;
+    }
+    table
+}
+
+/// Generates an algorithm-specific index table at the given scale.
+///
+/// `extra_bits`: 1 for NewRelic (2N linear buckets), 0 for Dynatrace (N).
+/// `prefix`: name prefix for generated symbols (e.g. "NR" or "DT").
+///
+/// Emits `{PREFIX}_INDEX: [u16; _]` and `{PREFIX}_SHIFT: u32`.
+/// The index table maps linear significand buckets to approximate log
+/// bucket indices, used with BOUNDARIES for correction lookups.
+pub fn generate_index_table<W: Write>(
+    w: &mut W,
+    table_scale: u32,
+    extra_bits: u32,
+    prefix: &str,
+) -> std::io::Result<()> {
+    let tables = LookupTables::generate(table_scale);
+    let n = tables.n;
+
+    // Reconstruct sentinel-wrapped boundaries (same layout as BOUNDARIES).
+    let mut boundaries = Vec::with_capacity(n + 3);
+    boundaries.push(0u64);
+    boundaries.extend_from_slice(&tables.log_bucket_end[..n]);
+    boundaries.push(1u64 << 52);
+    boundaries.push(1u64 << 52);
+
+    let count = 1usize << (table_scale + extra_bits);
+    let shift = 52 - table_scale - extra_bits;
+    let index_table = derive_index_table(&boundaries, count, shift);
+
+    writeln!(w)?;
+    writeln!(
+        w,
+        "/// Significand shift for {} algorithm at scale {}.",
+        prefix, table_scale
+    )?;
+    writeln!(w, "pub const {}_SHIFT: u32 = {};", prefix, shift)?;
+    writeln!(w)?;
+
+    writeln!(
+        w,
+        "/// Linear-to-log index table for {} algorithm ({} entries).",
+        prefix, count
+    )?;
+    writeln!(
+        w,
+        "pub static {}_INDEX: [u16; {}] = [",
+        prefix, count
+    )?;
+    for (i, &idx) in index_table.iter().enumerate() {
+        if i % 16 == 0 {
+            write!(w, "    ")?;
+        }
+        write!(w, "{},", idx)?;
+        if i % 16 == 15 {
+            writeln!(w)?;
+        }
+    }
+    if count % 16 != 0 {
+        writeln!(w)?;
+    }
+    writeln!(w, "];")?;
+
+    Ok(())
+}

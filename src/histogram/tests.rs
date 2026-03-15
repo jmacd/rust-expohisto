@@ -1,3 +1,7 @@
+// Tests always run with std available, even when the crate is no_std.
+extern crate std;
+use std::{eprintln, format, vec, vec::Vec};
+
 use super::*;
 use super::swar::{
     narrow_word, swar_has_overflow, swar_narrow_compact, swar_step,

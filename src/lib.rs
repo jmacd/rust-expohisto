@@ -1,10 +1,12 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+#![cfg_attr(not(feature = "std"), no_std)]
 #![doc = include_str!("../README.md")]
 
 pub(crate) mod exponent;
 pub(crate) mod float64;
+pub(crate) mod math;
 pub mod histogram;
 pub mod mapping;
 

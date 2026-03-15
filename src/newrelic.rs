@@ -4,9 +4,9 @@
 //! NewRelic lookup table-based mapping for exponential histograms.
 //!
 //! Uses 2N linear buckets per scale with one branch correction.
-//! See [`crate::lookup::ScaleTables`] for shared infrastructure.
+//! See [`crate::lookup`] for shared infrastructure.
 
-crate::lookup::define_lookup_module!(extra_bits = 1, corrections = 1);
+crate::lookup::define_lookup_module!(index_table = NR_INDEX, shift = NR_SHIFT, corrections = 1);
 
 #[cfg(test)]
 mod tests {

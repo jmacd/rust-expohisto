@@ -44,6 +44,7 @@ impl fmt::Display for MappingError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for MappingError {}
 
 /// Returns the maximum scale supported by the mapping.
@@ -147,7 +148,7 @@ impl Mapping {
         if index >= max_idx {
             if index == max_idx {
                 // Use alternate equation to avoid overflow
-                return Ok(2.0 * ((index - (1 << scale)) as f64 * self.inverse_factor).exp());
+                return Ok(2.0 * crate::math::exp((index - (1 << scale)) as f64 * self.inverse_factor));
             }
             return Err(MappingError::Overflow);
         }
@@ -156,12 +157,12 @@ impl Mapping {
             if index == min_idx {
                 return Ok(MIN_VALUE);
             } else if index == min_idx - 1 {
-                return Ok(((index + (1 << scale)) as f64 * self.inverse_factor).exp() / 2.0);
+                return Ok(crate::math::exp((index + (1 << scale)) as f64 * self.inverse_factor) / 2.0);
             }
             return Err(MappingError::Underflow);
         }
 
-        Ok((index as f64 * self.inverse_factor).exp())
+        Ok(crate::math::exp(index as f64 * self.inverse_factor))
     }
 
     // Helper functions for boundary indices

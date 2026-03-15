@@ -46,6 +46,7 @@ impl fmt::Display for Overflow {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for Overflow {}
 
 // ---------------------------------------------------------------------------
