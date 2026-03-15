@@ -28,7 +28,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns `None` if already at U64.  Returns `Some(displaced)` on
     /// success, where `displaced` is an optional `(index, count)` that
     /// could not be placed after a widen (the caller must re-insert it).
-    pub(super) fn swar_merge_step(
+    pub(super) fn pairwise_merge(
         &mut self,
         force_widen: bool,
     ) -> Option<Option<(i32, u64)>> {
@@ -111,7 +111,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Clears bucket data and writes `sums` into a new contiguous range.
-    pub(super) fn rewrite_buckets(&mut self, start: i32, end: i32, sums: &[u64]) {
+    pub(super) fn scatter_write(&mut self, start: i32, end: i32, sums: &[u64]) {
         self.bucket_data_mut().fill(0);
         self.index_start = start;
         self.index_end = end;
@@ -125,11 +125,11 @@ impl<const N: usize> Histogram<N> {
     ///
     /// At U64 width, sums use saturating arithmetic and cannot
     /// meaningfully overflow.
-    pub(super) fn bucket_downscale_u64(&mut self, by: i32) {
+    pub(super) fn downscale_u64(&mut self, by: i32) {
         debug_assert_eq!(self.bucket_width, BucketWidth::U64);
         debug_assert!(by >= 1);
 
-        if self.is_effectively_empty() {
+        if self.range_is_empty() {
             self.shift_indices(by);
             return;
         }
@@ -147,6 +147,6 @@ impl<const N: usize> Histogram<N> {
             sums[out] = sums[out].saturating_add(val);
         }
 
-        self.rewrite_buckets(new_start, new_end, &sums[..new_len]);
+        self.scatter_write(new_start, new_end, &sums[..new_len]);
     }
 }

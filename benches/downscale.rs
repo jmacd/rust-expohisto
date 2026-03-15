@@ -13,7 +13,7 @@
 //! 2. **merge_cross_scale**: Merge a high-scale histogram into a
 //!    low-scale one, forcing the source to downscale.
 //!
-//! 3. **multi_step_downscale**: Directly measure `do_downscale(N)` on a
+//! 3. **multi_step_downscale**: Directly measure `downscale(N)` on a
 //!    pre-built histogram for various step counts.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -113,7 +113,7 @@ fn bench_downscale(c: &mut Criterion) {
                     for &v in &values {
                         let _ = h.update(v);
                     }
-                    let _ = h.do_downscale(black_box(steps));
+                    let _ = h.downscale(black_box(steps));
                     black_box(&h);
                 })
             });

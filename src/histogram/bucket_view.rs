@@ -26,7 +26,7 @@ impl<const N: usize> BucketView<'_, N> {
     /// Number of logical buckets in use.
     #[inline]
     pub fn len(&self) -> u32 {
-        self.hist.bucket_range_len()
+        self.hist.range_len()
     }
 
     /// Returns the current counter width.

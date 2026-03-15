@@ -78,7 +78,7 @@ fn bench_sub_byte(c: &mut Criterion) {
                         let mut h: Histogram<16> =
                             Histogram::with_scale(scale).with_min_bucket_width(min_w);
                         for &v in &values {
-                            h.update_by_incr(black_box(v), reps).unwrap();
+                            h.record(black_box(v), reps).unwrap();
                         }
                         black_box(&h);
                     })

@@ -96,28 +96,28 @@ fn test_auto_widen_cascade() {
         .with_literal_mode(false);
 
     // B4 → U8 at threshold 15+1=16
-    h.update_by_incr(1.0, 15).unwrap();
+    h.record(1.0, 15).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::B4);
     h.update(1.0).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U8);
     assert_eq!(h.view().count(), 16);
 
     // U8 → U16 at threshold 255+1=256
-    h.update_by_incr(1.0, 239).unwrap();
+    h.record(1.0, 239).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U8);
     h.update(1.0).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U16);
     assert_eq!(h.view().count(), 256);
 
     // U16 → U32 at threshold 65535+1=65536
-    h.update_by_incr(1.0, u16::MAX as u64 - 256).unwrap();
+    h.record(1.0, u16::MAX as u64 - 256).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U16);
     h.update(1.0).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U32);
     assert_eq!(h.view().count(), u16::MAX as u64 + 1);
 
     // U32 → U64 at threshold 4294967295+1
-    h.update_by_incr(1.0, u32::MAX as u64 - (u16::MAX as u64 + 1))
+    h.record(1.0, u32::MAX as u64 - (u16::MAX as u64 + 1))
         .unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U32);
     h.update(1.0).unwrap();
@@ -129,9 +129,9 @@ fn test_auto_widen_b4_to_u8_from_b4_start() {
     let mut h: Histogram<16> = Histogram::new()
         .with_min_bucket_width(BucketWidth::B4)
         .with_literal_mode(false);
-    h.update_by_incr(1.0, 4).unwrap();
+    h.record(1.0, 4).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::B4);
-    h.update_by_incr(1.0, 11).unwrap();
+    h.record(1.0, 11).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::B4);
     h.update(1.0).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U8);
@@ -146,7 +146,7 @@ fn test_bucket_count_halves_on_widen() {
     let initial_cap = h.bucket_capacity();
     assert_eq!(initial_cap, 16 * 16); // 256
 
-    h.update_by_incr(1.0, 16).unwrap();
+    h.record(1.0, 16).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U8);
     assert_eq!(h.bucket_capacity(), 16 * 8); // 128
 }
@@ -156,7 +156,7 @@ fn test_clear_resets_to_b4() {
     let mut h: Histogram<16> = Histogram::with_max_scale(3)
         .with_min_bucket_width(BucketWidth::B4)
         .with_literal_mode(false);
-    h.update_by_incr(1.0, 16).unwrap();
+    h.record(1.0, 16).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U8);
     h.clear();
     assert_eq!(h.bucket_width(), BucketWidth::B4);
@@ -209,18 +209,18 @@ fn test_clear_resets_to_limit_scale() {
 #[test]
 fn test_widen_preserves_data() {
     let mut h: Histogram<16> = Histogram::with_scale(0);
-    h.update_by_incr(1.0, 100).unwrap();
+    h.record(1.0, 100).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U8);
 
-    h.update_by_incr(256.0, 50).unwrap();
-    h.update_by_incr(65536.0, 200).unwrap();
+    h.record(256.0, 50).unwrap();
+    h.record(65536.0, 200).unwrap();
 
     let (count_before, sum_before) = {
         let v = h.view();
         (v.count(), v.sum())
     };
 
-    h.update_by_incr(65536.0, 55).unwrap();
+    h.record(65536.0, 55).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U8);
     h.update(65536.0).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::U16);
@@ -409,7 +409,7 @@ fn test_exhaustive_u8_overflow() {
     let num_buckets = 8;
     for i in 0..num_buckets {
         let val = 2.0_f64.powi(i * 8);
-        h.update_by_incr(val, 255).unwrap();
+        h.record(val, 255).unwrap();
     }
     // With B1 start, U8 has enough capacity for the span.
     assert!(
@@ -1030,18 +1030,18 @@ fn test_swar_step_then_narrow_compact_overflow() {
 }
 
 // -----------------------------------------------------------------------
-// Adaptive merge (do_downscale) integration tests
+// Adaptive merge (downscale) integration tests
 // -----------------------------------------------------------------------
 
 #[test]
-fn test_do_downscale_width_behavior() {
+fn test_downscale_width_behavior() {
     // Helper: insert ops into a B4 histogram at scale 0,
     // downscale(1), and verify the expected final width.
     let check = |ops: &[(f64, u64)], expected_width: BucketWidth, label: &str| {
         let mut h: Histogram<16> =
             Histogram::with_scale(0).with_min_bucket_width(BucketWidth::B4);
         for &(v, incr) in ops {
-            h.update_by_incr(v, incr).unwrap();
+            h.record(v, incr).unwrap();
         }
         assert_eq!(h.bucket_width(), BucketWidth::B4, "{label}: pre-check");
         assert_total_conserved(&mut h, 1);
@@ -1054,7 +1054,7 @@ fn test_do_downscale_width_behavior() {
 }
 
 #[test]
-fn test_do_downscale_many_indices_preserves_width() {
+fn test_downscale_many_indices_preserves_width() {
     // Many small counts at spread-out indices → pair sums ≤ 2, stays B4.
     let mut h: Histogram<16> = Histogram::with_scale(0)
         .with_min_bucket_width(BucketWidth::B4)
@@ -1133,11 +1133,11 @@ fn test_swar_step_b4_max_pair_sum() {
 }
 
 // -----------------------------------------------------------------------
-// change_scale tests
+// scale_reduction tests
 // -----------------------------------------------------------------------
 
 #[test]
-fn test_change_scale() {
+fn test_scale_reduction() {
     let cases: &[(i32, i32, i32, i32, &str)] = &[
         (0, 4, 10, 0, "fits"),
         (0, 10, 10, 1, "exact boundary"),
@@ -1147,7 +1147,7 @@ fn test_change_scale() {
     ];
     for &(low, high, cap, expected, label) in cases {
         assert_eq!(
-            change_scale(HighLow { low, high }, cap),
+            scale_reduction(HighLow { low, high }, cap),
             expected,
             "{label}"
         );
@@ -1163,8 +1163,8 @@ fn test_bucket_downscale_scalar_preserves_total_no_overflow() {
     // Two values at adjacent indices with small counts → scalar merge
     // should sum them without widening.
     let mut h: Histogram<16> = Histogram::with_scale(0).with_literal_mode(false);
-    h.update_by_incr(2.0, 3).unwrap(); // index 0
-    h.update_by_incr(4.0, 5).unwrap(); // index 1
+    h.record(2.0, 3).unwrap(); // index 0
+    h.record(4.0, 5).unwrap(); // index 1
 
     let width_before = h.bucket_width();
     assert_total_conserved(&mut h, 1);
@@ -1176,8 +1176,8 @@ fn test_bucket_downscale_scalar_preserves_total_no_overflow() {
 fn test_bucket_downscale_scalar_preserves_total_with_overflow() {
     // Fill enough that pair sums exceed B4 max (15).
     let mut h: Histogram<16> = Histogram::with_scale(0);
-    h.update_by_incr(2.0, 10).unwrap(); // index 0, count 10
-    h.update_by_incr(4.0, 10).unwrap(); // index 1, count 10
+    h.record(2.0, 10).unwrap(); // index 0, count 10
+    h.record(4.0, 10).unwrap(); // index 1, count 10
 
     assert_total_conserved(&mut h, 1);
     // 10+10=20 > 15 → must widen to U8.
@@ -1185,7 +1185,7 @@ fn test_bucket_downscale_scalar_preserves_total_with_overflow() {
 }
 
 #[test]
-fn test_do_downscale_multi_step_preserves_total() {
+fn test_downscale_multi_step_preserves_total() {
     // Insert 4 values at separate indices, then downscale by 3.
     let mut h: Histogram<16> = Histogram::with_scale(0)
         .with_min_bucket_width(BucketWidth::B4)
@@ -1197,7 +1197,7 @@ fn test_do_downscale_multi_step_preserves_total() {
     assert_eq!(total_before, 4);
     assert_eq!(h.bucket_width(), BucketWidth::B4);
 
-    h.do_downscale(3).unwrap();
+    h.downscale(3).unwrap();
 
     let total_after = bucket_total(&mut h);
     assert_eq!(total_after, 4, "total changed after 3-step downscale");
@@ -1206,7 +1206,7 @@ fn test_do_downscale_multi_step_preserves_total() {
 }
 
 #[test]
-fn test_do_downscale_multi_step_through_alignment_boundary() {
+fn test_downscale_multi_step_through_alignment_boundary() {
     // Start with base aligned to 16, downscale 5+ times so base
     // goes from even to odd and back. Verify totals survive.
     let mut h: Histogram<16> = Histogram::with_scale(0).with_literal_mode(false);
@@ -1218,14 +1218,14 @@ fn test_do_downscale_multi_step_through_alignment_boundary() {
 
     // 5 steps: base starts at e.g. -16 >> 5 = -1 (odd), so the
     // 5th step must use scalar fallback.
-    h.do_downscale(5).unwrap();
+    h.downscale(5).unwrap();
 
     let total_after = bucket_total(&mut h);
     assert_eq!(total_after, 8, "total changed after 5-step downscale");
 }
 
 #[test]
-fn test_do_downscale_odd_base_preserves_total() {
+fn test_downscale_odd_base_preserves_total() {
     // Downscale through odd-base steps using SWAR-shift.
     let mut h: Histogram<16> = Histogram::with_scale(0).with_literal_mode(false);
     for i in 0..4 {
@@ -1245,22 +1245,22 @@ fn test_do_downscale_odd_base_preserves_total() {
 fn test_odd_base_downscale_preserves_total() {
     // Start at max scale so we have room to downscale.
     let mut h: Histogram<16> = Histogram::with_scale(8);
-    h.update_by_incr(1.5, 5).unwrap();
-    h.update_by_incr(1.6, 7).unwrap();
+    h.record(1.5, 5).unwrap();
+    h.record(1.6, 7).unwrap();
 
     let total_before = bucket_total(&mut h);
 
     // Downscale until base is odd (at most 15 steps to stay above MIN_SCALE).
     let mut tries = 0;
     while h.index_base & 1 == 0 && tries < 15 {
-        h.do_downscale(1).unwrap();
+        h.downscale(1).unwrap();
         tries += 1;
     }
 
     if h.index_base & 1 != 0 {
         // One more downscale at odd base — the saved-value fix-up
-        // is handled internally by swar_merge_step.
-        h.do_downscale(1).unwrap();
+        // is handled internally by pairwise_merge.
+        h.downscale(1).unwrap();
 
         let total_after = bucket_total(&mut h);
         assert_eq!(
@@ -1292,9 +1292,9 @@ fn test_speculative_merge_width_behavior() {
     // U8 dense: 200+200=400 > 255 → widens to U16
     {
         let mut h: Histogram<16> = Histogram::with_scale(0);
-        h.update_by_incr(2.0, 200).unwrap();
+        h.record(2.0, 200).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
-        h.update_by_incr(4.0, 200).unwrap();
+        h.record(4.0, 200).unwrap();
         assert_total_conserved(&mut h, 1);
         assert_eq!(h.bucket_width(), BucketWidth::U16, "u8 dense widens to u16");
     }
@@ -1302,9 +1302,9 @@ fn test_speculative_merge_width_behavior() {
     // U8 sparse: 100+50=150 ≤ 255 → stays U8
     {
         let mut h: Histogram<16> = Histogram::with_scale(0);
-        h.update_by_incr(2.0, 100).unwrap();
+        h.record(2.0, 100).unwrap();
         assert_eq!(h.bucket_width(), BucketWidth::U8);
-        h.update_by_incr(4.0, 50).unwrap();
+        h.record(4.0, 50).unwrap();
         assert_total_conserved(&mut h, 1);
         assert_eq!(h.bucket_width(), BucketWidth::U8, "u8 sparse stays");
     }
@@ -1320,14 +1320,14 @@ fn test_sum_conservation_through_full_widen_chain() {
     // at every level: B4(max 15) → U8(255) → U16(65535) → U32 → U64.
     // Adjacent pairs sum to 1000, forcing overflow at B4, U8.
     let mut h: Histogram<16> = Histogram::with_scale(8);
-    h.update_by_incr(1.5, 500).unwrap();
-    h.update_by_incr(1.6, 500).unwrap();
+    h.record(1.5, 500).unwrap();
+    h.record(1.6, 500).unwrap();
     // Start at U16 (500 > 255).
     assert_eq!(bucket_total(&mut h), 1000);
 
     // Add more to push into U32 territory.
-    h.update_by_incr(1.7, 65000).unwrap();
-    h.update_by_incr(1.8, 65000).unwrap();
+    h.record(1.7, 65000).unwrap();
+    h.record(1.8, 65000).unwrap();
 
     // Downscale up to 10 steps, verify total at each.
     assert_total_conserved(&mut h, 10);
@@ -1350,10 +1350,10 @@ fn test_sum_conservation_scalar_path() {
 fn test_sum_conservation_large_counts() {
     // High counts that force widening at every merge.
     let mut h: Histogram<16> = Histogram::with_scale(0);
-    h.update_by_incr(2.0, 15).unwrap(); // fills B4 to max
-    h.update_by_incr(4.0, 15).unwrap();
-    h.update_by_incr(8.0, 15).unwrap();
-    h.update_by_incr(16.0, 15).unwrap();
+    h.record(2.0, 15).unwrap(); // fills B4 to max
+    h.record(4.0, 15).unwrap();
+    h.record(8.0, 15).unwrap();
+    h.record(16.0, 15).unwrap();
     assert_eq!(bucket_total(&mut h), 60);
 
     assert_total_conserved(&mut h, 6);
@@ -1497,7 +1497,7 @@ fn test_adaptive_downscale_wide_span_small_pool() {
 fn assert_total_conserved<const N: usize>(h: &mut Histogram<N>, steps: i32) {
     let total = bucket_total(h);
     for step in 1..=steps {
-        h.do_downscale(1).unwrap();
+        h.downscale(1).unwrap();
         let current = bucket_total(h);
         assert_eq!(
             current,
@@ -1514,7 +1514,7 @@ fn assert_total_conserved<const N: usize>(h: &mut Histogram<N>, steps: i32) {
 fn build_histogram<const N: usize>(ops: &[(f64, u64)]) -> Histogram<N> {
     let mut h = Histogram::<N>::new();
     for &(v, incr) in ops {
-        h.update_by_incr(v, incr).unwrap();
+        h.record(v, incr).unwrap();
     }
     h
 }
@@ -1650,8 +1650,8 @@ fn test_merge_p64_bucket_total_exceeds_count() {
     let mut h0 = Histogram::<8>::new();
     let mut h1 = Histogram::<8>::new();
 
-    h1.update_by_incr(2.8396262443943004e+238, 40).unwrap();
-    h0.update_by_incr(2.635549485807631e-82, 1).unwrap();
+    h1.record(2.8396262443943004e+238, 40).unwrap();
+    h0.record(2.635549485807631e-82, 1).unwrap();
 
     // Step 3: merge h0 into h1
     h1.merge_from(&h0).unwrap();
@@ -1675,8 +1675,8 @@ fn test_merge_p32_bucket_len_after_merge_chain() {
     let mut h0 = Histogram::<8>::new();
     let mut h1 = Histogram::<8>::new();
 
-    h0.update_by_incr(v0, 1).unwrap();
-    h1.update_by_incr(v1, 1).unwrap();
+    h0.record(v0, 1).unwrap();
+    h1.record(v1, 1).unwrap();
 
     // Merge chain: h0→h1, h0→h1, h1→h0
     h1.merge_from(&h0).unwrap();
@@ -1685,7 +1685,7 @@ fn test_merge_p32_bucket_len_after_merge_chain() {
 
     // Insert many zeros
     for _ in 0..150 {
-        h0.update_by_incr(0.0, 1).unwrap();
+        h0.record(0.0, 1).unwrap();
     }
 
     // Verify bucket structure
@@ -1839,20 +1839,20 @@ fn test_literal_promotion_optimal_scale() {
 }
 
 #[test]
-fn test_literal_update_by_incr() {
+fn test_literal_record() {
     let mut h: Histogram<8> = Histogram::new();
     // 3 copies of the same value.
-    h.update_by_incr(5.0, 3).unwrap();
+    h.record(5.0, 3).unwrap();
     assert!(h.is_literal());
     assert_eq!(h.view().count(), 3);
     assert_eq!(h.view().sum(), 15.0);
 }
 
 #[test]
-fn test_literal_update_by_incr_overflow() {
+fn test_literal_record_overflow() {
     // Histogram<8>: 8 literal slots. incr=9 should promote.
     let mut h: Histogram<8> = Histogram::new();
-    h.update_by_incr(3.25, 9).unwrap();
+    h.record(3.25, 9).unwrap();
     assert!(!h.is_literal());
     assert_eq!(h.view().count(), 9);
 }
@@ -2263,7 +2263,7 @@ fn repro_fuzz_merge_oracle_offset() {
     for literal in [true, false] {
         let mut right = Histogram::<8>::new().with_literal_mode(literal);
         for &incr in incrs {
-            right.update_by_incr(subnormal, incr).unwrap();
+            right.record(subnormal, incr).unwrap();
         }
 
         let mut left = Histogram::<8>::new().with_literal_mode(literal);
@@ -2293,9 +2293,9 @@ fn repro_fuzz_stateful_bucket_total() {
     let v3: f64 = f64::from_bits(0x56562c0000000000);
 
     let mut pool0 = Histogram::<8>::new().with_literal_mode(false);
-    pool0.update_by_incr(v1, 12).unwrap();
-    pool0.update_by_incr(v2, 1).unwrap();
-    pool0.update_by_incr(v3, 1).unwrap();
+    pool0.record(v1, 12).unwrap();
+    pool0.record(v2, 1).unwrap();
+    pool0.record(v3, 1).unwrap();
 
     let mut big = Histogram::<16>::new().with_literal_mode(false);
     big.merge_from_other(&pool0).unwrap();
@@ -2318,9 +2318,9 @@ fn repro_fuzz_stateful_bucket_total() {
 }
 
 /// Reproducer for stateful_oracle crash: bucket len mismatch at scale=-10
-/// after a failed update_by_incr (Hammer with huge increment).
+/// after a failed record (Hammer with huge increment).
 ///
-/// Root cause: update_by_incr lacked snapshot/rollback, so a failed
+/// Root cause: record lacked snapshot/rollback, so a failed
 /// widen_one_step (Overflow at MIN_SCALE) left buckets corrupted.
 #[test]
 fn repro_fuzz_stateful_update_atomicity() {
@@ -2341,7 +2341,7 @@ fn repro_fuzz_stateful_update_atomicity() {
     let before = h.clone();
 
     // Hammer: huge increment at a wildly different exponent
-    let result = h.update_by_incr(v3, 8388608);
+    let result = h.record(v3, 8388608);
 
     if result.is_err() {
         // On failure the histogram MUST be unchanged.

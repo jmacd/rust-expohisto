@@ -10,10 +10,10 @@ fn trim_bucket_range_preserves_literal_mode() {
     let mut h: Histogram<8> = Histogram::new().with_literal_mode(true);
 
     // Insert non-zero value with incr=2
-    assert!(h.update_by_incr(v, 2).is_ok());
+    assert!(h.record(v, 2).is_ok());
 
     // Insert zero with incr=12
-    assert!(h.update_by_incr(0.0, 12).is_ok());
+    assert!(h.record(0.0, 12).is_ok());
 
     let view = h.view();
     let buckets = view.positive();

@@ -124,7 +124,7 @@ fn build<const N: usize>(ops: &[Op], literal_mode: bool) -> (Histogram<N>, Vec<O
     let mut h = Histogram::<N>::new().with_literal_mode(literal_mode);
     let mut ok = Vec::new();
     for &op in ops {
-        if h.update_by_incr(op.value, op.incr).is_ok() {
+        if h.record(op.value, op.incr).is_ok() {
             ok.push(op);
         }
     }

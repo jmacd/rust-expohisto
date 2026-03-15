@@ -137,7 +137,7 @@ enum IncrResult {
 
 /// Computes how much downscaling is needed for indices to fit in `size` buckets.
 #[inline]
-fn change_scale(mut hl: HighLow, size: i32) -> i32 {
+fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
     let mut change = 0;
     while hl.high - hl.low >= size {
         hl.high >>= 1;
@@ -235,7 +235,7 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
         } else {
             s.field("mode", &"bucket");
             s.field("scale", &self.mapping.scale());
-            s.field("bucket_len", &self.bucket_range_len());
+            s.field("bucket_len", &self.range_len());
         }
         s.finish()
     }
@@ -300,7 +300,7 @@ impl<const N: usize> Histogram<N> {
         if self.literal {
             return self.literal_count() as u64;
         }
-        let len = self.bucket_range_len();
+        let len = self.range_len();
         let mut total = 0u64;
         for pos in 0..len {
             let index = self.index_start + pos as i32;
@@ -313,8 +313,8 @@ impl<const N: usize> Histogram<N> {
 
     /// Number of logical buckets in the live range, or 0 if empty.
     #[inline]
-    fn bucket_range_len(&self) -> u32 {
-        if self.is_effectively_empty() {
+    fn range_len(&self) -> u32 {
+        if self.range_is_empty() {
             0
         } else {
             (self.index_end - self.index_start + 1) as u32
@@ -375,12 +375,12 @@ impl<const N: usize> Histogram<N> {
         if self.literal {
             return self.literal_count() == 0;
         }
-        self.is_effectively_empty()
+        self.range_is_empty()
     }
 
     /// Checks if the bucket range represents no data.
     #[inline]
-    fn is_effectively_empty(&self) -> bool {
+    fn range_is_empty(&self) -> bool {
         if self.index_end != self.index_start {
             return false;
         }
@@ -638,14 +638,14 @@ impl<const N: usize> Histogram<N> {
     /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
-        self.update_by_incr(value, 1)
+        self.record(value, 1)
     }
 
     /// Records a value with a specified increment.
     ///
     /// Returns `Err(Overflow)` if the count or bucket counters would overflow.
     /// On error the histogram is left unchanged (snapshot/rollback).
-    pub fn update_by_incr(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
+    pub fn record(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
         debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
 
         if incr == 0 {
@@ -690,7 +690,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Promotes from literal mode to bucket mode, optionally including
     /// a trigger value that caused overflow of literal capacity.
-    fn promote_impl(&mut self, trigger: Option<(f64, u64)>) -> Result<(), Overflow> {
+    fn promote_to_buckets(&mut self, trigger: Option<(f64, u64)>) -> Result<(), Overflow> {
         debug_assert!(self.literal);
 
         let count = self.literal_count();
@@ -727,14 +727,14 @@ impl<const N: usize> Histogram<N> {
     /// that caused overflow of literal capacity.
     #[inline]
     fn promote_with(&mut self, trigger: f64, trigger_incr: u64) -> Result<(), Overflow> {
-        self.promote_impl(Some((trigger, trigger_incr)))
+        self.promote_to_buckets(Some((trigger, trigger_incr)))
     }
 
     /// Promotes from literal mode to bucket mode without a trigger value.
     /// Used when self is a merge destination and needs to accept bucket data.
     #[inline]
     fn promote(&mut self) -> Result<(), Overflow> {
-        self.promote_impl(None)
+        self.promote_to_buckets(None)
     }
 
     /// Updates buckets for a positive value.
@@ -752,15 +752,15 @@ impl<const N: usize> Histogram<N> {
     ) -> Result<(), Overflow> {
         loop {
             let index = index_fn(self);
-            let result = self.increment_index_by(index, incr);
-            if self.handle_incr_result(result)? {
+            let result = self.try_increment(index, incr);
+            if self.resolve_increment(result)? {
                 return Ok(());
             }
         }
     }
 
     /// Decreases the mapping scale by `decrease` steps.
-    fn adjust_scale(&mut self, decrease: i32) -> Result<(), Overflow> {
+    fn decrease_scale(&mut self, decrease: i32) -> Result<(), Overflow> {
         let new_scale = self.mapping.scale() - decrease;
         self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
         Ok(())
@@ -769,13 +769,13 @@ impl<const N: usize> Histogram<N> {
     /// Widens bucket counters by one step, adjusting the mapping scale
     /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Overflow> {
-        if self.is_effectively_empty() {
+        if self.range_is_empty() {
             self.bucket_width = self.bucket_width.wider().ok_or(Overflow)?;
             self.shift_indices(1);
-            return self.adjust_scale(1);
+            return self.decrease_scale(1);
         }
-        let displaced = self.swar_merge_step(true).ok_or(Overflow)?;
-        self.adjust_scale(1)?;
+        let displaced = self.pairwise_merge(true).ok_or(Overflow)?;
+        self.decrease_scale(1)?;
         self.reinsert_displaced(displaced)
     }
 
@@ -789,29 +789,29 @@ impl<const N: usize> Histogram<N> {
     /// - **Overflow**: accepts the wider format and continues at the new
     ///   width.
     ///
-    /// At U64 width, remaining steps use `bucket_downscale_u64`
+    /// At U64 width, remaining steps use `downscale_u64`
     /// (scatter-write collapse).
     #[cfg(any(test, feature = "bench-internals"))]
-    pub fn do_downscale(&mut self, change: i32) -> Result<(), Overflow> {
-        self.do_downscale_impl(change)
+    pub fn downscale(&mut self, change: i32) -> Result<(), Overflow> {
+        self.downscale_by(change)
     }
 
-    fn do_downscale_impl(&mut self, change: i32) -> Result<(), Overflow> {
+    fn downscale_by(&mut self, change: i32) -> Result<(), Overflow> {
         if change <= 0 {
             return Ok(());
         }
 
-        if self.is_effectively_empty() {
+        if self.range_is_empty() {
             self.shift_indices(change);
-            return self.adjust_scale(change);
+            return self.decrease_scale(change);
         }
 
         let mut remaining = change;
 
         // Phase 1: SWAR merge at sub-U64 widths, one step at a time.
         while remaining > 0 && self.bucket_width != BucketWidth::U64 {
-            let displaced = self.swar_merge_step(false).ok_or(Overflow)?;
-            self.adjust_scale(1)?;
+            let displaced = self.pairwise_merge(false).ok_or(Overflow)?;
+            self.decrease_scale(1)?;
             remaining -= 1;
             self.reinsert_displaced(displaced)?;
         }
@@ -819,8 +819,8 @@ impl<const N: usize> Histogram<N> {
         // Phase 2: At U64, scatter-write for remaining steps.
         if remaining > 0 {
             debug_assert_eq!(self.bucket_width, BucketWidth::U64);
-            self.bucket_downscale_u64(remaining);
-            self.adjust_scale(remaining)?;
+            self.downscale_u64(remaining);
+            self.decrease_scale(remaining)?;
         }
 
         self.trim_bucket_range();
@@ -843,7 +843,7 @@ impl<const N: usize> Histogram<N> {
         if change <= 0 {
             return Ok(());
         }
-        self.do_downscale_impl(change)
+        self.downscale_by(change)
     }
 
     /// Attempts to place `incr` into the bucket at `index`.
@@ -851,7 +851,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns `NeedsDownscale` if the index doesn't fit in the current
     /// range, or `CounterOverflow` if the counter at `index` can't hold
     /// the addition.  The caller retries after adjusting scale or width.
-    fn increment_index_by(&mut self, index: i32, incr: u64) -> IncrResult {
+    fn try_increment(&mut self, index: i32, incr: u64) -> IncrResult {
         if incr == 0 {
             return IncrResult::Ok;
         }
@@ -910,10 +910,10 @@ impl<const N: usize> Histogram<N> {
         IncrResult::Ok
     }
 
-    /// Handles the result of `increment_index_by`, performing downscale
+    /// Handles the result of `try_increment`, performing downscale
     /// or widen as needed.  Returns `Ok(true)` when the increment
     /// succeeded, `Ok(false)` when the caller should retry.
-    fn handle_incr_result(&mut self, result: IncrResult) -> Result<bool, Overflow> {
+    fn resolve_increment(&mut self, result: IncrResult) -> Result<bool, Overflow> {
         match result {
             IncrResult::Ok => Ok(true),
             IncrResult::CounterOverflow => {
@@ -921,9 +921,9 @@ impl<const N: usize> Histogram<N> {
                 Ok(false)
             }
             IncrResult::NeedsDownscale(hl) => {
-                let change = change_scale(hl, self.bucket_capacity() as i32);
+                let change = scale_reduction(hl, self.bucket_capacity() as i32);
                 if change > 0 {
-                    self.do_downscale_impl(change)?;
+                    self.downscale_by(change)?;
                 } else if self.bucket_width != BucketWidth::U64 {
                     // Range fits in capacity but the index falls outside
                     // [index_base, index_base + cap) — the contiguous-layout
@@ -931,7 +931,7 @@ impl<const N: usize> Histogram<N> {
                     // (where wrapping is safe) via a 1-step merge.
                     self.widen_one_step()?;
                 } else {
-                    self.do_downscale_impl(1)?;
+                    self.downscale_by(1)?;
                 }
                 Ok(false)
             }
@@ -999,7 +999,7 @@ impl<const N: usize> Histogram<N> {
         }
 
         let snapshot = self.clone();
-        match self.merge_from_raw_inner(stats, buckets, at) {
+        match self.merge_raw_buckets(stats, buckets, at) {
             Ok(()) => Ok(()),
             Err(e) => {
                 *self = snapshot;
@@ -1008,7 +1008,7 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    fn merge_from_raw_inner(
+    fn merge_raw_buckets(
         &mut self,
         stats: &Stats,
         buckets: &BucketDescriptor,
@@ -1026,7 +1026,7 @@ impl<const N: usize> Histogram<N> {
             let cap = self.bucket_capacity() as i32;
             let min_scale = self.mapping.scale().min(buckets.scale);
 
-            let self_hl = self.high_low_at_scale(min_scale);
+            let self_hl = self.index_range_at_scale(min_scale);
             let other_hl = {
                 let shift = buckets.scale - min_scale;
                 HighLow {
@@ -1035,7 +1035,7 @@ impl<const N: usize> Histogram<N> {
                 }
             };
             let hlp = self_hl.merge(other_hl);
-            let target_scale = min_scale - change_scale(hlp, cap);
+            let target_scale = min_scale - scale_reduction(hlp, cap);
 
             self.downscale_to(target_scale)?;
 
@@ -1064,7 +1064,7 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
         let snapshot = self.clone();
-        match self.merge_literal_from_inner(other) {
+        match self.merge_literal_values(other) {
             Ok(()) => Ok(()),
             Err(e) => {
                 *self = snapshot;
@@ -1073,7 +1073,7 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    fn merge_literal_from_inner<const M: usize>(
+    fn merge_literal_values<const M: usize>(
         &mut self,
         other: &Histogram<M>,
     ) -> Result<(), Overflow> {
@@ -1105,7 +1105,7 @@ impl<const N: usize> Histogram<N> {
             &BucketDescriptor {
                 scale: other.mapping.scale(),
                 offset: other.index_start,
-                len: other.bucket_range_len(),
+                len: other.range_len(),
             },
             &|i| {
                 let index = other.index_start + i as i32;
@@ -1114,7 +1114,7 @@ impl<const N: usize> Histogram<N> {
         )
     }
 
-    fn high_low_at_scale(&self, target_scale: i32) -> HighLow {
+    fn index_range_at_scale(&self, target_scale: i32) -> HighLow {
         if self.buckets_empty() {
             return HighLow::empty();
         }

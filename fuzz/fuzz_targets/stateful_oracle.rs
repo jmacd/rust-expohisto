@@ -130,7 +130,7 @@ fn decode_increment(sel: u8) -> u64 {
 
 fn try_insert(hist: &mut Histogram<8>, shadow: &mut Shadow, value_bits: u64, incr: u64) {
     if let Some(v) = decode_value(value_bits) {
-        if hist.update_by_incr(v, incr).is_ok() && !shadow.poisoned {
+        if hist.record(v, incr).is_ok() && !shadow.poisoned {
             shadow.ops.push(Obs { value: v, incr });
         }
     }

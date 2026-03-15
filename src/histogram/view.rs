@@ -110,7 +110,7 @@ impl<const N: usize> HistogramView<'_, N> {
         } else {
             self.hist.mapping
         };
-        let bucket_len = self.hist.bucket_range_len();
+        let bucket_len = self.hist.range_len();
         let offset = self.hist.index_start;
 
         QuantileIter::new(
