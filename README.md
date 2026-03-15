@@ -13,9 +13,19 @@ in Rust.
 
 Exponential histograms provide a compact, high-resolution representation of value distributions using logarithmically-spaced bucket boundaries. This implementation is designed for:
 
-- **No heap allocation**: Fixed-size bucket storage using const generics
+- **No heap allocation**: Fixed-size bucket storage using const generics (`Histogram<N>`)
+- **`Send + Sync`**: All fields are `Copy` primitives; safe to share across threads with external synchronization
 - **High performance**: Lookup table provides 3.5× speedup over logarithm-based mapping
+- **Sub-byte counters**: 1-bit bucket counters (B1) maximize resolution; auto-widen on overflow
 - **Configurable table size**: Trade static memory for lookup acceleration at higher scales
+- **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
+- **Atomic error recovery**: Snapshot/rollback ensures failed operations leave the histogram unchanged
+- **Literal mode**: Cold-start optimization defers bucket allocation until the value range is known
+- **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate
+- **Zero runtime dependencies**: Only Rust `std`; no external crates
+- **Comprehensive testing**: 125 unit tests and 4 fuzz targets
+
+**Minimum Supported Rust Version (MSRV):** 1.73
 
 ## Quick Start
 
@@ -308,8 +318,35 @@ A table generated at scale `H` supports all scales `1..H` via arithmetic right s
 
 ## Crate Structure
 
+```text
+otel-expohisto/
+├── src/
+│   ├── lib.rs            # Crate root and public re-exports
+│   ├── histogram/        # Core histogram implementation
+│   │   ├── mod.rs        #   Histogram<N>: update, merge, downscale, widen
+│   │   ├── view.rs       #   HistogramView: read-only promoted view
+│   │   ├── bucket_view.rs#   BucketView + BucketsIter: bucket access
+│   │   ├── bucket_width.rs#  BucketWidth enum (B1..U64)
+│   │   ├── bucket_ops.rs #   Sub-byte get/set/increment
+│   │   ├── swar.rs       #   SWAR pairwise merge, shift, narrow-compact
+│   │   ├── quantile.rs   #   QuantileIter: CDF-walk quantile estimation
+│   │   └── tests.rs      #   106 unit tests
+│   ├── mapping.rs        # Scale-to-index dispatch (Mapping struct)
+│   ├── exponent.rs       # Scale ≤ 0: IEEE 754 exponent extraction
+│   ├── logarithm.rs      # Scale > 0 fallback: ln()-based mapping
+│   ├── lookup.rs         # Shared lookup table infrastructure
+│   ├── newrelic.rs       # NewRelic algorithm (2N linear buckets, 1 correction)
+│   ├── dynatrace.rs      # Dynatrace algorithm (N linear buckets, 2 corrections)
+│   └── float64.rs        # IEEE 754 bit-manipulation helpers
+├── mapping-gen/          # Build-time sub-crate: lookup table generation
+├── build.rs              # Generates lookup_tables.rs from mapping-gen
+├── benches/              # Criterion benchmarks (mapping, downscale, literal, sub_byte)
+├── examples/             # Usage examples (basic, merge, sizing, quick_start_test)
+└── fuzz/                 # Fuzz targets (histogram_oracle, merge_oracle, stateful_oracle, rng_stress)
+```
+
 - **`otel-expohisto`**: Main library with histogram and mapping implementations
-- **`mapping-gen`**: Sub-crate for generating lookup tables (used at build time)
+- **`mapping-gen`**: Sub-crate for generating lookup tables (used at build time via `build.rs`)
 
 The `mapping-gen` crate can be tested independently:
 
@@ -571,11 +608,221 @@ relative error) across the full range.
 
 | Method | Effect |
 |--------|--------|
-| `with_max_scale(s)` | Cap the starting scale (default: table max) |
+| `with_max_scale(s)` | Cap the starting scale (clamped to `max_scale()`; default: 20) |
+| `with_scale(s)` | Set exact starting scale (panics if invalid; does not clamp) |
 | `with_min_bucket_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
 | `with_literal_mode(false)` | Disable literal mode when the value range is already known |
 
 Run `cargo run --example sizing` for an interactive capacity explorer.
+
+## API Overview
+
+### Recording values
+
+```rust,ignore
+use otel_expohisto::Histogram;
+
+let mut h: Histogram<16> = Histogram::new();
+
+// Record a single observation
+h.update(42.0).unwrap();
+
+// Record a value with a count (weighted recording)
+h.record(3.14, 5).unwrap();   // records 3.14 five times
+```
+
+Both `update` and `record` return `Result<(), Overflow>`. On error the histogram is unchanged (see [Error Handling](#error-handling--atomicity)).
+
+### Reading via `HistogramView`
+
+All read access goes through `view()`, which promotes from literal mode if needed and returns an immutable `HistogramView`. Note that `view()` takes `&mut self` because promotion from literal to bucket mode is a one-time internal mutation:
+
+```rust,ignore
+let v = h.view();
+v.count()                      // u64  — total observations
+v.sum()                        // f64  — arithmetic sum
+v.min()                        // f64  — minimum value
+v.max()                        // f64  — maximum value
+v.scale()                      // i32  — current mapping scale
+
+// Iterate over non-empty positive buckets
+let buckets = v.positive();
+buckets.offset()               // i32  — index of the first bucket
+buckets.len()                  // u32  — number of contiguous buckets
+buckets.width()                // BucketWidth — current counter width
+for count in &buckets {
+    // each count is u64
+}
+```
+
+### Quantile estimation
+
+`HistogramView::quantiles` walks the histogram CDF and yields estimated values via linear interpolation within each straddling bucket. Quantile 0.0 returns `min`, quantile 1.0 returns `max`.
+
+```rust,ignore
+let v = h.view();
+for qv in v.quantiles(&[0.5, 0.9, 0.99]) {
+    println!("p{:.0} ≈ {:.3}", qv.quantile * 100.0, qv.value);
+}
+```
+
+The returned `QuantileIter` implements `Iterator<Item = QuantileValue>` and `ExactSizeIterator`.
+
+### Merging
+
+Three merge strategies enable flexible aggregation:
+
+```rust,ignore
+use otel_expohisto::{Histogram, Stats, BucketDescriptor};
+
+let mut a: Histogram<16> = Histogram::new();
+let b: Histogram<16> = Histogram::new();
+
+// Same-size merge
+a.merge_from(&b).unwrap();
+
+// Cross-size merge (different N parameters)
+let c: Histogram<32> = Histogram::new();
+a.merge_from_other(&c).unwrap();
+
+// Raw merge — from arbitrary bucket data via a closure
+a.merge_from_raw(
+    &Stats { count: 10, sum: 42.0, min: 1.0, max: 9.0 },
+    &BucketDescriptor { scale: 4, offset: 0, len: 5 },
+    &|i| bucket_counts[i as usize],  // closure returning count at position i
+).unwrap();
+```
+
+All merge operations compute the minimum common scale, downscale as needed, and use snapshot/rollback for atomicity.
+
+### Lifecycle
+
+| Method | Description |
+|--------|-------------|
+| `new()` | Create at maximum scale (20) with default settings |
+| `with_max_scale(s)` | Create with capped starting scale (clamped to `max_scale()`) |
+| `with_scale(s)` | Create at exact scale (panics if invalid; does not clamp) |
+| `clear()` | Reset to initial state (preserves `literal_mode`, `min_bucket_width`, and `limit_scale` settings) |
+| `swap(&mut other)` | Exchange contents with another histogram (O(N) memswap) |
+| `is_literal()` | Check if in literal mode |
+| `bucket_capacity()` | Number of logical buckets at the current width |
+| `limit_scale()` | Configured upper bound on scale |
+| `bucket_width()` | Current counter width (`B1`..`U64`) |
+| `buckets_empty()` | Whether all bucket counters are zero |
+
+### Constructor chain
+
+```rust,ignore
+use otel_expohisto::{Histogram, BucketWidth};
+
+let h: Histogram<16> = Histogram::with_max_scale(8)  // cap starting scale (clamped to max_scale)
+    .with_min_bucket_width(BucketWidth::U8)           // skip sub-byte widths
+    .with_literal_mode(false);                        // disable cold-start optimization
+
+// Or create at an exact scale (does NOT clamp):
+let h2: Histogram<16> = Histogram::with_scale(4);
+```
+
+### Standalone `Mapping` API
+
+The `Mapping` struct is re-exported at the crate root for direct value-to-index conversion, independent of any histogram instance:
+
+```rust,ignore
+use otel_expohisto::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
+
+// Create a mapping at scale 8
+let m = Mapping::new(8).unwrap();
+assert_eq!(m.scale(), 8);
+
+// Map a value to its bucket index
+let idx = m.map_to_index(3.14);
+
+// Get the lower boundary of a bucket
+let boundary = m.lower_boundary(idx).unwrap();
+assert!(boundary <= 3.14);
+
+// Scale constants
+assert_eq!(MIN_SCALE, -10);
+assert_eq!(MAX_SCALE, 20);
+assert_eq!(max_scale(), 20);
+```
+
+`Mapping::new(scale)` returns `Err(MappingError::InvalidScale)` for scales outside \[-10, 20\]. `lower_boundary()` returns `Err(MappingError::Underflow)` or `Err(MappingError::Overflow)` when the index corresponds to a subnormal or infinite value.
+
+### Trait implementations
+
+| Type | Traits |
+|------|--------|
+| `Histogram<N>` | `Clone`, `Default` (calls `new()`), `Debug` |
+| `HistogramView` | `Debug` |
+| `BucketView` | `Debug`, `IntoIterator` |
+| `BucketsIter` | `Iterator<Item = u64>`, `ExactSizeIterator`, `Debug` |
+| `QuantileIter` | `Iterator<Item = QuantileValue>`, `ExactSizeIterator`, `Debug` |
+| `QuantileValue` | `Clone`, `Copy`, `Debug`, `PartialEq` |
+| `BucketWidth` | `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord` |
+| `Stats` | `Clone`, `Copy`, `Debug` (also has `Stats::EMPTY` constant) |
+| `BucketDescriptor` | `Clone`, `Copy`, `Debug` |
+| `Overflow` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
+| `MappingError` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
+| `Mapping` | `Clone`, `Copy`, `Debug` |
+
+## Error Handling & Atomicity
+
+All mutating operations (`update`, `record`, `merge_from`, `merge_from_other`, `merge_from_raw`) return `Result<(), Overflow>`. The `Overflow` error indicates that a bucket counter or the total count would exceed its maximum representable value.
+
+**Snapshot/rollback guarantee:** Before any mutating operation, the histogram clones itself. If the operation fails (e.g., a U64 counter would overflow), the clone is restored and the histogram is left unchanged. This ensures that partial mutations from multi-step operations (downscale + widen + insert) never leak to the caller.
+
+```rust,ignore
+let snapshot_count = h.view().count();
+if h.update(value).is_err() {
+    // h is unchanged — count, sum, buckets all identical to before
+    assert_eq!(h.view().count(), snapshot_count);
+}
+```
+
+## Thread Safety
+
+`Histogram<N>` is `Send + Sync` — all fields are `Copy` primitives with no interior mutability. However, mutations require `&mut self`, so concurrent access needs external synchronization:
+
+```rust,ignore
+use std::sync::{Arc, Mutex};
+use otel_expohisto::Histogram;
+
+// Thread-safe shared histogram
+let hist = Arc::new(Mutex::new(Histogram::<16>::new()));
+```
+
+For hot-path recording, consider a thread-local histogram per worker with periodic `merge_from` into a shared aggregate.
+
+## Safety
+
+The crate contains **zero `unsafe` code**. All bit-level manipulation (sub-byte get/set, SWAR pairwise merge, shift-and-mask widening) is implemented entirely in safe Rust. The `data: [u64; N]` pool is reinterpreted at different counter widths using arithmetic indexing, not pointer casts.
+
+The crate currently requires `std` (for `std::error::Error` and snapshot/rollback cloning). It does not support `#![no_std]`.
+
+## Testing & Quality
+
+The crate includes comprehensive validation at multiple levels:
+
+- **125 unit tests** covering basic operations, promotion, widening, downscaling, SWAR pairwise merge, all merge strategies, quantile estimation, and boundary conditions
+- **4 fuzz targets** (`cargo +nightly fuzz run <target>`):
+  - `histogram_oracle` — validates invariants (count, sum, min/max, bucket integrity) with random f64 sequences
+  - `merge_oracle` — fuzzes weighted `record()` + cross-scale merge
+  - `stateful_oracle` — state-machine fuzzer with interleaved update/merge/clear/read operations
+  - `rng_stress` — large histogram (N=160) with millions of random values
+- **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 20
+- **CI matrix** — tests across 4 feature combinations (`bench-all`, `newrelic+scale-8`, `dynatrace+scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
+
+## Examples
+
+Four examples are included in the `examples/` directory:
+
+| Example | Run command | Description |
+|---------|------------|-------------|
+| `basic` | `cargo run --example basic` | Record latencies, view stats and iterate buckets |
+| `merge` | `cargo run --example merge` | Same-size and cross-size histogram merging |
+| `sizing` | `cargo run --example sizing` | Interactive capacity explorer for choosing `N` and `min_bucket_width` |
+| `quick_start_test` | `cargo run --example quick_start_test` | Minimal 3-value example |
 
 ## References
 
@@ -676,6 +923,18 @@ Not part of the spec, but relevant to overflow handling: bucket counters start a
 | Zero count | Derived from bucket iteration |
 | Count, sum, min, max | Supported |
 | Merge | Supported (same-type, cross-size, raw) |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, fuzz, and PR guidelines.
+
+Quick validation:
+
+```bash
+cargo clippy --all-targets --features bench-all -- -D warnings
+cargo test --features bench-all
+cargo check --manifest-path fuzz/Cargo.toml --all-targets
+```
 
 ## License
 
