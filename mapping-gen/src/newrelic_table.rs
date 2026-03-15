@@ -264,6 +264,10 @@ pub fn map_to_index_exact(value: f64, scale: i32) -> i32 {
 }
 
 /// Compute which log bucket each linear bucket's start falls into.
+///
+/// See also [`crate::dynatrace_table::compute_dynatrace_indices`] which
+/// performs the analogous computation for the Dynatrace algorithm (N vs 2N
+/// linear buckets, bit-shift vs u128-division for bucket starts).
 pub fn compute_linear_to_log_mapping(n: usize, boundaries: &[u64]) -> Vec<u16> {
     let linear_count = 2 * n;
     let mut mapping = Vec::with_capacity(linear_count);
@@ -296,53 +300,20 @@ mod tests {
     use crate::float64::{get_normal_base2, get_significand};
 
     #[test]
-    fn test_generate_6_bits() {
-        let tables = LookupTables::generate(6);
-        assert_eq!(tables.index_bits, 6);
-        assert_eq!(tables.n, 64);
-        assert_eq!(tables.log_bucket_index.len(), 128);
-        assert_eq!(tables.log_bucket_end.len(), 65); // 64 + sentinel
-        assert_eq!(tables.significand_shift, 45); // 52 - 7
-    }
-
-    #[test]
-    fn test_generate_8_bits() {
-        let tables = LookupTables::generate(8);
-        assert_eq!(tables.index_bits, 8);
-        assert_eq!(tables.n, 256);
-        assert_eq!(tables.log_bucket_index.len(), 512);
-        assert_eq!(tables.log_bucket_end.len(), 257);
-        assert_eq!(tables.significand_shift, 43); // 52 - 9
-    }
-
-    #[test]
-    fn test_generate_10_bits() {
-        let tables = LookupTables::generate(10);
-        assert_eq!(tables.index_bits, 10);
-        assert_eq!(tables.n, 1024);
-        assert_eq!(tables.log_bucket_index.len(), 2048);
-        assert_eq!(tables.log_bucket_end.len(), 1025);
-        assert_eq!(tables.significand_shift, 41); // 52 - 11
-    }
-
-    #[test]
-    fn test_generate_12_bits() {
-        let tables = LookupTables::generate(12);
-        assert_eq!(tables.index_bits, 12);
-        assert_eq!(tables.n, 4096);
-        assert_eq!(tables.log_bucket_index.len(), 8192);
-        assert_eq!(tables.log_bucket_end.len(), 4097);
-        assert_eq!(tables.significand_shift, 39); // 52 - 13
-    }
-
-    #[test]
-    fn test_generate_14_bits() {
-        let tables = LookupTables::generate(14);
-        assert_eq!(tables.index_bits, 14);
-        assert_eq!(tables.n, 16384);
-        assert_eq!(tables.log_bucket_index.len(), 32768);
-        assert_eq!(tables.log_bucket_end.len(), 16385);
-        assert_eq!(tables.significand_shift, 37); // 52 - 15
+    fn test_generate_sizes() {
+        for index_bits in [6, 8, 10, 12, 14] {
+            let tables = LookupTables::generate(index_bits);
+            let n = 1usize << index_bits;
+            assert_eq!(tables.index_bits, index_bits, "index_bits at scale {index_bits}");
+            assert_eq!(tables.n, n, "n at scale {index_bits}");
+            assert_eq!(tables.log_bucket_index.len(), 2 * n, "index len at scale {index_bits}");
+            assert_eq!(tables.log_bucket_end.len(), n + 1, "boundary len at scale {index_bits}");
+            assert_eq!(
+                tables.significand_shift,
+                52 - (index_bits + 1),
+                "shift at scale {index_bits}",
+            );
+        }
     }
 
     #[test]

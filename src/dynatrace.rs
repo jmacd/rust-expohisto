@@ -7,29 +7,7 @@
 //! ~50% smaller index table than NewRelic at the cost of one extra comparison.
 //! See [`crate::lookup::ScaleTables`] for shared infrastructure.
 
-use std::sync::OnceLock;
-
-use crate::lookup::{ScaleTables, TABLE_SCALE, table_map_to_index};
-
-static DT_TABLES: OnceLock<ScaleTables> = OnceLock::new();
-
-fn tables() -> &'static ScaleTables {
-    DT_TABLES.get_or_init(|| ScaleTables::new(0)) // extra_bits=0 → N buckets
-}
-
-/// Maps a positive f64 value to a bucket index.
-///
-/// Uses per-scale boundaries and N linear buckets with two branch corrections.
-#[inline]
-pub fn map_to_index(value: f64, scale: i32) -> i32 {
-    table_map_to_index(value, scale, tables(), 2) // 2 corrections
-}
-
-/// Returns the native scale (resolution) of the lookup table.
-#[inline]
-pub const fn table_scale() -> i32 {
-    TABLE_SCALE
-}
+crate::lookup::define_lookup_module!(extra_bits = 0, corrections = 2);
 
 #[cfg(test)]
 mod tests {

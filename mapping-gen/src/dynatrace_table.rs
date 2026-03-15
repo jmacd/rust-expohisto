@@ -81,6 +81,10 @@ impl DynatraceTables {
 /// Compute the Dynatrace index table: N linear buckets, each mapping to
 /// the largest boundary index c such that boundaries[c+1] <= lower_bound.
 ///
+/// See also [`crate::newrelic_table::compute_linear_to_log_mapping`] which
+/// performs the analogous computation for NewRelic (2N linear buckets,
+/// u128-division for bucket starts vs bit-shift here).
+///
 /// `boundaries` must have N+3 entries (sentinel + N+1 boundaries + sentinel).
 /// Linear bucket i covers significands starting at i << (52 - scale).
 /// The index c is chosen so that looking at boundaries[c+1] and boundaries[c+2]

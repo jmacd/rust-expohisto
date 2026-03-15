@@ -6,6 +6,10 @@
 //! This crate provides utilities for generating exact lookup tables
 //! used to map f64 values to histogram bucket indices efficiently.
 
+// Re-use the canonical float64 definitions from the main crate to avoid
+// maintaining a duplicate copy. The `pub` visibility on items there is
+// restricted to `pub(crate)` in the main crate via its lib.rs.
+#[path = "../../src/float64.rs"]
 mod float64;
 mod dynatrace_table;
 mod newrelic_table;

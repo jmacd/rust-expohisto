@@ -131,46 +131,12 @@ macro_rules! lookup_tests {
 
         #[test]
         fn test_table_scale() {
-            #[cfg(feature = "scale-1")]
-            const { assert!($table_scale >= 1) };
-            #[cfg(feature = "scale-2")]
-            const { assert!($table_scale >= 2) };
-            #[cfg(feature = "scale-3")]
-            const { assert!($table_scale >= 3) };
-            #[cfg(feature = "scale-4")]
-            const { assert!($table_scale >= 4) };
-            #[cfg(feature = "scale-5")]
-            const { assert!($table_scale >= 5) };
-            #[cfg(feature = "scale-6")]
-            const { assert!($table_scale >= 6) };
-            #[cfg(feature = "scale-7")]
-            const { assert!($table_scale >= 7) };
-            #[cfg(feature = "scale-8")]
-            const { assert!($table_scale >= 8) };
-            #[cfg(feature = "scale-9")]
-            const { assert!($table_scale >= 9) };
-            #[cfg(feature = "scale-10")]
-            const { assert!($table_scale >= 10) };
-            #[cfg(feature = "scale-11")]
-            const { assert!($table_scale >= 11) };
-            #[cfg(feature = "scale-12")]
-            const { assert!($table_scale >= 12) };
-            #[cfg(feature = "scale-13")]
-            const { assert!($table_scale >= 13) };
-            #[cfg(feature = "scale-14")]
-            const { assert!($table_scale >= 14) };
-            #[cfg(feature = "scale-15")]
-            const { assert!($table_scale >= 15) };
-            #[cfg(feature = "scale-16")]
-            const { assert!($table_scale >= 16) };
-            #[cfg(feature = "scale-17")]
-            const { assert!($table_scale >= 17) };
-            #[cfg(feature = "scale-18")]
-            const { assert!($table_scale >= 18) };
-            #[cfg(feature = "scale-19")]
-            const { assert!($table_scale >= 19) };
-            #[cfg(feature = "scale-20")]
-            const { assert!($table_scale >= 20) };
+            // build.rs emits EXPECTED_TABLE_SCALE = highest enabled scale feature.
+            let expected: i32 = env!("EXPECTED_TABLE_SCALE").parse().unwrap();
+            assert_eq!(
+                $table_scale, expected,
+                "TABLE_SCALE ({}) != expected ({})", $table_scale, expected,
+            );
         }
 
         #[test]
@@ -194,6 +160,40 @@ macro_rules! lookup_tests {
 
 // Re-export for use in sibling modules.
 pub use lookup_tests;
+
+/// Generates the standard lookup module body (OnceLock table + map_to_index + table_scale).
+///
+/// Used by both `newrelic` and `dynatrace` modules, which differ only in
+/// `extra_bits` (NR=1 → 2N linear buckets, DT=0 → N) and `corrections` (NR=1, DT=2).
+#[macro_export]
+#[doc(hidden)]
+macro_rules! define_lookup_module {
+    (extra_bits = $extra_bits:expr, corrections = $corrections:expr) => {
+        use std::sync::OnceLock;
+        use $crate::lookup::{ScaleTables, TABLE_SCALE, table_map_to_index};
+
+        static TABLES: OnceLock<ScaleTables> = OnceLock::new();
+
+        fn tables() -> &'static ScaleTables {
+            TABLES.get_or_init(|| ScaleTables::new($extra_bits))
+        }
+
+        /// Maps a positive f64 value to a bucket index using a lookup table.
+        #[inline]
+        pub fn map_to_index(value: f64, scale: i32) -> i32 {
+            table_map_to_index(value, scale, tables(), $corrections)
+        }
+
+        /// Returns the native scale (resolution) of the lookup table.
+        #[inline]
+        pub const fn table_scale() -> i32 {
+            TABLE_SCALE
+        }
+    };
+}
+
+pub use define_lookup_module;
+
 ///
 /// Both NR and DT algorithms use this structure; they differ only in
 /// `extra_bits` (NR=1 → 2N linear buckets, DT=0 → N linear buckets).

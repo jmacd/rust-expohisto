@@ -22,6 +22,7 @@ fn main() {
 
     if let Some(scale) = table_scale() {
         println!("cargo:rustc-cfg=has_lookup_table");
+        println!("cargo:rustc-env=EXPECTED_TABLE_SCALE={scale}");
         expohisto_mapping_gen::generate_shared_boundaries(&mut file, scale).unwrap();
     } else {
         writeln!(file, "// No table features enabled").unwrap();
@@ -34,32 +35,8 @@ fn main() {
 /// Returns the highest enabled scale feature, or None.
 fn table_scale() -> Option<u32> {
     // Check from highest to lowest; features are additive so the highest wins.
-    (1..=20).rev().find(|&s| has_scale_feature(s))
-}
-
-#[allow(clippy::match_like_matches_macro)] // each arm evaluates a distinct cfg!()
-fn has_scale_feature(s: u32) -> bool {
-    match s {
-        1 => cfg!(feature = "scale-1"),
-        2 => cfg!(feature = "scale-2"),
-        3 => cfg!(feature = "scale-3"),
-        4 => cfg!(feature = "scale-4"),
-        5 => cfg!(feature = "scale-5"),
-        6 => cfg!(feature = "scale-6"),
-        7 => cfg!(feature = "scale-7"),
-        8 => cfg!(feature = "scale-8"),
-        9 => cfg!(feature = "scale-9"),
-        10 => cfg!(feature = "scale-10"),
-        11 => cfg!(feature = "scale-11"),
-        12 => cfg!(feature = "scale-12"),
-        13 => cfg!(feature = "scale-13"),
-        14 => cfg!(feature = "scale-14"),
-        15 => cfg!(feature = "scale-15"),
-        16 => cfg!(feature = "scale-16"),
-        17 => cfg!(feature = "scale-17"),
-        18 => cfg!(feature = "scale-18"),
-        19 => cfg!(feature = "scale-19"),
-        20 => cfg!(feature = "scale-20"),
-        _ => false,
-    }
+    // Cargo sets CARGO_FEATURE_SCALE_<N> for each enabled `scale-<N>` feature.
+    (1..=20)
+        .rev()
+        .find(|&s| env::var(format!("CARGO_FEATURE_SCALE_{s}")).is_ok())
 }
