@@ -72,12 +72,14 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// Empty stats (all zeros).
+    /// Empty stats — `min` is `INFINITY` and `max` is `NEG_INFINITY`
+    /// so that the first observation overwrites both unconditionally via
+    /// `f64::min`/`f64::max`.
     pub const EMPTY: Self = Self {
         count: 0,
         sum: 0.0,
-        min: 0.0,
-        max: 0.0,
+        min: f64::INFINITY,
+        max: f64::NEG_INFINITY,
     };
 }
 
@@ -114,18 +116,18 @@ impl HighLow {
     }
 
     #[inline]
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.low > self.high
     }
 
     #[inline]
-    fn merge(self, other: Self) -> Self {
+    const fn merge(self, other: Self) -> Self {
         match (self.is_empty(), other.is_empty()) {
             (true, _) => other,
             (_, true) => self,
             _ => Self {
-                low: self.low.min(other.low),
-                high: self.high.max(other.high),
+                low: if self.low < other.low { self.low } else { other.low },
+                high: if self.high > other.high { self.high } else { other.high },
             },
         }
     }
@@ -140,7 +142,7 @@ enum IncrResult {
 
 /// Computes how much downscaling is needed for indices to fit in `size` buckets.
 #[inline]
-fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
+const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
     let mut change = 0;
     while hl.high - hl.low >= size {
         hl.high >>= 1;
@@ -178,10 +180,9 @@ fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 /// histogram **promotes** to bucket mode: all stored literals are
 /// replayed through `update_buckets` at the configured max scale.
 ///
-/// Read operations are accessed through [`mut_view()`](Self::mut_view),
+/// Read operations are accessed through [`view()`](Self::view),
 /// which promotes from literal mode if needed and returns a
-/// [`HistogramView`] with `&self` accessors. Literal mode can be
-/// disabled with [`with_literal_mode(false)`](Self::with_literal_mode).
+/// [`HistogramView`] with `&self` accessors.
 ///
 /// # Counter Widening
 ///
@@ -194,15 +195,12 @@ fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 pub struct Histogram<const N: usize> {
     // -- Fixed metadata (never relocates) --
     mapping: Mapping,
-    limit_scale: i8,
     min_bucket_width: BucketWidth,
     bucket_width: BucketWidth,
     /// When true, `data[..]` holds raw f64 bit patterns (literals)
     /// instead of bucket counters. `index_end` is repurposed as the literal
     /// count.
     literal: bool,
-    /// Whether literal mode is enabled (persists across `clear()`).
-    literal_enabled: bool,
     index_base: i32,
     index_start: i32,
     index_end: i32,
@@ -218,11 +216,9 @@ impl<const N: usize> Clone for Histogram<N> {
     fn clone(&self) -> Self {
         Self {
             mapping: self.mapping,
-            limit_scale: self.limit_scale,
             min_bucket_width: self.min_bucket_width,
             bucket_width: self.bucket_width,
             literal: self.literal,
-            literal_enabled: self.literal_enabled,
             index_base: self.index_base,
             index_start: self.index_start,
             index_end: self.index_end,
@@ -265,44 +261,39 @@ impl<const N: usize> Default for Histogram<N> {
 impl<const N: usize> Histogram<N> {
     /// Returns the sum of all recorded values as `f64`.
     #[inline]
-    pub(crate) fn sum(&self) -> f64 {
+    pub(crate) const fn sum(&self) -> f64 {
         self.stats.sum
     }
 
     /// Returns the count of all recorded values.
     #[inline]
-    pub(crate) fn count(&self) -> u64 {
+    pub(crate) const fn count(&self) -> u64 {
         self.stats.count
     }
 
-    /// Returns the minimum recorded value, or 0.0 if empty.
+    /// Returns the minimum recorded value.
     #[inline]
-    pub(crate) fn min(&self) -> f64 {
+    pub(crate) const fn min(&self) -> f64 {
         self.stats.min
     }
 
-    /// Returns the maximum recorded value, or 0.0 if empty.
+    /// Returns the maximum recorded value.
     #[inline]
-    pub(crate) fn max(&self) -> f64 {
+    pub(crate) const fn max(&self) -> f64 {
         self.stats.max
     }
 
     /// Checked increment of count by `incr`. Returns `None` on overflow.
     #[inline]
-    fn checked_add_count(&self, incr: u64) -> Option<u64> {
+    const fn checked_add_count(&self, incr: u64) -> Option<u64> {
         self.stats.count.checked_add(incr)
     }
 
     /// Commits sum, count, min, and max from incoming values.
     fn commit_stats(&mut self, sum: f64, count: u64, min: f64, max: f64) {
         self.stats.sum = sum;
-        if self.stats.count == 0 {
-            self.stats.min = min;
-            self.stats.max = max;
-        } else {
-            self.stats.min = self.stats.min.min(min);
-            self.stats.max = self.stats.max.max(max);
-        }
+        self.stats.min = self.stats.min.min(min);
+        self.stats.max = self.stats.max.max(max);
         self.stats.count = count;
     }
 
@@ -324,7 +315,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Number of logical buckets in the live range, or 0 if empty.
     #[inline]
-    fn range_len(&self) -> u32 {
+    const fn range_len(&self) -> u32 {
         if self.range_is_empty() {
             0
         } else {
@@ -334,7 +325,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Ring-buffer slot index for a given bucket index.
     #[inline]
-    fn slot_for(&self, index: i32) -> usize {
+    const fn slot_for(&self, index: i32) -> usize {
         let cap = self.bucket_capacity() as i32;
         (index - self.index_base).rem_euclid(cap) as usize
     }
@@ -351,8 +342,8 @@ impl<const N: usize> Histogram<N> {
     /// `[index_base, index_base + cap)` required by SWAR at sub-U64 widths.
     /// At U64 the ring buffer handles wrapping, so this always returns false.
     #[inline]
-    fn swar_would_wrap(&self, index: i32) -> bool {
-        self.bucket_width != BucketWidth::U64
+    const fn swar_would_wrap(&self, index: i32) -> bool {
+        !matches!(self.bucket_width, BucketWidth::U64)
             && (index < self.index_base
                 || index >= self.index_base + self.bucket_capacity() as i32)
     }
@@ -365,7 +356,7 @@ impl<const N: usize> Histogram<N> {
 impl<const N: usize> Histogram<N> {
     /// Returns the bucket data as a slice.
     #[inline]
-    fn bucket_data(&self) -> &[u64] {
+    const fn bucket_data(&self) -> &[u64] {
         &self.data
     }
 
@@ -377,7 +368,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Number of logical buckets available at the current width.
     #[inline]
-    pub fn bucket_capacity(&self) -> usize {
+    pub const fn bucket_capacity(&self) -> usize {
         self.bucket_width.capacity(N)
     }
 
@@ -392,7 +383,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Returns true if no buckets have been used.
     #[inline]
-    pub fn buckets_empty(&self) -> bool {
+    pub const fn buckets_empty(&self) -> bool {
         if self.literal {
             return self.literal_count() == 0;
         }
@@ -401,7 +392,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Checks if the bucket range represents no data.
     #[inline]
-    fn range_is_empty(&self) -> bool {
+    const fn range_is_empty(&self) -> bool {
         if self.index_end != self.index_start {
             return false;
         }
@@ -427,7 +418,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
     #[inline]
-    fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
+    const fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
         let bits = self.bucket_width.bits();
         let spw = 64 / bits;
         (slot / spw, (slot % spw) * bits, self.bucket_width.counter_max())
@@ -440,7 +431,7 @@ impl<const N: usize> Histogram<N> {
     /// for byte-aligned widths the compiler reduces it to the same code as
     /// a direct typed read.
     #[inline]
-    fn bucket_get(&self, slot: usize) -> u64 {
+    const fn bucket_get(&self, slot: usize) -> u64 {
         let (wi, shift, mask) = self.slot_addr(slot);
         (self.bucket_data()[wi] >> shift) & mask
     }
@@ -482,11 +473,9 @@ impl<const N: usize> Histogram<N> {
         const { assert!(N >= 1, "N must be >= 1 for at least 1 bucket word") };
         Self {
             mapping: Mapping::new(scale).expect("invalid scale"),
-            limit_scale: scale as i8,
             min_bucket_width: BucketWidth::B1,
             bucket_width: BucketWidth::B1,
             literal: true,
-            literal_enabled: true,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -507,31 +496,16 @@ impl<const N: usize> Histogram<N> {
         Self::new_at_scale(max_scale())
     }
 
-    /// Creates a new histogram with an upper bound on scale.
-    ///
-    /// The scale is clamped to [`max_scale()`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the clamped scale is not supported by the mapping algorithm.
-    #[inline]
-    #[must_use]
-    pub fn with_max_scale(scale: i32) -> Self {
-        Self::new_at_scale(scale.min(max_scale()))
-    }
-
-    /// Creates a new histogram at the specified scale.
-    ///
-    /// Unlike [`with_max_scale`](Self::with_max_scale), this does not clamp
-    /// to [`max_scale()`].
+    /// Sets the exact scale. Panics if not supported.
     ///
     /// # Panics
     ///
     /// Panics if `scale` is not supported by the mapping algorithm.
     #[inline]
     #[must_use]
-    pub fn with_scale(scale: i32) -> Self {
-        Self::new_at_scale(scale)
+    pub fn with_scale(mut self, scale: i32) -> Self {
+        self.mapping = Mapping::new(scale).expect("invalid scale");
+        self
     }
 
     /// Sets the minimum (initial) bucket counter width.
@@ -539,8 +513,6 @@ impl<const N: usize> Histogram<N> {
     /// By default, counters start at 1-bit (B1). Setting a higher floor
     /// (e.g. `BucketWidth::U8`) trades bucket capacity for avoiding the
     /// CPU cost of sub-byte bit-level indexing and SWAR widening.
-    ///
-    /// This also becomes the width used after `clear()`.
     #[inline]
     #[must_use]
     pub fn with_min_bucket_width(mut self, width: BucketWidth) -> Self {
@@ -549,31 +521,29 @@ impl<const N: usize> Histogram<N> {
         self
     }
 
-    /// Enables or disables literal mode.
-    ///
-    /// When disabled, the histogram starts directly in bucket mode. This
-    /// setting persists across `clear()`.
-    ///
-    /// Useful for benchmarks or when the caller knows the value range upfront.
+    /// Disables literal mode — starts directly in bucket mode.
+    /// Available only for benchmarks and tests.
+    #[cfg(any(test, feature = "bench-internals"))]
+    #[doc(hidden)]
     #[inline]
     #[must_use]
     pub fn with_literal_mode(mut self, enabled: bool) -> Self {
         self.literal = enabled;
-        self.literal_enabled = enabled;
         self
     }
 
     /// Returns true if the histogram is in literal mode.
     #[inline]
-    pub fn is_literal(&self) -> bool {
+    pub const fn is_literal(&self) -> bool {
         self.literal
     }
 
-    /// Returns a promoted read-only view of the histogram.
+    /// Returns a read-only view of the histogram.
     ///
-    /// Promotes from literal mode if needed. The returned
-    /// [`HistogramView`] provides access to scale, stats, positive
-    /// buckets, and quantile estimation — all via `&self`.
+    /// Takes `&mut self` because it may promote from literal mode to
+    /// bucket mode internally. The returned [`HistogramView`] provides
+    /// access to scale, stats, positive buckets, and quantile
+    /// estimation — all via `&self`.
     ///
     /// ```
     /// use otel_expohisto::Histogram;
@@ -582,19 +552,19 @@ impl<const N: usize> Histogram<N> {
     /// h.update(1.5).unwrap();
     /// h.update(2.7).unwrap();
     ///
-    /// let v = h.mut_view();
+    /// let v = h.view();
     /// assert_eq!(v.count(), 2);
     /// println!("scale = {}", v.scale());
     /// ```
     #[inline]
-    pub fn mut_view(&mut self) -> HistogramView<'_, N> {
+    pub fn view(&mut self) -> HistogramView<'_, N> {
         self.ensure_promoted();
         HistogramView { hist: self }
     }
 
     /// Returns the number of literal values stored (0 if not in literal mode).
     #[inline]
-    fn literal_count(&self) -> usize {
+    const fn literal_count(&self) -> usize {
         if self.literal {
             self.index_end as usize
         } else {
@@ -604,39 +574,23 @@ impl<const N: usize> Histogram<N> {
 
     /// Maximum number of literals that can be stored.
     #[inline]
-    fn literal_capacity(&self) -> usize {
+    const fn literal_capacity(&self) -> usize {
         N
     }
 
     /// Returns the stored literal values as a slice.
     #[inline]
-    fn literal_values(&self) -> &[u64] {
-        &self.data[..self.literal_count()]
-    }
-
-    /// Returns the configured scale limit for this histogram.
-    ///
-    /// This is the scale the histogram resets to on [`clear()`](Self::clear)
-    /// and the upper bound used by [`with_max_scale`](Self::with_max_scale).
-    /// For the global maximum supported by the mapping algorithm, see
-    /// [`max_scale()`](crate::max_scale).
-    #[inline]
-    pub fn limit_scale(&self) -> i32 {
-        self.limit_scale as i32
+    const fn literal_values(&self) -> &[u64] {
+        // Split the data slice to get [0..literal_count()]
+        // Using split_at for const-compatible slicing.
+        let (head, _) = self.data.split_at(self.literal_count());
+        head
     }
 
     /// Returns the current bucket counter width.
     #[inline]
-    pub fn bucket_width(&self) -> BucketWidth {
+    pub const fn bucket_width(&self) -> BucketWidth {
         self.bucket_width
-    }
-
-    /// Clears the histogram, resetting to initial state.
-    pub fn clear(&mut self) {
-        self.reset_bucket_state();
-        self.stats = Stats::EMPTY;
-        self.literal = self.literal_enabled;
-        self.mapping = Mapping::new(self.limit_scale as i32).unwrap();
     }
 
     /// Resets the bucket-related fields to empty state. Does not touch
@@ -669,6 +623,11 @@ impl<const N: usize> Histogram<N> {
 
     /// Records a single value.
     ///
+    /// The value must be non-negative and not NaN. This is not checked
+    /// at runtime — the caller is expected to validate inputs before
+    /// calling this method (e.g. at the OTel API level). Passing NaN
+    /// or negative values produces unspecified but safe results.
+    ///
     /// # Errors
     ///
     /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
@@ -679,17 +638,14 @@ impl<const N: usize> Histogram<N> {
 
     /// Records a value with a specified increment.
     ///
-    /// The value must be non-negative and not NaN. Callers are responsible
-    /// for validating inputs (e.g. at the OTel API level).
+    /// The value must be non-negative and not NaN. This is not checked
+    /// at runtime — the caller is expected to validate inputs before
+    /// calling this method (e.g. at the OTel API level). Passing NaN
+    /// or negative values produces unspecified but safe results.
     ///
     /// Returns `Err(Overflow)` if the count or bucket counters would overflow.
     /// On error the histogram is left unchanged (snapshot/rollback).
     pub fn record(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
-        debug_assert!(
-            !value.is_nan() && value >= 0.0,
-            "Histogram only accepts non-negative, non-NaN values"
-        );
-
         if incr == 0 {
             return Ok(());
         }
@@ -744,12 +700,12 @@ impl<const N: usize> Histogram<N> {
         let mut literals = [0u64; N];
         literals[..count].copy_from_slice(self.literal_values());
 
-        // Reset to empty bucket mode at limit_scale and replay values
+        // Reset to empty bucket mode at the initial scale and replay values
         // through the normal update path, which handles widening and
         // downscaling incrementally.
         self.literal = false;
         self.reset_bucket_state();
-        self.mapping = Mapping::new(self.limit_scale as i32).map_err(|_| Overflow)?;
+        self.mapping = Mapping::new(self.mapping.scale()).map_err(|_| Overflow)?;
 
         for &bits in &literals[..count] {
             let v = f64::from_bits(bits);
@@ -1151,6 +1107,12 @@ impl<const N: usize> Histogram<N> {
 // (Quantile estimation is in quantile.rs)
 
 // ---------------------------------------------------------------------------
+
+// Compile-time proof that Histogram is Send + Sync (all fields are Copy
+// primitives). This prevents regressions if a non-Send/Sync type is
+// accidentally added in the future.
+const fn _assert_send_sync<T: Send + Sync>() {}
+const _: () = _assert_send_sync::<Histogram<1>>();
 
 #[cfg(test)]
 mod tests;

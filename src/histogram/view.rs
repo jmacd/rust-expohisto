@@ -11,11 +11,11 @@ use super::bucket_view::BucketView;
 use super::quantile::QuantileIter;
 use super::Histogram;
 
-/// Promoted read-only view of a histogram's data.
+/// Read-only view of a histogram's data.
 ///
-/// Created by [`Histogram::mut_view`], which promotes from literal mode if
-/// needed. All accessors take `&self`, so a `HistogramView` can be
-/// shared freely once obtained.
+/// Created by [`Histogram::view`], which may promote from literal mode
+/// to bucket mode internally. All accessors take `&self`, so a
+/// `HistogramView` can be shared freely once obtained.
 ///
 /// ```
 /// use otel_expohisto::Histogram;
@@ -24,7 +24,7 @@ use super::Histogram;
 /// h.update(1.5).unwrap();
 /// h.update(2.7).unwrap();
 ///
-/// let v = h.mut_view();
+/// let v = h.view();
 /// assert_eq!(v.count(), 2);
 /// assert!(v.sum() > 4.0);
 /// println!("scale = {}, buckets = {}", v.scale(), v.positive().len());
@@ -49,26 +49,34 @@ impl<const N: usize> HistogramView<'_, N> {
 
     /// Returns the count of all recorded values.
     #[inline]
-    pub fn count(&self) -> u64 {
+    pub const fn count(&self) -> u64 {
         self.hist.stats.count
     }
 
     /// Returns the sum of all recorded values as `f64`.
     #[inline]
-    pub fn sum(&self) -> f64 {
+    pub const fn sum(&self) -> f64 {
         self.hist.stats.sum
     }
 
     /// Returns the minimum recorded value, or 0.0 if empty.
     #[inline]
-    pub fn min(&self) -> f64 {
-        self.hist.stats.min
+    pub const fn min(&self) -> f64 {
+        if self.hist.stats.count == 0 {
+            0.0
+        } else {
+            self.hist.stats.min
+        }
     }
 
     /// Returns the maximum recorded value, or 0.0 if empty.
     #[inline]
-    pub fn max(&self) -> f64 {
-        self.hist.stats.max
+    pub const fn max(&self) -> f64 {
+        if self.hist.stats.count == 0 {
+            0.0
+        } else {
+            self.hist.stats.max
+        }
     }
 
     /// Returns a read-only view of the positive buckets.

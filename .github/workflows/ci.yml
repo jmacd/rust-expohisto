@@ -81,3 +81,15 @@ jobs:
       - run: cargo run --example basic
       - run: cargo run --example merge
       - run: cargo run --example sizing
+
+  fuzz:
+    name: Fuzz (brief)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz
+      - run: cargo +nightly fuzz run histogram_oracle -- -max_total_time=30
+      - run: cargo +nightly fuzz run merge_oracle -- -max_total_time=30
+      - run: cargo +nightly fuzz run stateful_oracle -- -max_total_time=30
+      - run: cargo +nightly fuzz run rng_stress -- -max_total_time=30

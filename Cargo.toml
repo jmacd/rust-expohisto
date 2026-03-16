@@ -6,10 +6,10 @@ rust-version = "1.73"
 description = "OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/open-telemetry/otel-arrow/rust/expohisto"
+repository = "https://github.com/jmacd/rust-expohisto"
 keywords = ["opentelemetry", "histogram", "exponential", "metrics", "observability"]
 categories = ["data-structures"]
-exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md"]
+exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md", "docs/"]
 
 [features]
 default = ["std", "newrelic", "scale-8"]

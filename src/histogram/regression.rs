@@ -15,7 +15,7 @@ fn trim_bucket_range_preserves_literal_mode() {
     // Insert zero with incr=12
     assert!(h.record(0.0, 12).is_ok());
 
-    let view = h.mut_view();
+    let view = h.view();
     let buckets = view.positive();
     let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
     assert_eq!(view.count(), 14);

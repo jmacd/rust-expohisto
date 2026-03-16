@@ -3,8 +3,11 @@
 
 //! Lookup table generation for exponential histogram mapping.
 //!
-//! This crate provides utilities for generating exact lookup tables
-//! used to map f64 values to histogram bucket indices efficiently.
+//! This crate computes exact bucket boundary significands and derives
+//! linear-to-log index tables for the NewRelic and Dynatrace algorithms.
+//!
+//! Build scripts call [`generate_boundaries`] once, then pass the result
+//! to [`write_boundaries`] and [`write_index_table`].
 
 // Re-use the canonical float64 definitions from the main crate to avoid
 // maintaining a duplicate copy. The `pub` visibility on items there is
@@ -20,26 +23,41 @@ pub use newrelic_table::*;
 
 use std::io::Write;
 
-/// Generates a shared `lookup_tables.rs` source file containing `TABLE_SCALE`
-/// and the `BOUNDARIES` array for the given scale.
+/// Computes the sentinel-wrapped boundary array for a given scale.
 ///
-/// The output is intended for `include!()` in the main crate's `lookup` module.
-/// The `BOUNDARIES` layout is:
+/// Returns `N + 3` entries with layout:
 /// `[sentinel=0, b[0]=1, b[1], …, b[N−1], sentinel=2^52, sentinel=2^52]`
-/// where N = 2^table_scale.
-pub fn generate_shared_boundaries<W: Write>(w: &mut W, table_scale: u32) -> std::io::Result<()> {
-    let tables = LookupTables::generate(table_scale);
-    let n = tables.n;
+/// where N = 2^table_scale. Boundaries are exact 52-bit significands
+/// computed via bignum arithmetic.
+pub fn generate_boundaries(table_scale: u32) -> Vec<u64> {
+    let n = 1usize << table_scale;
+    let mut raw = compute_boundaries_exact(n, table_scale);
 
-    // log_bucket_end already has the upper-inclusive adjustment (b[0]=1).
-    // Take [..n] to exclude the trailing sentinel that LookupTables appends.
-    let adjusted_boundaries = &tables.log_bucket_end[..n];
+    // Upper-inclusive adjustment: boundary[0] = 1 instead of 0, so
+    // significand == 0 (exact powers of two) falls below, matching
+    // OTel's upper-inclusive bucket semantics.
+    debug_assert_eq!(raw[0], 0);
+    raw[0] = 1;
 
-    let mut shared = Vec::with_capacity(n + 3);
-    shared.push(0u64); // leading sentinel
-    shared.extend_from_slice(adjusted_boundaries);
-    shared.push(1u64 << 52); // trailing sentinel
-    shared.push(1u64 << 52); // trailing sentinel
+    let mut boundaries = Vec::with_capacity(n + 3);
+    boundaries.push(0u64); // leading sentinel
+    boundaries.extend_from_slice(&raw);
+    boundaries.push(1u64 << 52); // trailing sentinel
+    boundaries.push(1u64 << 52); // trailing sentinel
+    boundaries
+}
+
+/// Writes `TABLE_SCALE` and the `BOUNDARIES` array as Rust source.
+///
+/// `boundaries` must be the sentinel-wrapped array returned by
+/// [`generate_boundaries`].
+pub fn write_boundaries<W: Write>(
+    w: &mut W,
+    table_scale: u32,
+    boundaries: &[u64],
+) -> std::io::Result<()> {
+    let n = 1usize << table_scale;
+    debug_assert_eq!(boundaries.len(), n + 3);
 
     writeln!(
         w,
@@ -65,7 +83,7 @@ pub fn generate_shared_boundaries<W: Write>(w: &mut W, table_scale: u32) -> std:
     )?;
     writeln!(w, "/// where N = 2^TABLE_SCALE = {}.", n)?;
     writeln!(w, "pub static BOUNDARIES: [u64; {}] = [", n + 3)?;
-    for (i, &b) in shared.iter().enumerate() {
+    for (i, &b) in boundaries.iter().enumerate() {
         if i % 4 == 0 {
             write!(w, "    ")?;
         }
@@ -103,33 +121,24 @@ fn derive_index_table(boundaries: &[u64], count: usize, shift: u32) -> Vec<u16> 
     table
 }
 
-/// Generates an algorithm-specific index table at the given scale.
+/// Writes an algorithm-specific index table derived from `boundaries`.
 ///
+/// `boundaries` must be the sentinel-wrapped array returned by
+/// [`generate_boundaries`].
 /// `extra_bits`: 1 for NewRelic (2N linear buckets), 0 for Dynatrace (N).
 /// `prefix`: name prefix for generated symbols (e.g. "NR" or "DT").
 ///
 /// Emits `{PREFIX}_INDEX: [u16; _]` and `{PREFIX}_SHIFT: u32`.
-/// The index table maps linear significand buckets to approximate log
-/// bucket indices, used with BOUNDARIES for correction lookups.
-pub fn generate_index_table<W: Write>(
+pub fn write_index_table<W: Write>(
     w: &mut W,
     table_scale: u32,
+    boundaries: &[u64],
     extra_bits: u32,
     prefix: &str,
 ) -> std::io::Result<()> {
-    let tables = LookupTables::generate(table_scale);
-    let n = tables.n;
-
-    // Reconstruct sentinel-wrapped boundaries (same layout as BOUNDARIES).
-    let mut boundaries = Vec::with_capacity(n + 3);
-    boundaries.push(0u64);
-    boundaries.extend_from_slice(&tables.log_bucket_end[..n]);
-    boundaries.push(1u64 << 52);
-    boundaries.push(1u64 << 52);
-
     let count = 1usize << (table_scale + extra_bits);
     let shift = 52 - table_scale - extra_bits;
-    let index_table = derive_index_table(&boundaries, count, shift);
+    let index_table = derive_index_table(boundaries, count, shift);
 
     writeln!(w)?;
     writeln!(

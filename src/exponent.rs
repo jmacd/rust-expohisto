@@ -20,7 +20,6 @@ use crate::mapping::MappingError;
 #[inline]
 pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale <= 0);
-    debug_assert!(value > 0.0);
 
     let shift = (-scale) as u32;
 
@@ -61,7 +60,7 @@ pub fn lower_boundary(index: i32, scale: i32) -> Result<f64, MappingError> {
 }
 
 #[inline]
-pub fn min_normal_lower_boundary_index(scale: i32) -> i32 {
+pub const fn min_normal_lower_boundary_index(scale: i32) -> i32 {
     let shift = (-scale) as u32;
     let mut idx = MIN_NORMAL_EXPONENT >> shift;
     if shift < 2 {
@@ -72,7 +71,7 @@ pub fn min_normal_lower_boundary_index(scale: i32) -> i32 {
 }
 
 #[inline]
-pub fn max_normal_lower_boundary_index(scale: i32) -> i32 {
+pub const fn max_normal_lower_boundary_index(scale: i32) -> i32 {
     let shift = (-scale) as u32;
     MAX_NORMAL_EXPONENT >> shift
 }

@@ -35,7 +35,6 @@ pub fn table_map_to_index(
 
     debug_assert!(scale > 0);
     debug_assert!(scale <= TABLE_SCALE);
-    debug_assert!(value > 0.0);
 
     let significand = get_significand(value);
     let exponent = get_normal_base2(value);

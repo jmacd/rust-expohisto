@@ -33,7 +33,6 @@ const SCALE_FACTORS: [f64; 21] = {
 #[inline]
 pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
-    debug_assert!(value > 0.0);
 
     let significand = get_significand(value);
     let exp = get_normal_base2(value);

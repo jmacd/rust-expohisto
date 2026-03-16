@@ -1,11 +1,11 @@
 #![no_main]
 
 //! **State-machine fuzzer** — exercises interleaved sequences of
-//! insert, merge, clear, and swap on a pool of histograms, verifying
+//! insert, merge, reset, and swap on a pool of histograms, verifying
 //! invariants after every operation.
 //!
 //! This targets risks that single-operation oracles miss:
-//!   - clear → reuse cycles (stale index_base, wrong bucket_width)
+//!   - reset → reuse cycles (stale index_base, wrong bucket_width)
 //!   - merge after partial inserts with different bucket widths
 //!   - swap correctness (does shadow state track?)
 //!   - cross-size merge (Histogram<8> → Histogram<16> via merge_from_other)
@@ -84,7 +84,7 @@ enum Op {
     },
     /// Merge one pooled histogram into another.
     Merge { dst: u8, src: u8 },
-    /// Clear a pooled histogram.
+    /// Reset a pooled histogram (re-create).
     Clear { idx: u8 },
     /// Swap two pooled histograms.
     Swap { a: u8, b: u8 },
@@ -227,7 +227,7 @@ fuzz_target!(|data: &[u8]| {
 
             Op::Clear { idx } => {
                 let i = idx as usize % POOL;
-                pool[i].clear();
+                pool[i] = Histogram::new().with_literal_mode(lit_ctl & (1 << i) != 0);
                 shadows[i].clear();
             }
 

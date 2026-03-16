@@ -8,7 +8,7 @@
 use otel_expohisto::Histogram;
 
 fn print_histogram<const N: usize>(label: &str, h: &mut Histogram<N>) {
-    let v = h.mut_view();
+    let v = h.view();
     println!("{label}:");
     println!(
         "  count={}, sum={:.1}, min={:.1}, max={:.1}, scale={}",

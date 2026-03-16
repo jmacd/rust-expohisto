@@ -13,6 +13,7 @@ arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.otel-expohisto]
 path = ".."
+features = ["bench-internals"]
 
 [workspace]
 members = ["."]

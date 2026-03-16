@@ -9,7 +9,7 @@ use otel_expohisto::{Histogram, Mapping};
 pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u64)], label: &str) {
     let total_count: u64 = ops.iter().map(|&(_, incr)| incr).sum();
 
-    let v = hist.mut_view();
+    let v = hist.view();
     assert_eq!(v.count(), total_count, "{label}: count mismatch");
 
     if total_count == 0 {

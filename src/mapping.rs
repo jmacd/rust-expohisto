@@ -112,7 +112,7 @@ impl Mapping {
 
     /// Returns the current scale.
     #[inline]
-    pub fn scale(&self) -> i32 {
+    pub const fn scale(&self) -> i32 {
         self.scale as i32
     }
 
@@ -232,13 +232,13 @@ impl Mapping {
 
     #[cfg(feature = "boundary")]
     #[inline]
-    fn min_normal_lower_boundary_index_log(&self) -> i32 {
+    const fn min_normal_lower_boundary_index_log(&self) -> i32 {
         MIN_NORMAL_EXPONENT << (self.scale as i32)
     }
 
     #[cfg(feature = "boundary")]
     #[inline]
-    fn max_normal_lower_boundary_index_log(&self) -> i32 {
+    const fn max_normal_lower_boundary_index_log(&self) -> i32 {
         ((MAX_NORMAL_EXPONENT + 1) << (self.scale as i32)) - 1
     }
 }

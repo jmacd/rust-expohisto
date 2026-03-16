@@ -43,7 +43,7 @@ fn bench_downscale(c: &mut Criterion) {
 
             group.bench_function(BenchmarkId::new("fill", label), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<16> = Histogram::with_scale(scale);
+                    let mut h: Histogram<16> = Histogram::new().with_scale(scale);
                     for &v in &values {
                         let _ = h.update(black_box(v));
                     }
@@ -72,13 +72,13 @@ fn bench_downscale(c: &mut Criterion) {
 
             group.bench_function(BenchmarkId::new("merge", label), |b| {
                 // Pre-build the source histogram (high scale).
-                let mut src: Histogram<16> = Histogram::with_scale(hi_scale);
+                let mut src: Histogram<16> = Histogram::new().with_scale(hi_scale);
                 for &v in &hi_vals {
                     let _ = src.update(v);
                 }
 
                 b.iter(|| {
-                    let mut dst: Histogram<16> = Histogram::with_scale(lo_scale);
+                    let mut dst: Histogram<16> = Histogram::new().with_scale(lo_scale);
                     for &v in &lo_vals {
                         let _ = dst.update(v);
                     }
@@ -109,7 +109,7 @@ fn bench_downscale(c: &mut Criterion) {
             group.bench_function(BenchmarkId::new("steps", steps), |b| {
                 // Build a fresh histogram each iteration.
                 b.iter(|| {
-                    let mut h: Histogram<16> = Histogram::with_scale(scale);
+                    let mut h: Histogram<16> = Histogram::new().with_scale(scale);
                     for &v in &values {
                         let _ = h.update(v);
                     }

@@ -32,7 +32,7 @@ pub const MIN_VALUE: f64 = 2.2250738585072014e-308; // 0x1p-1022
 
 /// Extracts the normalized base-2 exponent from an f64.
 #[inline]
-pub fn get_normal_base2(value: f64) -> i32 {
+pub const fn get_normal_base2(value: f64) -> i32 {
     let raw_bits = value.to_bits();
     let raw_exponent = ((raw_bits & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as i32;
     raw_exponent - EXPONENT_BIAS
@@ -40,7 +40,7 @@ pub fn get_normal_base2(value: f64) -> i32 {
 
 /// Returns the 52-bit significand as an unsigned value.
 #[inline]
-pub fn get_significand(value: f64) -> u64 {
+pub const fn get_significand(value: f64) -> u64 {
     value.to_bits() & SIGNIFICAND_MASK
 }
 
@@ -49,10 +49,10 @@ pub fn get_significand(value: f64) -> u64 {
 /// Valid for k in \[`MIN_NORMAL_EXPONENT`, `MAX_NORMAL_EXPONENT`\] (i.e. −1022..=1023).
 /// Panics in debug mode if k is out of range.
 #[inline]
-pub fn pow2(k: i32) -> f64 {
+pub const fn pow2(k: i32) -> f64 {
     debug_assert!(
-        (MIN_NORMAL_EXPONENT..=MAX_NORMAL_EXPONENT).contains(&k),
-        "pow2({k}) out of range [{MIN_NORMAL_EXPONENT}, {MAX_NORMAL_EXPONENT}]"
+        k >= MIN_NORMAL_EXPONENT && k <= MAX_NORMAL_EXPONENT,
+        "pow2 out of range"
     );
     let biased = (k + EXPONENT_BIAS) as u64;
     f64::from_bits(biased << SIGNIFICAND_WIDTH)

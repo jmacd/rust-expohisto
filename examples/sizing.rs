@@ -66,15 +66,15 @@ fn main() {
     // Histogram<16> gives 1024 B1 buckets → plenty.
     // Even after widening to B4: 256 buckets → still covers the range.
 
-    let mut h: Histogram<16> = Histogram::with_max_scale(4);
+    let mut h: Histogram<16> = Histogram::new().with_scale(4);
     let values = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 10000.0];
     for &v in &values {
         h.update(v).unwrap();
     }
 
-    let v = h.mut_view();
+    let v = h.view();
     println!(
-        "Histogram<16> with max_scale=4 after {} values spanning {:.0}x range:",
+        "Histogram<16> with scale=4 after {} values spanning {:.0}x range:",
         v.count(),
         v.max() / v.min()
     );
@@ -103,8 +103,8 @@ fn main() {
 
     println!(
         "with_min_bucket_width(U8): {} buckets at {:?}",
-        fast.mut_view().positive().capacity(),
-        fast.mut_view().positive().width()
+        fast.view().positive().capacity(),
+        fast.view().positive().width()
     );
 
     let mut dense: Histogram<16> = Histogram::new();
@@ -113,7 +113,7 @@ fn main() {
     }
     println!(
         "default (B1 start):        {} buckets at {:?}",
-        dense.mut_view().positive().capacity(),
-        dense.mut_view().positive().width()
+        dense.view().positive().capacity(),
+        dense.view().positive().width()
     );
 }
