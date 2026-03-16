@@ -267,8 +267,8 @@ fn bench_literal(c: &mut Criterion) {
                 let v = h_lit.view();
                 let bv = v.positive();
                 let mut sum = 0u64;
-                for i in 0..bv.len() {
-                    sum += bv.at(black_box(i));
+                for count in bv.iter() {
+                    sum += black_box(count);
                 }
                 black_box(sum);
             })
@@ -279,8 +279,8 @@ fn bench_literal(c: &mut Criterion) {
                 let v = h_bkt.view();
                 let bv = v.positive();
                 let mut sum = 0u64;
-                for i in 0..bv.len() {
-                    sum += bv.at(black_box(i));
+                for count in bv.iter() {
+                    sum += black_box(count);
                 }
                 black_box(sum);
             })
@@ -335,7 +335,7 @@ fn bench_literal(c: &mut Criterion) {
         group.bench_function("literal_src_8v", |b| {
             b.iter(|| {
                 let mut dst = dst_template.clone();
-                dst.merge_from_other(black_box(&src_lit)).unwrap();
+                dst.merge_from(black_box(&src_lit)).unwrap();
                 black_box(&dst);
             })
         });
@@ -343,7 +343,7 @@ fn bench_literal(c: &mut Criterion) {
         group.bench_function("bucket_src_8v", |b| {
             b.iter(|| {
                 let mut dst = dst_template.clone();
-                dst.merge_from_other(black_box(&src_bkt)).unwrap();
+                dst.merge_from(black_box(&src_bkt)).unwrap();
                 black_box(&dst);
             })
         });

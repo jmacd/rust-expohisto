@@ -113,16 +113,18 @@ impl<const N: usize> Histogram<N> {
     /// Downscales at U64 width by collapsing 2^by adjacent buckets.
     ///
     /// Rotates the ring buffer to make the live range contiguous, then
-    /// folds groups in-place with saturating addition.  No temporary
+    /// folds groups in-place with checked addition.  No temporary
     /// buffer is needed because the write position never overtakes the
     /// read position.
-    pub(super) fn downscale_u64(&mut self, by: i32) {
+    ///
+    /// Returns `Err(Overflow)` if any group sum exceeds `u64::MAX`.
+    pub(super) fn downscale_u64(&mut self, by: i32) -> Result<(), super::Overflow> {
         debug_assert_eq!(self.bucket_width, BucketWidth::U64);
         debug_assert!(by >= 1);
 
         if self.range_is_empty() {
             self.shift_indices(by);
-            return;
+            return Ok(());
         }
 
         let range_len = (self.index_end - self.index_start + 1) as usize;
@@ -150,7 +152,7 @@ impl<const N: usize> Histogram<N> {
                 acc = 0;
                 cur_new = new_idx;
             }
-            acc = acc.saturating_add(self.data[k]);
+            acc = acc.checked_add(self.data[k]).ok_or(super::Overflow)?;
         }
         self.data[write] = acc;
         write += 1;
@@ -162,5 +164,6 @@ impl<const N: usize> Histogram<N> {
         self.index_start = new_start;
         self.index_end = new_end;
         self.index_base = new_start;
+        Ok(())
     }
 }

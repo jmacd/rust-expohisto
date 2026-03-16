@@ -52,8 +52,9 @@ impl<const N: usize> BucketView<'_, N> {
     /// # Panics
     ///
     /// Panics if `pos >= len()`.
+    #[cfg(test)]
     #[inline]
-    pub fn at(&self, pos: u32) -> u64 {
+    pub(crate) fn at(&self, pos: u32) -> u64 {
         let len = self.len();
         assert!(
             pos < len,

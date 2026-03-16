@@ -34,12 +34,12 @@ fn main() {
     println!("  offset: {}", buckets.offset());
     println!("  width:  {:?}", buckets.width());
     println!("  count:  {}", buckets.len());
-    for i in 0..buckets.len() {
-        if buckets.at(i) > 0 {
+    for (i, count) in buckets.iter().enumerate() {
+        if count > 0 {
             println!(
                 "  bucket[{}]: {}",
-                buckets.offset() as u32 + i,
-                buckets.at(i)
+                buckets.offset() as usize + i,
+                count
             );
         }
     }

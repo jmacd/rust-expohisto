@@ -8,7 +8,7 @@
 //!   - reset → reuse cycles (stale index_base, wrong bucket_width)
 //!   - merge after partial inserts with different bucket widths
 //!   - swap correctness (does shadow state track?)
-//!   - cross-size merge (Histogram<8> → Histogram<16> via merge_from_other)
+//!   - cross-size merge (Histogram<8> → Histogram<16> via merge_from)
 //!   - cascading downscale/widen under odd-base + full-capacity pressure
 //!   - counter overflow recovery paths (NeedsDownscale vs CounterOverflow)
 
@@ -130,8 +130,11 @@ fn decode_increment(sel: u8) -> u64 {
 
 fn try_insert(hist: &mut Histogram<8>, shadow: &mut Shadow, value_bits: u64, incr: u64) {
     if let Some(v) = decode_value(value_bits) {
-        if hist.record(v, incr).is_ok() && !shadow.poisoned {
-            shadow.ops.push(Obs { value: v, incr });
+        let snapshot = hist.clone();
+        match hist.record(v, incr) {
+            Ok(()) if !shadow.poisoned => shadow.ops.push(Obs { value: v, incr }),
+            Err(_) => *hist = snapshot,
+            _ => {}
         }
     }
 }
@@ -213,15 +216,25 @@ fuzz_target!(|data: &[u8]| {
                 if d == s {
                     continue;
                 }
-                if big.merge_from_other(&pool[s]).is_ok() {
-                    let src_shadow = shadows[s].clone();
-                    big_shadow.merge_from(&src_shadow);
+                {
+                    let snapshot = big.clone();
+                    match big.merge_from(&pool[s]) {
+                        Ok(()) => {
+                            let src_shadow = shadows[s].clone();
+                            big_shadow.merge_from(&src_shadow);
+                        }
+                        Err(_) => big = snapshot,
+                    }
                 }
 
                 let (dst_hist, src_hist) = two_mut(&mut pool, d, s);
-                if dst_hist.merge_from(src_hist).is_ok() {
-                    let src_shadow = shadows[s].clone();
-                    shadows[d].merge_from(&src_shadow);
+                let snapshot = dst_hist.clone();
+                match dst_hist.merge_from(src_hist) {
+                    Ok(()) => {
+                        let src_shadow = shadows[s].clone();
+                        shadows[d].merge_from(&src_shadow);
+                    }
+                    Err(_) => *dst_hist = snapshot,
                 }
             }
 

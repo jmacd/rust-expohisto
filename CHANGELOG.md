@@ -20,8 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sole mapper when no lookup table is enabled)
 - **Configurable lookup table scale** — `scale-1` through `scale-20` features
   trade binary size for finer resolution support
-- `Histogram::merge_from()` — same-size in-place merge with atomicity
-- `Histogram::merge_from_other()` — cross-size merge (different `N` values)
+- `Histogram::merge_from()` — merge from any histogram (same or different `N`)
 - `Histogram::merge_from_raw()` — merge from raw bucket data
 - `Histogram::with_min_bucket_width()` — skip sub-byte widths for faster ops
 - `Histogram::with_literal_mode()` — disable literal mode when value range

@@ -148,7 +148,7 @@ fn check_merge_different<const N: usize, const M: usize>(
 ) {
     let (mut h1, mut ok) = build::<N>(left, literal_mode);
     let (h2, ok_right) = build::<M>(right, literal_mode);
-    if h1.merge_from_other(&h2).is_err() {
+    if h1.merge_from(&h2).is_err() {
         return;
     }
     ok.extend_from_slice(&ok_right);

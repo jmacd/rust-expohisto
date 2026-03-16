@@ -66,7 +66,7 @@ fn main() {
     // Histogram<16> gives 1024 B1 buckets → plenty.
     // Even after widening to B4: 256 buckets → still covers the range.
 
-    let mut h: Histogram<16> = Histogram::new().with_scale(4);
+    let mut h: Histogram<16> = Histogram::new().with_scale(4).unwrap();
     let values = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 10000.0];
     for &v in &values {
         h.update(v).unwrap();

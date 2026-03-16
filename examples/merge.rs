@@ -66,7 +66,7 @@ fn main() {
     print_histogram("Edge (H8)", &mut edge);
     print_histogram("Aggregator (H32)", &mut aggregator);
 
-    // merge_from_other allows different N values
-    aggregator.merge_from_other(&edge).unwrap();
+    // merge_from allows different N values
+    aggregator.merge_from(&edge).unwrap();
     print_histogram("\nAggregator after merge", &mut aggregator);
 }

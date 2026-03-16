@@ -65,7 +65,7 @@ pub const fn max_scale() -> i32 {
 /// Converts values to bucket indices at a given scale.
 #[derive(Debug, Clone, Copy)]
 pub struct Mapping {
-    scale: i8,
+    scale: i32,
     /// Pre-computed inverse factor for boundary computation (boundary feature only).
     #[cfg(feature = "boundary")]
     inverse_factor: f64,
@@ -82,7 +82,7 @@ impl Mapping {
         }
 
         Ok(Self {
-            scale: scale as i8,
+            scale,
             #[cfg(feature = "boundary")]
             inverse_factor: if scale > 0 {
                 core::f64::consts::LN_2 / (1u64 << scale) as f64
@@ -95,7 +95,7 @@ impl Mapping {
     /// Returns the current scale.
     #[inline]
     pub const fn scale(&self) -> i32 {
-        self.scale as i32
+        self.scale
     }
 
     /// Maps a positive f64 value to a bucket index.
@@ -105,10 +105,10 @@ impl Mapping {
     #[inline]
     pub fn map_to_index(&self, value: f64) -> i32 {
         if self.scale <= 0 {
-            crate::exponent::map_to_index(value, self.scale as i32)
+            crate::exponent::map_to_index(value, self.scale)
         } else if value < MIN_VALUE {
             // All subnormals land in the MIN_VALUE bucket (2^-1022).
-            (MIN_NORMAL_EXPONENT << (self.scale as i32)) - 1
+            (MIN_NORMAL_EXPONENT << (self.scale)) - 1
         } else {
             self.map_to_index_positive_scale(value)
         }
@@ -117,7 +117,7 @@ impl Mapping {
     /// Mapping for positive scales — delegates to the compiled lookup table.
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
-        let scale = self.scale as i32;
+        let scale = self.scale;
 
         #[cfg(has_lookup_table)]
         {
@@ -140,7 +140,7 @@ impl Mapping {
     #[inline]
     pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
         if self.scale <= 0 {
-            crate::exponent::lower_boundary(index, self.scale as i32)
+            crate::exponent::lower_boundary(index, self.scale)
         } else {
             self.lower_boundary_logarithm(index)
         }
@@ -154,7 +154,7 @@ impl Mapping {
     #[inline]
     pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
         if self.scale <= 0 {
-            crate::exponent::lower_boundary(index, self.scale as i32)
+            crate::exponent::lower_boundary(index, self.scale)
         } else {
             Err(MappingError::Unsupported)
         }
@@ -162,7 +162,7 @@ impl Mapping {
 
     #[cfg(feature = "boundary")]
     fn lower_boundary_logarithm(&self, index: i32) -> Result<f64, MappingError> {
-        let scale = self.scale as i32;
+        let scale = self.scale;
         let max_idx = self.max_normal_lower_boundary_index_log();
         let min_idx = self.min_normal_lower_boundary_index_log();
 
@@ -191,13 +191,13 @@ impl Mapping {
     #[cfg(feature = "boundary")]
     #[inline]
     const fn min_normal_lower_boundary_index_log(&self) -> i32 {
-        MIN_NORMAL_EXPONENT << (self.scale as i32)
+        MIN_NORMAL_EXPONENT << (self.scale)
     }
 
     #[cfg(feature = "boundary")]
     #[inline]
     const fn max_normal_lower_boundary_index_log(&self) -> i32 {
-        ((MAX_NORMAL_EXPONENT + 1) << (self.scale as i32)) - 1
+        ((MAX_NORMAL_EXPONENT + 1) << (self.scale)) - 1
     }
 }
 

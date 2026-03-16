@@ -34,7 +34,7 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
     let count = v.count();
     let scale = v.scale();
     let buckets = v.positive();
-    let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
+    let bucket_total: u64 = buckets.iter().sum();
 
     assert!(
         bucket_total <= count,
@@ -76,10 +76,9 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         "{label}: bucket len mismatch (scale={scale})"
     );
 
-    for pos in 0..buckets.len() {
+    for (pos, act_count) in buckets.iter().enumerate() {
         let idx = exp_min_idx + pos as i32;
         let exp_count = expected.get(&idx).copied().unwrap_or(0);
-        let act_count = buckets.at(pos);
         assert_eq!(
             act_count,
             exp_count,
