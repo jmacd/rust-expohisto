@@ -21,8 +21,9 @@ Exponential histograms provide a compact, high-resolution representation of valu
 - **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
 - **Atomic error recovery**: Snapshot/rollback ensures failed operations leave the histogram unchanged
 - **Literal mode**: Cold-start optimization defers bucket allocation until the value range is known
+- **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature; all math delegates to `libm`
 - **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate
-- **Zero runtime dependencies**: Only Rust `std`; no external crates
+- **Minimal dependencies**: Single runtime dependency (`libm`) for `no_std`-compatible math functions
 - **Comprehensive testing**: 125 unit tests and 4 fuzz targets
 
 **Minimum Supported Rust Version (MSRV):** 1.73
@@ -67,7 +68,7 @@ Choose a **scale** feature to set the table size, and an **algorithm** feature t
 
 ```toml
 [dependencies]
-otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # default
+otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # default: std + newrelic + scale-8
 ```
 
 ### Scale (table size)
@@ -94,6 +95,14 @@ fall back to the built-in logarithm mapper. Selected examples:
 | *(none)* | — | — | Pure logarithm, no table needed, FP precision errors |
 
 The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](#lookup-table-design)). When neither is enabled (or when the scale exceeds the table maximum), the built-in logarithm mapper handles all scales.
+
+### Other features
+
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `std` | ✓ | Enables `std::error::Error` impls for `Overflow` and `MappingError`. Disable for `#![no_std]` builds. |
+| `bench-internals` | | Exposes internal methods (e.g., `downscale()`) for benchmarking |
+| `bench-all` | | Enables `newrelic` + `dynatrace` + `scale-8` + `bench-internals` for testing all algorithms together |
 
 ## Exponential Scale
 
@@ -798,7 +807,18 @@ For hot-path recording, consider a thread-local histogram per worker with period
 
 The crate contains **zero `unsafe` code**. All bit-level manipulation (sub-byte get/set, SWAR pairwise merge, shift-and-mask widening) is implemented entirely in safe Rust. The `data: [u64; N]` pool is reinterpreted at different counter widths using arithmetic indexing, not pointer casts.
 
-The crate currently requires `std` (for `std::error::Error` and snapshot/rollback cloning). It does not support `#![no_std]`.
+## `no_std` Support
+
+The crate is `#![no_std]` compatible. The `std` feature (enabled by default) only gates `std::error::Error` implementations for `Overflow` and `MappingError`. All core functionality — recording, merging, downscaling, quantile estimation — works without `std`. Math operations (`ln`, `exp`, `floor`, `powi`) delegate to `libm` when `std` is disabled.
+
+To use in a `no_std` environment, disable default features and re-enable the ones you need:
+
+```toml
+[dependencies]
+otel-expohisto = { version = "0.1", default-features = false, features = ["newrelic", "scale-8"] }
+```
+
+The CI test matrix includes `--no-default-features` to ensure `no_std` compatibility is continuously validated.
 
 ## Testing & Quality
 
