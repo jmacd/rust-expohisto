@@ -53,31 +53,14 @@ impl std::error::Error for MappingError {}
 
 /// Returns the maximum scale supported by the mapping.
 ///
-/// When a lookup table algorithm (NewRelic or Dynatrace) is compiled,
-/// this equals the compiled table scale. When only the `logarithm`
-/// feature is enabled (no lookup tables), all scales up to
-/// [`MAX_SCALE`] are supported. Otherwise only exponent mapping
-/// (scale ≤ 0) is available.
+/// This equals the compiled lookup table scale (set by the `scale-N`
+/// feature). Exponent mapping (scale ≤ 0) is always available.
 #[inline]
 pub const fn max_scale() -> i32 {
-    #[cfg(all(has_lookup_table, any(feature = "newrelic", feature = "dynatrace")))]
-    {
-        crate::lookup::TABLE_SCALE
-    }
-    #[cfg(all(
-        not(all(has_lookup_table, any(feature = "newrelic", feature = "dynatrace"))),
-        feature = "logarithm",
-    ))]
-    {
-        MAX_SCALE
-    }
-    #[cfg(all(
-        not(all(has_lookup_table, any(feature = "newrelic", feature = "dynatrace"))),
-        not(feature = "logarithm"),
-    ))]
-    {
-        0
-    }
+    #[cfg(has_lookup_table)]
+    { crate::lookup::TABLE_SCALE }
+    #[cfg(not(has_lookup_table))]
+    { 0 }
 }
 
 /// Converts values to bucket indices at a given scale.
@@ -133,43 +116,26 @@ impl Mapping {
     }
 
     /// Mapping for positive scales — delegates to the compiled lookup table
-    /// algorithm, or falls back to the logarithm mapper when no tables are
-    /// compiled (testing/benchmarking only).
-    #[allow(clippy::needless_return, unreachable_code)]
+    /// algorithm (NewRelic or Dynatrace).
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
         let scale = self.scale as i32;
 
-        #[cfg(all(has_lookup_table, feature = "newrelic"))]
+        #[cfg(feature = "newrelic")]
         {
-            return crate::newrelic::map_to_index(value, scale);
+            crate::newrelic::map_to_index(value, scale)
         }
 
-        #[cfg(all(has_lookup_table, feature = "dynatrace", not(feature = "newrelic")))]
+        #[cfg(all(feature = "dynatrace", not(feature = "newrelic")))]
         {
-            return crate::dynatrace::map_to_index(value, scale);
+            crate::dynatrace::map_to_index(value, scale)
         }
 
-        // Logarithm fallback for tests/benchmarks.
-        #[cfg(all(
-            not(all(has_lookup_table, feature = "newrelic")),
-            not(all(has_lookup_table, feature = "dynatrace")),
-            feature = "logarithm",
-        ))]
-        {
-            return crate::logarithm::map_to_index(value, scale);
-        }
-
-        // No positive-scale algorithm compiled. max_scale() == 0 prevents
-        // this from being reached at runtime.
-        #[cfg(all(
-            not(all(has_lookup_table, feature = "newrelic")),
-            not(all(has_lookup_table, feature = "dynatrace")),
-            not(feature = "logarithm"),
-        ))]
+        // compile_error in lib.rs prevents reaching this configuration.
+        #[cfg(not(any(feature = "newrelic", feature = "dynatrace")))]
         {
             let _ = (value, scale);
-            unreachable!("no positive-scale mapping algorithm compiled")
+            0
         }
     }
 

@@ -5,7 +5,7 @@
 [![docs.rs](https://docs.rs/otel-expohisto/badge.svg)](https://docs.rs/otel-expohisto)
 [![License](https://img.shields.io/crates/l/otel-expohisto.svg)](https://github.com/jmacd/rust-expohisto/blob/main/LICENSE)
 
-An allocation-free (after one-time table init), table-lookup based implementation of the
+An allocation-free, compile-time table-lookup based implementation of the
 [OpenTelemetry Exponential Histogram](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
 in Rust.
 
@@ -21,10 +21,10 @@ Exponential histograms provide a compact, high-resolution representation of valu
 - **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
 - **Atomic error recovery**: Snapshot/rollback ensures failed operations leave the histogram unchanged
 - **Literal mode**: Cold-start optimization defers bucket allocation until the value range is known
-- **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature; all math delegates to `libm`
+- **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature
 - **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate
-- **Minimal dependencies**: Single runtime dependency (`libm`) for `no_std`-compatible math functions
-- **Comprehensive testing**: 125 unit tests and 4 fuzz targets
+- **Zero runtime dependencies**: Only a build dependency (`expohisto-mapping-gen`) for compile-time table generation
+- **Comprehensive testing**: Unit tests and fuzz targets
 
 **Minimum Supported Rust Version (MSRV):** 1.73
 
@@ -64,7 +64,7 @@ Benchmark results — `map_to_index` over 100 random f64 values (criterion, medi
 | NewRelic lookup | 1–14 | ~7.3 ns | Integer-only, 2N linear buckets, 1 correction |
 | Logarithm | 1–20 | ~10.5 ns | `ln()`-based, works at any scale |
 
-The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum automatically fall back to the built-in logarithm mapper.
+The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected by `Mapping::new()`.
 
 ## Lookup Table Features
 
@@ -79,7 +79,7 @@ otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # defa
 
 Scale features `scale-1` through `scale-20` control the lookup table size.
 Each table supports all scales from 1 up to its maximum; higher scales
-fall back to the built-in logarithm mapper. Selected examples:
+are rejected by `Mapping::new()`. Selected examples:
 
 | Feature | Table Size | Scales Accelerated | Use Case |
 |---------|------------|-------------------|----------|
@@ -94,19 +94,20 @@ fall back to the built-in logarithm mapper. Selected examples:
 
 | Feature | Linear Buckets | Max Corrections | Notes |
 |---------|---------------|-----------------|-------|
-| `newrelic` | 2N | 1 | Slightly larger index table |
+| `newrelic` | 2N | 1 | **Default**. Slightly larger index table |
 | `dynatrace` | N | 2 | ~50% smaller index table |
-| *(none)* | — | — | Pure logarithm, no table needed, FP precision errors |
 
-The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](docs/design.md#lookup-table-design)). When neither is enabled (or when the scale exceeds the table maximum), the built-in logarithm mapper handles all scales.
+The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](docs/design.md#lookup-table-design)). At least one must be enabled.
 
 ### Other features
 
 | Feature | Default | Effect |
 |---------|---------|--------|
 | `std` | ✓ | Enables `std::error::Error` impls for `Overflow` and `MappingError`. Disable for `#![no_std]` builds. |
+| `logarithm` | | Pure `ln()`-based mapper for testing and benchmarking. Requires `std`. |
+| `boundary` | | Enables `lower_boundary()` at positive scales and quantile estimation (`QuantileIter`). Requires `std`. |
 | `bench-internals` | | Exposes internal methods (e.g., `downscale()`) for benchmarking |
-| `bench-all` | | Enables `newrelic` + `dynatrace` + `scale-8` + `bench-internals` for testing all algorithms together |
+| `bench-all` | | Enables `newrelic` + `dynatrace` + `logarithm` + `boundary` + `scale-8` + `bench-internals` for testing all algorithms together |
 
 ## Documentation
 

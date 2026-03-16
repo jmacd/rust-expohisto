@@ -4,6 +4,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![doc = include_str!("../README.md")]
 
+// Require at least one lookup table algorithm.
+#[cfg(not(any(feature = "newrelic", feature = "dynatrace")))]
+compile_error!(
+    "either the `newrelic` or `dynatrace` feature must be enabled"
+);
+
 // Ensure only one lookup table algorithm is selected at a time.
 // The `bench-all` feature intentionally enables both for comparative benchmarking.
 #[cfg(all(
