@@ -4,6 +4,18 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![doc = include_str!("../README.md")]
 
+// Ensure only one lookup table algorithm is selected at a time.
+// The `bench-all` feature intentionally enables both for comparative benchmarking.
+#[cfg(all(
+    feature = "newrelic",
+    feature = "dynatrace",
+    not(feature = "bench-all")
+))]
+compile_error!(
+    "features `newrelic` and `dynatrace` are mutually exclusive; \
+     enable only one (or use `bench-all` for benchmarking both)"
+);
+
 pub(crate) mod exponent;
 pub(crate) mod float64;
 pub mod histogram;

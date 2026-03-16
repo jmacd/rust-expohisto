@@ -12,7 +12,7 @@ fn main() {
     hist.update(100.0).unwrap();
 
     // Access statistics through a view
-    let v = hist.view();
+    let v = hist.mut_view();
     println!("count: {}, sum: {}", v.count(), v.sum());
     println!("scale: {}", v.scale());
 }

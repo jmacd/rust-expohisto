@@ -72,7 +72,7 @@ fn main() {
         h.update(v).unwrap();
     }
 
-    let v = h.view();
+    let v = h.mut_view();
     println!(
         "Histogram<16> with max_scale=4 after {} values spanning {:.0}x range:",
         v.count(),
@@ -103,8 +103,8 @@ fn main() {
 
     println!(
         "with_min_bucket_width(U8): {} buckets at {:?}",
-        fast.view().positive().capacity(),
-        fast.view().positive().width()
+        fast.mut_view().positive().capacity(),
+        fast.mut_view().positive().width()
     );
 
     let mut dense: Histogram<16> = Histogram::new();
@@ -113,7 +113,7 @@ fn main() {
     }
     println!(
         "default (B1 start):        {} buckets at {:?}",
-        dense.view().positive().capacity(),
-        dense.view().positive().width()
+        dense.mut_view().positive().capacity(),
+        dense.mut_view().positive().width()
     );
 }

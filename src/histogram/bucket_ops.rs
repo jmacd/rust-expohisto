@@ -110,21 +110,12 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    /// Clears bucket data and writes `sums` into a new contiguous range.
-    pub(super) fn scatter_write(&mut self, start: i32, end: i32, sums: &[u64]) {
-        self.bucket_data_mut().fill(0);
-        self.index_start = start;
-        self.index_end = end;
-        self.index_base = start;
-        for (i, &v) in sums.iter().enumerate() {
-            self.bucket_set(self.slot_for(start + i as i32), v);
-        }
-    }
-
     /// Downscales at U64 width by collapsing 2^by adjacent buckets.
     ///
-    /// At U64 width, sums use saturating arithmetic and cannot
-    /// meaningfully overflow.
+    /// Rotates the ring buffer to make the live range contiguous, then
+    /// folds groups in-place with saturating addition.  No temporary
+    /// buffer is needed because the write position never overtakes the
+    /// read position.
     pub(super) fn downscale_u64(&mut self, by: i32) {
         debug_assert_eq!(self.bucket_width, BucketWidth::U64);
         debug_assert!(by >= 1);
@@ -134,19 +125,42 @@ impl<const N: usize> Histogram<N> {
             return;
         }
 
+        let range_len = (self.index_end - self.index_start + 1) as usize;
         let new_start = self.index_start >> by;
         let new_end = self.index_end >> by;
         let new_len = (new_end - new_start + 1) as usize;
 
-        let mut sums = [0u64; 256];
-        debug_assert!(new_len <= sums.len());
+        // Rotate the ring so index_start maps to physical slot 0,
+        // making the live range contiguous in data[0..range_len].
+        let start_slot = self.slot_for(self.index_start);
+        self.data.rotate_left(start_slot);
 
-        for old_idx in self.index_start..=self.index_end {
-            let val = self.bucket_get(self.slot_for(old_idx));
-            let out = ((old_idx >> by) - new_start) as usize;
-            sums[out] = sums[out].saturating_add(val);
+        // Fold in-place: sum adjacent entries that share the same
+        // shifted index.  write ≤ k holds at every step because each
+        // output group contains at least one input entry.
+        let mut write = 0usize;
+        let mut acc = 0u64;
+        let mut cur_new = self.index_start >> by;
+
+        for k in 0..range_len {
+            let new_idx = (self.index_start + k as i32) >> by;
+            if new_idx != cur_new {
+                self.data[write] = acc;
+                write += 1;
+                acc = 0;
+                cur_new = new_idx;
+            }
+            acc = acc.saturating_add(self.data[k]);
         }
+        self.data[write] = acc;
+        write += 1;
+        debug_assert_eq!(write, new_len);
 
-        self.scatter_write(new_start, new_end, &sums[..new_len]);
+        // Zero all slots beyond the new live range.
+        self.data[new_len..].fill(0);
+
+        self.index_start = new_start;
+        self.index_end = new_end;
+        self.index_base = new_start;
     }
 }

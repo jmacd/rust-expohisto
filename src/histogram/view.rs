@@ -13,7 +13,7 @@ use super::Histogram;
 
 /// Promoted read-only view of a histogram's data.
 ///
-/// Created by [`Histogram::view`], which promotes from literal mode if
+/// Created by [`Histogram::mut_view`], which promotes from literal mode if
 /// needed. All accessors take `&self`, so a `HistogramView` can be
 /// shared freely once obtained.
 ///
@@ -24,7 +24,7 @@ use super::Histogram;
 /// h.update(1.5).unwrap();
 /// h.update(2.7).unwrap();
 ///
-/// let v = h.view();
+/// let v = h.mut_view();
 /// assert_eq!(v.count(), 2);
 /// assert!(v.sum() > 4.0);
 /// println!("scale = {}, buckets = {}", v.scale(), v.positive().len());

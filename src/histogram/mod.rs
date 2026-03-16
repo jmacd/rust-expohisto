@@ -161,6 +161,14 @@ fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 /// Aggregate statistics (count, sum, min, max) are stored in separate
 /// struct fields.
 ///
+/// # Positive Buckets Only
+///
+/// This histogram only maintains positive buckets. Negative values are
+/// rejected by [`record()`](Self::record). The OTel exponential histogram
+/// data model defines both positive and negative bucket arrays; this
+/// crate implements the positive side only, which is sufficient for
+/// latency, size, and other non-negative metrics.
+///
 /// # Literal Mode
 ///
 /// New histograms start in **literal mode**, where the data pool stores
@@ -170,10 +178,10 @@ fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 /// histogram **promotes** to bucket mode: all stored literals are
 /// replayed through `update_buckets` at the configured max scale.
 ///
-/// Read operations are accessed through [`view()`](Self::view), which
-/// promotes from literal mode if needed and returns a [`HistogramView`]
-/// with `&self` accessors. Literal mode can be disabled with
-/// [`with_literal_mode(false)`](Self::with_literal_mode).
+/// Read operations are accessed through [`mut_view()`](Self::mut_view),
+/// which promotes from literal mode if needed and returns a
+/// [`HistogramView`] with `&self` accessors. Literal mode can be
+/// disabled with [`with_literal_mode(false)`](Self::with_literal_mode).
 ///
 /// # Counter Widening
 ///
@@ -574,12 +582,12 @@ impl<const N: usize> Histogram<N> {
     /// h.update(1.5).unwrap();
     /// h.update(2.7).unwrap();
     ///
-    /// let v = h.view();
+    /// let v = h.mut_view();
     /// assert_eq!(v.count(), 2);
     /// println!("scale = {}", v.scale());
     /// ```
     #[inline]
-    pub fn view(&mut self) -> HistogramView<'_, N> {
+    pub fn mut_view(&mut self) -> HistogramView<'_, N> {
         self.ensure_promoted();
         HistogramView { hist: self }
     }
@@ -663,7 +671,8 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
+    /// Returns [`Overflow`] if the value is negative or NaN,
+    /// or if a bucket counter or the total count would overflow.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
         self.record(value, 1)
@@ -671,10 +680,13 @@ impl<const N: usize> Histogram<N> {
 
     /// Records a value with a specified increment.
     ///
-    /// Returns `Err(Overflow)` if the count or bucket counters would overflow.
+    /// Returns `Err(Overflow)` if the value is negative or NaN,
+    /// or if the count or bucket counters would overflow.
     /// On error the histogram is left unchanged (snapshot/rollback).
     pub fn record(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
-        debug_assert!(value >= 0.0, "Histogram only accepts non-negative values");
+        if value.is_nan() || value < 0.0 {
+            return Err(Overflow);
+        }
 
         if incr == 0 {
             return Ok(());
@@ -702,11 +714,12 @@ impl<const N: usize> Histogram<N> {
         debug_assert!(self.literal);
 
         let count = self.literal_count();
-        let needed = incr as usize;
+        let remaining = self.literal_capacity() - count;
 
-        if count + needed <= self.literal_capacity() {
+        if incr <= remaining as u64 {
+            let needed = incr as usize;
             self.data[count..count + needed].fill(value.to_bits());
-            self.index_end += incr as i32;
+            self.index_end += needed as i32;
             Ok(())
         } else {
             self.promote_with(value, incr)
@@ -1017,12 +1030,14 @@ impl<const N: usize> Histogram<N> {
                 offset: other.index_start,
                 len: other.range_len(),
             },
-            &|i| {
+            |i| {
                 let index = other.index_start + i as i32;
                 other.bucket_get(other.slot_for(index))
             },
         )
     }
+
+    /// Merges raw bucket data from an external source.
     ///
     /// # Arguments
     ///
@@ -1037,19 +1052,19 @@ impl<const N: usize> Histogram<N> {
         &mut self,
         stats: &Stats,
         buckets: &BucketDescriptor,
-        at: &dyn Fn(u32) -> u64,
+        at: impl Fn(u32) -> u64,
     ) -> Result<(), Overflow> {
         if stats.count == 0 {
             return Ok(());
         }
-        self.with_rollback(|h| h.merge_raw_buckets(stats, buckets, at))
+        self.with_rollback(|h| h.merge_raw_buckets(stats, buckets, &at))
     }
 
     fn merge_raw_buckets(
         &mut self,
         stats: &Stats,
         buckets: &BucketDescriptor,
-        at: &dyn Fn(u32) -> u64,
+        at: &impl Fn(u32) -> u64,
     ) -> Result<(), Overflow> {
         let new_count = self.checked_add_count(stats.count).ok_or(Overflow)?;
         let new_sum = self.sum() + stats.sum;

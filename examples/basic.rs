@@ -20,7 +20,7 @@ fn main() {
     }
 
     // Access aggregate statistics and bucket data through a view
-    let v = hist.view();
+    let v = hist.mut_view();
     println!("=== Histogram Statistics ===");
     println!("  count: {}", v.count());
     println!("  sum:   {:.1}", v.sum());

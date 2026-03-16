@@ -50,7 +50,7 @@ fn check_histogram<const N: usize>(values: &[f64], literal_mode: bool) {
         return;
     }
 
-    let scale = hist.view().scale();
+    let scale = hist.mut_view().scale();
 
     // ── 5. scale optimality ───────────────────────────────────────────
     // Verify that the scale is the highest one where the index span

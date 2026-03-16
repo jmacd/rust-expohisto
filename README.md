@@ -44,7 +44,7 @@ hist.update(2.7).unwrap();
 hist.update(100.0).unwrap();
 
 // Access statistics through a view
-let v = hist.view();
+let v = hist.mut_view();
 println!("count: {}, sum: {}", v.count(), v.sum());
 println!("scale: {}", v.scale());
 ```
@@ -647,7 +647,7 @@ Both `update` and `record` return `Result<(), Overflow>`. On error the histogram
 All read access goes through `view()`, which promotes from literal mode if needed and returns an immutable `HistogramView`. Note that `view()` takes `&mut self` because promotion from literal to bucket mode is a one-time internal mutation:
 
 ```rust,ignore
-let v = h.view();
+let v = h.mut_view();
 v.count()                      // u64  — total observations
 v.sum()                        // f64  — arithmetic sum
 v.min()                        // f64  — minimum value
@@ -669,7 +669,7 @@ for count in &buckets {
 `HistogramView::quantiles` walks the histogram CDF and yields estimated values via linear interpolation within each straddling bucket. Quantile 0.0 returns `min`, quantile 1.0 returns `max`.
 
 ```rust,ignore
-let v = h.view();
+let v = h.mut_view();
 for qv in v.quantiles(&[0.5, 0.9, 0.99]) {
     println!("p{:.0} ≈ {:.3}", qv.quantile * 100.0, qv.value);
 }
@@ -782,10 +782,10 @@ All mutating operations (`update`, `record`, `merge_from`, `merge_from_other`, `
 **Snapshot/rollback guarantee:** Before any mutating operation, the histogram clones itself. If the operation fails (e.g., a U64 counter would overflow), the clone is restored and the histogram is left unchanged. This ensures that partial mutations from multi-step operations (downscale + widen + insert) never leak to the caller.
 
 ```rust,ignore
-let snapshot_count = h.view().count();
+let snapshot_count = h.mut_view().count();
 if h.update(value).is_err() {
     // h is unchanged — count, sum, buckets all identical to before
-    assert_eq!(h.view().count(), snapshot_count);
+    assert_eq!(h.mut_view().count(), snapshot_count);
 }
 ```
 

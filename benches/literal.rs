@@ -264,7 +264,7 @@ fn bench_literal(c: &mut Criterion) {
 
         group.bench_function("literal_8v", |b| {
             b.iter(|| {
-                let v = h_lit.view();
+                let v = h_lit.mut_view();
                 let bv = v.positive();
                 let mut sum = 0u64;
                 for i in 0..bv.len() {
@@ -276,7 +276,7 @@ fn bench_literal(c: &mut Criterion) {
 
         group.bench_function("bucket_8v", |b| {
             b.iter(|| {
-                let v = h_bkt.view();
+                let v = h_bkt.mut_view();
                 let bv = v.positive();
                 let mut sum = 0u64;
                 for i in 0..bv.len() {
@@ -289,13 +289,13 @@ fn bench_literal(c: &mut Criterion) {
         // Also measure scale() in literal vs bucket mode.
         group.bench_function("literal_scale", |b| {
             b.iter(|| {
-                black_box(h_lit.view().scale());
+                black_box(h_lit.mut_view().scale());
             })
         });
 
         group.bench_function("bucket_scale", |b| {
             b.iter(|| {
-                black_box(h_bkt.view().scale());
+                black_box(h_bkt.mut_view().scale());
             })
         });
 

@@ -268,7 +268,7 @@ fn run<const N: usize, const M: usize>(cfg: &Config) {
     verify::verify_histogram(&mut hist, &ops, "rng_stress");
 
     // No trailing/leading zero buckets.
-    let v = hist.view();
+    let v = hist.mut_view();
     let scale = v.scale();
     let buckets = v.positive();
     if buckets.len() > 0 {
