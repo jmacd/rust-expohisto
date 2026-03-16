@@ -264,10 +264,6 @@ pub fn map_to_index_exact(value: f64, scale: i32) -> i32 {
 }
 
 /// Compute which log bucket each linear bucket's start falls into.
-///
-/// See also [`crate::dynatrace_table::compute_dynatrace_indices`] which
-/// performs the analogous computation for the Dynatrace algorithm (N vs 2N
-/// linear buckets, bit-shift vs u128-division for bucket starts).
 pub fn compute_linear_to_log_mapping(n: usize, boundaries: &[u64]) -> Vec<u16> {
     let linear_count = 2 * n;
     let mut mapping = Vec::with_capacity(linear_count);
@@ -517,7 +513,7 @@ mod tests {
     fn test_lg_and_lookup_vs_exact() {
         // Compare lg (logarithm) and lookup against exact (boundary table) computation.
         //
-        // Key insight from NewRelic: lookup table has NO computational error because
+        // Key insight: lookup table has NO computational error because
         // it uses integer operations only. The boundaries are verified with BigUint
         // during table generation.
         //
@@ -650,7 +646,7 @@ mod tests {
         boundaries
     }
 
-    /// Exhaustive test of NewRelic and Dynatrace lookup algorithms at scale 20.
+    /// Exhaustive test of lookup algorithm at scale 20.
     ///
     /// Generates a scale-20 boundary table (N = 2²⁰ = 1 048 576 sub-buckets),
     /// then tests every representable f64 from 1.0 through the first sub-bucket
@@ -660,8 +656,6 @@ mod tests {
     #[test]
     #[ignore]
     fn test_exhaustive_first_subbucket_scale_20() {
-        use crate::dynatrace_table::{DynatraceTables, map_to_index_dynatrace};
-
         let scale: u32 = 20;
         let n = 1usize << scale;
 
@@ -675,23 +669,19 @@ mod tests {
         let boundary_sig = boundaries[1];
         eprintln!("First boundary significand: {} ({:#X})", boundary_sig, boundary_sig);
 
-        // Build NR and DT tables from these boundaries.
-        eprintln!("Building NewRelic lookup tables...");
-        let nr = LookupTables::from_boundaries(scale, boundaries.clone());
-        eprintln!("Building Dynatrace lookup tables...");
-        let dt = DynatraceTables::from_boundaries(scale, boundaries);
+        // Build lookup tables from these boundaries.
+        eprintln!("Building lookup tables...");
+        let tables = LookupTables::from_boundaries(scale, boundaries);
 
-        // Verify both tables agree on the boundary value.
-        assert_eq!(nr.log_bucket_end[1], boundary_sig, "NR boundary mismatch");
-        assert_eq!(dt.boundaries[2], boundary_sig, "DT boundary mismatch");
+        // Verify table agrees on the boundary value.
+        assert_eq!(tables.log_bucket_end[1], boundary_sig, "boundary mismatch");
 
         let start_bits = 1.0_f64.to_bits();
         let end_bits = start_bits + boundary_sig;
         let total = boundary_sig + 1;
         eprintln!("Testing {} values (significands 0..={})", total, boundary_sig);
 
-        let mut nr_errors = 0u64;
-        let mut dt_errors = 0u64;
+        let mut errors = 0u64;
         let report_interval = 1u64 << 28; // ~268 M, progress reports ~11×
 
         for bits in start_bits..=end_bits {
@@ -710,26 +700,16 @@ mod tests {
             };
 
             let value = f64::from_bits(bits);
-            let nr_idx = map_to_index_lookup_at_native_scale(value, &nr);
-            let dt_idx = map_to_index_dynatrace(value, &dt);
+            let idx = map_to_index_lookup_at_native_scale(value, &tables);
 
-            if nr_idx != expected {
-                if nr_errors < 10 {
+            if idx != expected {
+                if errors < 10 {
                     eprintln!(
-                        "NR error #{}: significand={} expected={} got={}",
-                        nr_errors + 1, significand, expected, nr_idx
+                        "error #{}: significand={} expected={} got={}",
+                        errors + 1, significand, expected, idx
                     );
                 }
-                nr_errors += 1;
-            }
-            if dt_idx != expected {
-                if dt_errors < 10 {
-                    eprintln!(
-                        "DT error #{}: significand={} expected={} got={}",
-                        dt_errors + 1, significand, expected, dt_idx
-                    );
-                }
-                dt_errors += 1;
+                errors += 1;
             }
 
             if significand > 0 && significand % report_interval == 0 {
@@ -743,14 +723,9 @@ mod tests {
 
         eprintln!("Complete: {} values tested", total);
         assert_eq!(
-            nr_errors, 0,
-            "NewRelic had {} errors out of {} tests",
-            nr_errors, total
-        );
-        assert_eq!(
-            dt_errors, 0,
-            "Dynatrace had {} errors out of {} tests",
-            dt_errors, total
+            errors, 0,
+            "Lookup had {} errors out of {} tests",
+            errors, total
         );
     }
 

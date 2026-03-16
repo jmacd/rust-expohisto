@@ -60,20 +60,12 @@ Benchmark results — `map_to_index` over 100 random f64 values (criterion, medi
 | Method | Scale range | Per-value | Notes |
 |--------|------------|-----------|-------|
 | Exponent | ≤ 0 | ~3.4 ns | Bit extraction only |
-| Dynatrace lookup | 1–14 | ~5.9 ns | Integer-only, N linear buckets, 2 corrections |
-| NewRelic lookup | 1–14 | ~7.3 ns | Integer-only, 2N linear buckets, 1 correction |
+| Lookup table | 1–14 | ~5.9 ns | Integer-only, compile-time generated |
 | Logarithm | 1–20 | ~10.5 ns | `ln()`-based, works at any scale |
 
 The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected by `Mapping::new()`.
 
-## Lookup Table Features
-
-Choose a **scale** feature to set the table size, and an **algorithm** feature to select the mapping method:
-
-```toml
-[dependencies]
-otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # default: std + newrelic + scale-8
-```
+## Features
 
 ### Scale (table size)
 
@@ -90,15 +82,6 @@ are rejected by `Mapping::new()`. Selected examples:
 | `scale-12` | 32 KB | 1–12 | High resolution |
 | `scale-14` | 128 KB | 1–14 | Maximum practical coverage |
 
-### Algorithm
-
-| Feature | Linear Buckets | Max Corrections | Notes |
-|---------|---------------|-----------------|-------|
-| `newrelic` | 2N | 1 | **Default**. Slightly larger index table |
-| `dynatrace` | N | 2 | ~50% smaller index table |
-
-The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](docs/design.md#lookup-table-design)). At least one must be enabled.
-
 ### Other features
 
 | Feature | Default | Effect |
@@ -107,13 +90,14 @@ The `newrelic` and `dynatrace` algorithms produce identical results, are equally
 | `logarithm` | | Pure `ln()`-based mapper for testing and benchmarking. Requires `std`. |
 | `boundary` | | Enables `lower_boundary()` at positive scales and quantile estimation (`QuantileIter`). Requires `std`. |
 | `bench-internals` | | Exposes internal methods (e.g., `downscale()`) for benchmarking |
-| `bench-all` | | Enables `newrelic` + `dynatrace` + `logarithm` + `boundary` + `scale-8` + `bench-internals` for testing all algorithms together |
+| `bench-all` | | Enables `logarithm` + `boundary` + `scale-8` + `bench-internals` for comprehensive testing |
 
 ## Documentation
 
 - **[Design & Architecture](docs/design.md)** — Exponential scale theory, index mapping algorithms, lookup table design, crate structure
 - **[Implementation Details](docs/internals.md)** — Literal mode, sub-byte counters (SWAR), parameter selection, API overview
 - **[Reference](docs/reference.md)** — Error handling, thread safety, `no_std` support, testing, OTel spec compatibility
+- **[Historical Notes](docs/history.md)** — Origins of the lookup table algorithm
 
 ## Contributing
 

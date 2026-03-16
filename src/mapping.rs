@@ -5,9 +5,8 @@
 //!
 //! This module provides the `Mapping` struct which converts f64 values to
 //! bucket indices. For scale <= 0, it uses direct exponent mapping. For
-//! scale > 0, it uses the compile-time selected lookup table algorithm
-//! (NewRelic or Dynatrace). Scales above the compiled table scale are
-//! rejected by [`Mapping::new`].
+//! scale > 0, it uses the compile-time generated lookup table algorithm.
+//! Scales above the compiled table scale are rejected by [`Mapping::new`].
 
 use crate::float64::{
     MIN_NORMAL_EXPONENT, MIN_VALUE,
@@ -115,24 +114,17 @@ impl Mapping {
         }
     }
 
-    /// Mapping for positive scales — delegates to the compiled lookup table
-    /// algorithm (NewRelic or Dynatrace).
+    /// Mapping for positive scales — delegates to the compiled lookup table.
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
         let scale = self.scale as i32;
 
-        #[cfg(feature = "newrelic")]
+        #[cfg(has_lookup_table)]
         {
-            crate::newrelic::map_to_index(value, scale)
+            crate::lookup::map_to_index(value, scale)
         }
 
-        #[cfg(all(feature = "dynatrace", not(feature = "newrelic")))]
-        {
-            crate::dynatrace::map_to_index(value, scale)
-        }
-
-        // compile_error in lib.rs prevents reaching this configuration.
-        #[cfg(not(any(feature = "newrelic", feature = "dynatrace")))]
+        #[cfg(not(has_lookup_table))]
         {
             let _ = (value, scale);
             0
@@ -216,9 +208,15 @@ mod tests {
     #[test]
     fn test_new_mapping() {
         assert!(Mapping::new(0).is_ok());
-        assert!(Mapping::new(1).is_ok());
         assert!(Mapping::new(-10).is_ok());
         assert!(Mapping::new(-11).is_err());
+
+        // Positive scales require a lookup table
+        if max_scale() > 0 {
+            assert!(Mapping::new(1).is_ok());
+        } else {
+            assert!(Mapping::new(1).is_err());
+        }
 
         // All scales up to max_scale() are supported
         for scale in MIN_SCALE..=max_scale() {
@@ -274,6 +272,9 @@ mod tests {
 
     #[test]
     fn test_map_to_index_positive_scale() {
+        if max_scale() < 1 {
+            return; // No lookup table compiled in
+        }
         let m = Mapping::new(1).unwrap();
 
         // At scale 1, each power-of-2 bucket is split in two

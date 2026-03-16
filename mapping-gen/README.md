@@ -2,9 +2,12 @@
 
 This crate generates precomputed lookup tables that enable **integer-only** mapping
 from IEEE 754 double-precision floating-point values to exponential histogram bucket
-indices. The algorithm is derived from the [NewRelic NrSketch implementation](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
-by Yuke Zhuge, with a similar approach developed independently by Otmar Ertl at
-[Dynatrace](https://github.com/open-telemetry/opentelemetry-collector/pull/3841).
+indices. The algorithm uses 2N linear buckets with a single boundary correction,
+inspired by independently-developed approaches from
+[NewRelic](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
+(Yuke Zhuge) and
+[Dynatrace](https://github.com/open-telemetry/opentelemetry-collector/pull/3841)
+(Otmar Ertl).
 
 ## The Problem
 

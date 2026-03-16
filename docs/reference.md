@@ -40,7 +40,7 @@ To use in a `no_std` environment, disable default features and re-enable the one
 
 ```toml
 [dependencies]
-otel-expohisto = { version = "0.1", default-features = false, features = ["newrelic", "scale-8"] }
+otel-expohisto = { version = "0.1", default-features = false, features = ["scale-8"] }
 ```
 
 The CI test matrix includes `--no-default-features` to ensure `no_std` compatibility is continuously validated.
@@ -56,7 +56,7 @@ The crate includes comprehensive validation at multiple levels:
   - `stateful_oracle` — state-machine fuzzer with interleaved update/merge/clear/read operations
   - `rng_stress` — large histogram (N=160) with millions of random values
 - **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 20
-- **CI matrix** — tests across 4 feature combinations (`bench-all`, `newrelic+scale-8`, `dynatrace+scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
+- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-4`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
 
 ## Examples
 
@@ -74,9 +74,7 @@ Four examples are included in the `examples/` directory:
 - [OpenTelemetry Exponential Histogram Specification](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
 - [Upper-inclusive boundary discussion](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261): The specification change (for Prometheus compatibility) that motivated the boundary condition re-engineering in this implementation
 - [Golang OpenTelemetry Exponential Histogram](https://github.com/lightstep/go-expohisto): Golang reference implementation by the same author
-- [Dynatrace DynaHist library by Otmar Ertl](https://github.com/dynatrace-oss/dynahist) (see [ExponentialHistogramLargeInclusiveLayout](https://github.com/dynatrace-oss/dynahist/blob/main/src/main/java/com/dynatrace/dynahist/layout/ExponentialHistogramLargeInclusiveLayout.java))
-- [NewRelic lookup table algorithm by Yuke Zhuge](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/Indexer.md)
-- [NewRelic algorithm implementation](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
+- [Historical Notes](history.md): Origins of the lookup table algorithm, with links to the original Dynatrace and NewRelic implementations
 
 ## OTel SDK Specification Compatibility
 

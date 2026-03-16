@@ -35,15 +35,6 @@ const TEST_VALUES: &[f64] = &[
 fn bench_map_to_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("map_to_index_100x");
 
-    // Determine the algorithm label for the primary (Mapping-dispatched) algorithm
-    let algo_label = if cfg!(feature = "newrelic") {
-        "newrelic"
-    } else if cfg!(feature = "dynatrace") {
-        "dynatrace"
-    } else {
-        "logarithm"
-    };
-
     // Non-positive scales (exponent mapping)
     for scale in [-10, -5, -1, 0] {
         let mapping = Mapping::new(scale).unwrap();
@@ -56,7 +47,7 @@ fn bench_map_to_index(c: &mut Criterion) {
         });
     }
 
-    // Positive scales - benchmark the primary algorithm via Mapping
+    // Positive scales - benchmark the lookup table algorithm via Mapping
     let max = max_scale();
     let scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20]
         .into_iter()
@@ -65,7 +56,7 @@ fn bench_map_to_index(c: &mut Criterion) {
 
     for &scale in &scales {
         let mapping = Mapping::new(scale).unwrap();
-        group.bench_function(BenchmarkId::new(algo_label, scale), |b| {
+        group.bench_function(BenchmarkId::new("lookup", scale), |b| {
             b.iter(|| {
                 for &v in TEST_VALUES {
                     black_box(mapping.map_to_index(black_box(v)));
@@ -74,48 +65,22 @@ fn bench_map_to_index(c: &mut Criterion) {
         });
     }
 
-    // When bench-all is enabled, also benchmark the non-primary algorithms directly
+    // When bench-all is enabled, also benchmark the logarithm algorithm directly
     #[cfg(feature = "bench-all")]
     {
-        // Dynatrace direct (when newrelic is primary via Mapping)
-        #[cfg(feature = "dynatrace")]
-        {
-            let dt_max = otel_expohisto::dynatrace::table_scale();
-            let dt_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14]
-                .into_iter()
-                .filter(|&s| s <= dt_max)
-                .collect();
+        let log_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20].to_vec();
 
-            for &scale in &dt_scales {
-                group.bench_function(BenchmarkId::new("dynatrace", scale), |b| {
-                    b.iter(|| {
-                        for &v in TEST_VALUES {
-                            black_box(otel_expohisto::dynatrace::map_to_index(
-                                black_box(v),
-                                scale,
-                            ));
-                        }
-                    })
-                });
-            }
-        }
-
-        // Logarithm direct
-        {
-            let log_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20].to_vec();
-
-            for &scale in &log_scales {
-                group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
-                    b.iter(|| {
-                        for &v in TEST_VALUES {
-                            black_box(otel_expohisto::logarithm::map_to_index(
-                                black_box(v),
-                                scale,
-                            ));
-                        }
-                    })
-                });
-            }
+        for &scale in &log_scales {
+            group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
+                b.iter(|| {
+                    for &v in TEST_VALUES {
+                        black_box(otel_expohisto::logarithm::map_to_index(
+                            black_box(v),
+                            scale,
+                        ));
+                    }
+                })
+            });
         }
     }
 

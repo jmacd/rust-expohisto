@@ -43,6 +43,7 @@ fn test_histogram_multiple() {
     assert_stats(&mut h, 3, 7.0, 1.0, 4.0);
 }
 
+#[cfg(has_lookup_table)]
 #[test]
 fn test_histogram_downscale() {
     let mut h: Histogram<8> = Histogram::new();
@@ -152,6 +153,7 @@ fn test_bucket_count_halves_on_widen() {
     assert_eq!(h.bucket_capacity(), 16 * 8); // 128
 }
 
+#[cfg(has_lookup_table)]
 #[test]
 fn test_recreate_preserves_b4() {
     let mut h: Histogram<16> = Histogram::new().with_scale(3)
@@ -164,6 +166,7 @@ fn test_recreate_preserves_b4() {
     assert_eq!(h.view().scale(), 3);
 }
 
+#[cfg(has_lookup_table)]
 #[test]
 fn test_with_scale() {
     let mut h: Histogram<16> = Histogram::new().with_scale(3);
@@ -172,6 +175,7 @@ fn test_with_scale() {
     assert_eq!(h.view().scale(), 3);
 }
 
+#[cfg(has_lookup_table)]
 #[test]
 fn test_with_scale_records_at_limited_scale() {
     let mut limited: Histogram<16> = Histogram::new().with_scale(3);
@@ -1249,6 +1253,7 @@ fn test_downscale_odd_base_preserves_total() {
 // Odd-base downscale preserves totals (no deferred mechanism)
 // -----------------------------------------------------------------------
 
+#[cfg(has_lookup_table)]
 #[test]
 fn test_odd_base_downscale_preserves_total() {
     // Start at max scale so we have room to downscale.
@@ -1322,6 +1327,7 @@ fn test_speculative_merge_width_behavior() {
 // Sum conservation stress tests
 // -----------------------------------------------------------------------
 
+#[cfg(has_lookup_table)]
 #[test]
 fn test_sum_conservation_through_full_widen_chain() {
     // Fill a histogram with enough count magnitude to force widening

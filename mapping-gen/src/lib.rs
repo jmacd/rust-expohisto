@@ -4,7 +4,7 @@
 //! Lookup table generation for exponential histogram mapping.
 //!
 //! This crate computes exact bucket boundary significands and derives
-//! linear-to-log index tables for the NewRelic and Dynatrace algorithms.
+//! the linear-to-log index table used by the lookup mapping algorithm.
 //!
 //! Build scripts call [`generate_boundaries`] once, then pass the result
 //! to [`write_boundaries`] and [`write_index_table`].
@@ -14,12 +14,10 @@
 // restricted to `pub(crate)` in the main crate via its lib.rs.
 #[path = "../../src/float64.rs"]
 mod float64;
-mod dynatrace_table;
-mod newrelic_table;
+mod table;
 
-pub use dynatrace_table::*;
 pub use float64::*;
-pub use newrelic_table::*;
+pub use table::*;
 
 use std::io::Write;
 
@@ -121,21 +119,19 @@ fn derive_index_table(boundaries: &[u64], count: usize, shift: u32) -> Vec<u16> 
     table
 }
 
-/// Writes an algorithm-specific index table derived from `boundaries`.
+/// Writes the index table derived from `boundaries`.
 ///
 /// `boundaries` must be the sentinel-wrapped array returned by
 /// [`generate_boundaries`].
-/// `extra_bits`: 1 for NewRelic (2N linear buckets), 0 for Dynatrace (N).
-/// `prefix`: name prefix for generated symbols (e.g. "NR" or "DT").
 ///
-/// Emits `{PREFIX}_INDEX: [u16; _]` and `{PREFIX}_SHIFT: u32`.
+/// Uses 2N linear buckets with 1 boundary correction (the lookup
+/// algorithm). Emits `INDEX_SHIFT: u32` and `INDEX_TABLE: [u16; 2N]`.
 pub fn write_index_table<W: Write>(
     w: &mut W,
     table_scale: u32,
     boundaries: &[u64],
-    extra_bits: u32,
-    prefix: &str,
 ) -> std::io::Result<()> {
+    let extra_bits = 1u32; // 2N linear buckets
     let count = 1usize << (table_scale + extra_bits);
     let shift = 52 - table_scale - extra_bits;
     let index_table = derive_index_table(boundaries, count, shift);
@@ -143,21 +139,21 @@ pub fn write_index_table<W: Write>(
     writeln!(w)?;
     writeln!(
         w,
-        "/// Significand shift for {} algorithm at scale {}.",
-        prefix, table_scale
+        "/// Significand shift for the lookup algorithm at scale {}.",
+        table_scale
     )?;
-    writeln!(w, "pub const {}_SHIFT: u32 = {};", prefix, shift)?;
+    writeln!(w, "pub const INDEX_SHIFT: u32 = {};", shift)?;
     writeln!(w)?;
 
     writeln!(
         w,
-        "/// Linear-to-log index table for {} algorithm ({} entries).",
-        prefix, count
+        "/// Linear-to-log index table ({} entries).",
+        count
     )?;
     writeln!(
         w,
-        "pub static {}_INDEX: [u16; {}] = [",
-        prefix, count
+        "pub static INDEX_TABLE: [u16; {}] = [",
+        count
     )?;
     for (i, &idx) in index_table.iter().enumerate() {
         if i % 16 == 0 {

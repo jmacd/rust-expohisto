@@ -36,8 +36,8 @@ jobs:
       matrix:
         features:
           - "--features bench-all"
-          - "--features newrelic,scale-8"
-          - "--features dynatrace,scale-8"
+          - "--features scale-8"
+          - "--no-default-features --features scale-8"
           - "--no-default-features"
     steps:
       - uses: actions/checkout@v4

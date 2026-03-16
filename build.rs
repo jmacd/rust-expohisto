@@ -4,8 +4,8 @@
 //! Build script to generate lookup tables for exponential histogram mapping.
 //!
 //! Computes exact boundary significands once (via bignum arithmetic in
-//! `mapping-gen`), then writes `BOUNDARIES`, `TABLE_SCALE`, and per-algorithm
-//! index tables (`NR_INDEX`/`DT_INDEX`) to `lookup_tables.rs`.
+//! `mapping-gen`), then writes `BOUNDARIES`, `TABLE_SCALE`, and the
+//! index table to `lookup_tables.rs`.
 
 use std::env;
 use std::fs::File;
@@ -30,18 +30,11 @@ fn main() {
         // Write the shared BOUNDARIES array and TABLE_SCALE constant.
         expohisto_mapping_gen::write_boundaries(&mut file, scale, &boundaries).unwrap();
 
-        // Derive and write algorithm-specific index tables from the same
-        // boundaries. Each algorithm compiles in exactly one index table;
-        // the mapping function always computes at TABLE_SCALE and
+        // Derive and write the index table from the same boundaries.
+        // The mapping function always computes at TABLE_SCALE and
         // right-shifts to the requested scale.
-        if env::var("CARGO_FEATURE_NEWRELIC").is_ok() {
-            expohisto_mapping_gen::write_index_table(&mut file, scale, &boundaries, 1, "NR")
-                .unwrap();
-        }
-        if env::var("CARGO_FEATURE_DYNATRACE").is_ok() {
-            expohisto_mapping_gen::write_index_table(&mut file, scale, &boundaries, 0, "DT")
-                .unwrap();
-        }
+        expohisto_mapping_gen::write_index_table(&mut file, scale, &boundaries)
+            .unwrap();
     } else {
         writeln!(file, "// No table features enabled").unwrap();
         writeln!(file, "pub const TABLE_SCALE: i32 = 0;").unwrap();
