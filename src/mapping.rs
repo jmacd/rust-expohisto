@@ -6,13 +6,14 @@
 //! This module provides the `Mapping` struct which converts f64 values to
 //! bucket indices. For scale <= 0, it uses direct exponent mapping. For
 //! scale > 0, it uses the compile-time selected lookup table algorithm
-//! (NewRelic or Dynatrace) when available and in range, falling back to
-//! the built-in logarithm mapper for higher scales or when no lookup
-//! tables are compiled.
+//! (NewRelic or Dynatrace). Scales above the compiled table scale are
+//! rejected by [`Mapping::new`].
 
 use crate::float64::{
-    MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE,
+    MIN_NORMAL_EXPONENT, MIN_VALUE,
 };
+#[cfg(feature = "boundary")]
+use crate::float64::MAX_NORMAL_EXPONENT;
 use core::fmt;
 
 /// Minimum scale for the exponent mapping.
@@ -32,6 +33,8 @@ pub enum MappingError {
     Overflow,
     /// Invalid scale parameter.
     InvalidScale,
+    /// Operation requires the `boundary` feature at this scale.
+    Unsupported,
 }
 
 impl fmt::Display for MappingError {
@@ -40,6 +43,7 @@ impl fmt::Display for MappingError {
             Self::Underflow => f.write_str("bucket index corresponds to a subnormal value"),
             Self::Overflow => f.write_str("bucket index corresponds to +Inf"),
             Self::InvalidScale => f.write_str("invalid scale parameter"),
+            Self::Unsupported => f.write_str("operation requires the `boundary` feature at this scale"),
         }
     }
 }
@@ -49,41 +53,60 @@ impl std::error::Error for MappingError {}
 
 /// Returns the maximum scale supported by the mapping.
 ///
-/// All scales from 1 to MAX_SCALE (20) are always supported: lookup
-/// tables cover scales up to the compiled table scale, and the built-in
-/// logarithm mapper handles the rest.
+/// When a lookup table algorithm (NewRelic or Dynatrace) is compiled,
+/// this equals the compiled table scale. When only the `logarithm`
+/// feature is enabled (no lookup tables), all scales up to
+/// [`MAX_SCALE`] are supported. Otherwise only exponent mapping
+/// (scale ≤ 0) is available.
 #[inline]
 pub const fn max_scale() -> i32 {
-    MAX_SCALE
+    #[cfg(all(has_lookup_table, any(feature = "newrelic", feature = "dynatrace")))]
+    {
+        crate::lookup::TABLE_SCALE
+    }
+    #[cfg(all(
+        not(all(has_lookup_table, any(feature = "newrelic", feature = "dynatrace"))),
+        feature = "logarithm",
+    ))]
+    {
+        MAX_SCALE
+    }
+    #[cfg(all(
+        not(all(has_lookup_table, any(feature = "newrelic", feature = "dynatrace"))),
+        not(feature = "logarithm"),
+    ))]
+    {
+        0
+    }
 }
 
 /// Converts values to bucket indices at a given scale.
 #[derive(Debug, Clone, Copy)]
 pub struct Mapping {
     scale: i8,
-    // Pre-computed inverse factor for boundary computation
+    /// Pre-computed inverse factor for boundary computation (boundary feature only).
+    #[cfg(feature = "boundary")]
     inverse_factor: f64,
 }
 
 impl Mapping {
     /// Creates a new mapping for the given scale.
     ///
-    /// Returns `MappingError::InvalidScale` if scale is outside [-10, 20].
+    /// Returns `MappingError::InvalidScale` if scale is outside
+    /// [`MIN_SCALE`]..=[`max_scale()`].
     pub fn new(scale: i32) -> Result<Self, MappingError> {
-        if !(MIN_SCALE..=MAX_SCALE).contains(&scale) {
+        if !(MIN_SCALE..=max_scale()).contains(&scale) {
             return Err(MappingError::InvalidScale);
         }
 
-        let inverse_factor = if scale > 0 {
-            // math.Ldexp(math.Ln2, -scale) = Ln2 * 2^(-scale)
-            core::f64::consts::LN_2 / (1u64 << scale) as f64
-        } else {
-            0.0
-        };
-
         Ok(Self {
             scale: scale as i8,
-            inverse_factor,
+            #[cfg(feature = "boundary")]
+            inverse_factor: if scale > 0 {
+                core::f64::consts::LN_2 / (1u64 << scale) as f64
+            } else {
+                0.0
+            },
         })
     }
 
@@ -109,28 +132,53 @@ impl Mapping {
         }
     }
 
-    /// Mapping for positive scales - delegates to selected algorithm.
-    ///
-    /// Uses lookup tables when available and the scale is within table range,
-    /// otherwise falls back to the built-in logarithm mapper.
+    /// Mapping for positive scales — delegates to the compiled lookup table
+    /// algorithm, or falls back to the logarithm mapper when no tables are
+    /// compiled (testing/benchmarking only).
+    #[allow(clippy::needless_return, unreachable_code)]
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
         let scale = self.scale as i32;
 
         #[cfg(all(has_lookup_table, feature = "newrelic"))]
-        if scale <= crate::lookup::TABLE_SCALE {
+        {
             return crate::newrelic::map_to_index(value, scale);
         }
 
         #[cfg(all(has_lookup_table, feature = "dynatrace", not(feature = "newrelic")))]
-        if scale <= crate::lookup::TABLE_SCALE {
+        {
             return crate::dynatrace::map_to_index(value, scale);
         }
 
-        crate::logarithm::map_to_index(value, scale)
+        // Logarithm fallback for tests/benchmarks.
+        #[cfg(all(
+            not(all(has_lookup_table, feature = "newrelic")),
+            not(all(has_lookup_table, feature = "dynatrace")),
+            feature = "logarithm",
+        ))]
+        {
+            return crate::logarithm::map_to_index(value, scale);
+        }
+
+        // No positive-scale algorithm compiled. max_scale() == 0 prevents
+        // this from being reached at runtime.
+        #[cfg(all(
+            not(all(has_lookup_table, feature = "newrelic")),
+            not(all(has_lookup_table, feature = "dynatrace")),
+            not(feature = "logarithm"),
+        ))]
+        {
+            let _ = (value, scale);
+            unreachable!("no positive-scale mapping algorithm compiled")
+        }
     }
 
     /// Returns the lower boundary of a bucket at the given index.
+    ///
+    /// For scale ≤ 0 this is an exact power of two (no libm needed).
+    /// For positive scales, this requires the `boundary` feature which
+    /// provides the `exp()` function via std or libm.
+    #[cfg(feature = "boundary")]
     #[inline]
     pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
         if self.scale <= 0 {
@@ -140,6 +188,21 @@ impl Mapping {
         }
     }
 
+    /// Returns the lower boundary of a bucket at the given index.
+    ///
+    /// Available without the `boundary` feature only for scale ≤ 0
+    /// (exact powers of two).
+    #[cfg(not(feature = "boundary"))]
+    #[inline]
+    pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
+        if self.scale <= 0 {
+            crate::exponent::lower_boundary(index, self.scale as i32)
+        } else {
+            Err(MappingError::Unsupported)
+        }
+    }
+
+    #[cfg(feature = "boundary")]
     fn lower_boundary_logarithm(&self, index: i32) -> Result<f64, MappingError> {
         let scale = self.scale as i32;
         let max_idx = self.max_normal_lower_boundary_index_log();
@@ -148,7 +211,7 @@ impl Mapping {
         if index >= max_idx {
             if index == max_idx {
                 // Use alternate equation to avoid overflow
-                return Ok(2.0 * crate::math::exp((index - (1 << scale)) as f64 * self.inverse_factor));
+                return Ok(2.0 * crate::float64::exp((index - (1 << scale)) as f64 * self.inverse_factor));
             }
             return Err(MappingError::Overflow);
         }
@@ -157,21 +220,23 @@ impl Mapping {
             if index == min_idx {
                 return Ok(MIN_VALUE);
             } else if index == min_idx - 1 {
-                return Ok(crate::math::exp((index + (1 << scale)) as f64 * self.inverse_factor) / 2.0);
+                return Ok(crate::float64::exp((index + (1 << scale)) as f64 * self.inverse_factor) / 2.0);
             }
             return Err(MappingError::Underflow);
         }
 
-        Ok(crate::math::exp(index as f64 * self.inverse_factor))
+        Ok(crate::float64::exp(index as f64 * self.inverse_factor))
     }
 
     // Helper functions for boundary indices
 
+    #[cfg(feature = "boundary")]
     #[inline]
     fn min_normal_lower_boundary_index_log(&self) -> i32 {
         MIN_NORMAL_EXPONENT << (self.scale as i32)
     }
 
+    #[cfg(feature = "boundary")]
     #[inline]
     fn max_normal_lower_boundary_index_log(&self) -> i32 {
         ((MAX_NORMAL_EXPONENT + 1) << (self.scale as i32)) - 1
@@ -187,13 +252,17 @@ mod tests {
         assert!(Mapping::new(0).is_ok());
         assert!(Mapping::new(1).is_ok());
         assert!(Mapping::new(-10).is_ok());
-        assert!(Mapping::new(21).is_err());
         assert!(Mapping::new(-11).is_err());
-        
-        // All scales up to MAX_SCALE are supported
-        for scale in MIN_SCALE..=MAX_SCALE {
+
+        // All scales up to max_scale() are supported
+        for scale in MIN_SCALE..=max_scale() {
             assert!(Mapping::new(scale).is_ok(), "scale {} should be supported", scale);
         }
+        // Scales above max_scale() are rejected
+        if max_scale() < MAX_SCALE {
+            assert!(Mapping::new(max_scale() + 1).is_err());
+        }
+        assert!(Mapping::new(MAX_SCALE + 1).is_err());
     }
 
     #[test]

@@ -118,7 +118,6 @@ name = "otel-expohisto"
 version = "0.1.0"
 dependencies = [
  "expohisto-mapping-gen",
- "libm",
 ]
 
 [[package]]

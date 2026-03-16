@@ -14,3 +14,9 @@ criterion = "0.5"
 [[bench]]
 name = "table_gen"
 harness = false
+
+[lints.rust]
+# float64.rs is shared via #[path] from the main crate, which defines
+# `feature = "std"`, `feature = "logarithm"`, and `feature = "boundary"`
+# cfg conditions.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("std", "logarithm", "boundary"))'] }

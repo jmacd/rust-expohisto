@@ -3,9 +3,11 @@
 
 //! Promoted read-only view of a histogram.
 
+#[cfg(feature = "boundary")]
 use crate::mapping::Mapping;
 
 use super::bucket_view::BucketView;
+#[cfg(feature = "boundary")]
 use super::quantile::QuantileIter;
 use super::Histogram;
 
@@ -90,6 +92,7 @@ impl<const N: usize> HistogramView<'_, N> {
     ///
     /// Debug-asserts that every quantile is in `[0.0, 1.0]` and that the
     /// slice is sorted.
+    #[cfg(feature = "boundary")]
     pub fn quantiles<'a>(&'a self, quantiles: &'a [f64]) -> QuantileIter<'a, N> {
         debug_assert!(
             quantiles.windows(2).all(|w| w[0] <= w[1]),

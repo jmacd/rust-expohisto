@@ -51,7 +51,7 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     //
     // For a non-power-of-two with exponent E, log2(value) is in
     // (E, E+1), so the index must be in [E << scale, (E+1) << scale - 1].
-    let raw = crate::math::floor(crate::math::ln(value) * SCALE_FACTORS[scale as usize]) as i32;
+    let raw = crate::float64::floor(crate::float64::ln(value) * SCALE_FACTORS[scale as usize]) as i32;
     let lo = exp << scale;
     let hi = ((exp + 1) << scale) - 1;
     raw.clamp(lo, hi)

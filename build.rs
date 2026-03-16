@@ -17,7 +17,7 @@ fn main() {
     let dest_path = Path::new(&out_dir).join("lookup_tables.rs");
     let mut file = File::create(&dest_path).unwrap();
 
-    // Declare our custom cfg so rustc doesn't warn about it.
+    // Declare our custom cfgs so rustc doesn't warn about them.
     println!("cargo:rustc-check-cfg=cfg(has_lookup_table)");
 
     if let Some(scale) = table_scale() {

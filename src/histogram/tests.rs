@@ -1,6 +1,6 @@
 // Tests always run with std available, even when the crate is no_std.
 extern crate std;
-use std::{eprintln, format, vec, vec::Vec};
+use std::{format, vec, vec::Vec};
 
 use super::*;
 use super::swar::{
@@ -1988,10 +1988,15 @@ fn test_literal_debug_format() {
     );
 }
 
-// -- Quantile estimation tests ------------------------------------------
+// -- Quantile estimation tests (require `boundary` feature) ----------------
 
-#[test]
-fn test_quantile_empty_histogram() {
+#[cfg(feature = "boundary")]
+mod quantile_tests {
+    use super::*;
+    use std::eprintln;
+
+    #[test]
+    fn test_quantile_empty_histogram() {
     let mut h: Histogram<8> = Histogram::new();
     let qs = [0.0, 0.5, 1.0];
     let v = h.view();
@@ -2216,6 +2221,7 @@ fn test_goodness_of_fit() {
         );
     }
 }
+} // mod quantile_tests
 
 #[test]
 fn repro_fuzz_histogram_oracle_offset() {
@@ -2228,7 +2234,7 @@ fn repro_fuzz_histogram_oracle_offset() {
     let min_value = crate::float64::MIN_VALUE;
 
     // At every scale, the subnormal must have the same index as MIN_VALUE.
-    for s in 0..=20 {
+    for s in 0..=max_scale() {
         let m = Mapping::new(s).unwrap();
         assert_eq!(
             m.map_to_index(subnormal),

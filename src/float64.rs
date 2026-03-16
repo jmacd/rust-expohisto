@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! IEEE 754 double-precision floating-point constants and utilities.
+//!
+//! An optional math layer (`exp`, `ln`, `floor`) is compiled when the
+//! `logarithm` or `boundary` features are active, using `std` f64 methods.
 
 /// Size of an IEEE 754 double-precision floating-point significand.
 pub const SIGNIFICAND_WIDTH: u32 = 52;
@@ -41,6 +44,43 @@ pub fn get_significand(value: f64) -> u64 {
     value.to_bits() & SIGNIFICAND_MASK
 }
 
+/// Constructs 2^k as an f64 using direct IEEE 754 bit manipulation.
+///
+/// Valid for k in \[`MIN_NORMAL_EXPONENT`, `MAX_NORMAL_EXPONENT`\] (i.e. −1022..=1023).
+/// Panics in debug mode if k is out of range.
+#[inline]
+pub fn pow2(k: i32) -> f64 {
+    debug_assert!(
+        (MIN_NORMAL_EXPONENT..=MAX_NORMAL_EXPONENT).contains(&k),
+        "pow2({k}) out of range [{MIN_NORMAL_EXPONENT}, {MAX_NORMAL_EXPONENT}]"
+    );
+    let biased = (k + EXPONENT_BIAS) as u64;
+    f64::from_bits(biased << SIGNIFICAND_WIDTH)
+}
+
+// ── Math helpers (std only) ──────────────────────────────────────────
+// Only compiled when `logarithm` or `boundary` features are active;
+// both imply `std`. Excluded from `mapping-gen` (no features set).
+
+#[cfg(any(feature = "logarithm", feature = "boundary"))]
+mod math_imp {
+    #[inline]
+    pub fn exp(x: f64) -> f64 {
+        x.exp()
+    }
+    #[inline]
+    pub fn ln(x: f64) -> f64 {
+        x.ln()
+    }
+    #[inline]
+    pub fn floor(x: f64) -> f64 {
+        x.floor()
+    }
+}
+
+#[cfg(any(feature = "logarithm", feature = "boundary"))]
+pub use math_imp::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +118,24 @@ mod tests {
         assert_eq!(MIN_NORMAL_EXPONENT, -1022);
         assert_eq!(MAX_NORMAL_EXPONENT, 1023);
         assert_eq!(MIN_VALUE, f64::MIN_POSITIVE);
+    }
+
+    #[test]
+    fn test_pow2() {
+        assert_eq!(pow2(0), 1.0);
+        assert_eq!(pow2(1), 2.0);
+        assert_eq!(pow2(2), 4.0);
+        assert_eq!(pow2(10), 1024.0);
+        assert_eq!(pow2(-1), 0.5);
+        assert_eq!(pow2(-2), 0.25);
+        assert_eq!(pow2(-10), 1.0 / 1024.0);
+        assert_eq!(pow2(MIN_NORMAL_EXPONENT), MIN_VALUE);
+        assert_eq!(pow2(MAX_NORMAL_EXPONENT), 2.0_f64.powi(1023));
+        // Verify bit-exact: every result has zero significand
+        for k in -1022..=1023 {
+            let v = pow2(k);
+            assert_eq!(get_significand(v), 0, "pow2({k}) should have zero significand");
+            assert_eq!(get_normal_base2(v), k, "pow2({k}) should have exponent {k}");
+        }
     }
 }

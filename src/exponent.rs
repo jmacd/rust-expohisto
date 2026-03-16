@@ -57,7 +57,7 @@ pub fn lower_boundary(index: i32, scale: i32) -> Result<f64, MappingError> {
 
     // 2^(index << shift)
     let exp = index << shift;
-    Ok(crate::math::powi(2.0, exp))
+    Ok(crate::float64::pow2(exp))
 }
 
 #[inline]

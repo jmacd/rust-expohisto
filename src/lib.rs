@@ -6,13 +6,13 @@
 
 pub(crate) mod exponent;
 pub(crate) mod float64;
-pub(crate) mod math;
 pub mod histogram;
 pub mod mapping;
 
 // Algorithm modules - conditionally compiled.
 // These are public for benchmark access but hidden from docs since users
 // should go through `Mapping` rather than calling algorithms directly.
+#[cfg(feature = "logarithm")]
 #[doc(hidden)]
 pub mod logarithm;
 
@@ -30,6 +30,8 @@ pub mod dynatrace;
 
 pub use histogram::{
     BucketDescriptor, BucketView, BucketWidth, BucketsIter, Histogram, HistogramView, Overflow,
-    QuantileIter, QuantileValue, Stats,
+    Stats,
 };
+#[cfg(feature = "boundary")]
+pub use histogram::{QuantileIter, QuantileValue};
 pub use mapping::{max_scale, Mapping, MappingError, MAX_SCALE, MIN_SCALE};

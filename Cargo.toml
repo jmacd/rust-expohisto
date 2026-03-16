@@ -3,10 +3,10 @@ name = "otel-expohisto"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.73"
-description = "Allocation-free (after init) OpenTelemetry Exponential Histogram"
+description = "OpenTelemetry Exponential Histogram"
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/open-telemetry/otel-expohisto"
+repository = "https://github.com/open-telemetry/otel-arrow/rust/expohisto"
 keywords = ["opentelemetry", "histogram", "exponential", "metrics", "observability"]
 categories = ["data-structures"]
 exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md"]
@@ -14,56 +14,54 @@ exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md"]
 [features]
 default = ["std", "newrelic", "scale-8"]
 
-# Enable std::error::Error impls. Disable for #[no_std] builds.
+# Std enables std::error::Error impls, nothing more.
 std = []
 
-# Lookup table scale — choose the maximum accelerated scale.
-# Each table supports all scales from 1 up to its maximum.
-# Only one scale feature should be enabled; the highest wins.
-# Scales above the table scale fall back to the built-in logarithm mapper.
-scale-1 = []      #    16B table,  scale 1
-scale-2 = []      #    40B table,  scales 1-2
-scale-3 = []      #    88B table,  scales 1-3
-scale-4 = []      #   152B table,  scales 1-4
-scale-5 = []      #   280B table,  scales 1-5
-scale-6 = []      #   536B table,  scales 1-6
-scale-7 = []      #     1KB table, scales 1-7
-scale-8 = []      #     2KB table, scales 1-8
-scale-9 = []      #     4KB table, scales 1-9
-scale-10 = []     #     8KB table, scales 1-10
-scale-11 = []     #    16KB table, scales 1-11
-scale-12 = []     #    32KB table, scales 1-12
-scale-13 = []     #    64KB table, scales 1-13
-scale-14 = []     #   128KB table, scales 1-14
-scale-15 = []     #   256KB table, scales 1-15
-scale-16 = []     #   512KB table, scales 1-16
-scale-17 = []     #     1MB table, scales 1-17
-scale-18 = []     #     2MB table, scales 1-18
-scale-19 = []     #     4MB table, scales 1-19
-scale-20 = []     #     8MB table, scales 1-20
+# Lookup table scale chooses the maximum exact scale. Larger scales
+# use the logarithm mapping.
+scale-1 = []
+scale-2 = []
+scale-3 = []
+scale-4 = []
+scale-5 = []
+scale-6 = []
+scale-7 = []
+scale-8 = []
+scale-9 = []
+scale-10 = []
+scale-11 = []
+scale-12 = []
+scale-13 = []
+scale-14 = []
+scale-15 = []
+scale-16 = []
+scale-17 = []
+scale-18 = []
+scale-19 = []
+scale-20 = []
 
-# Mapping algorithms — choose one (or neither for pure logarithm).
-# Both produce identical results; they differ only in index table size and correction count.
-# Scales above the table scale automatically fall back to logarithm mapping.
+# Mapping algorithms — choose one. Both produce identical results; they
+# differ only in index table size and correction count. Scales above the
+# table scale are rejected by Mapping::new().
 
-# NewRelic lookup table-based mapping.
-# Pros: Exact (no FP errors), fast integer-only computation.
-# Cons: Larger binary size, table scale limits exact range.
-newrelic = ["scale-4"]
+newrelic = ["scale-8"]
+dynatrace = ["scale-8"]
 
-# Dynatrace lookup table-based mapping.
-# Pros: Exact (no FP errors), ~50% smaller index table than NewRelic.
-# Cons: Two branch corrections vs one; table scale limits exact range.
-dynatrace = ["scale-4"]
+# Logarithm mapper — for testing and benchmarking only.
+# Uses ln() and floor() from std.
+logarithm = ["std"]
+
+# Boundary computation (lower_boundary, quantile estimation).
+# Uses exp() from std.
+boundary = ["std"]
 
 # For benchmarking all algorithms together
-bench-all = ["newrelic", "dynatrace", "scale-8", "bench-internals"]
+bench-all = ["newrelic", "dynatrace", "logarithm", "boundary", "scale-8", "bench-internals"]
 
-# Expose internal methods (e.g. do_downscale) for benchmarking
+# Expose internal methods for benchmarking
 bench-internals = []
 
 [dependencies]
-libm = { version = "0.2", default-features = false }
 
 [build-dependencies]
 expohisto-mapping-gen = { path = "mapping-gen" }
