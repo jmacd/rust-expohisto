@@ -671,8 +671,7 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`Overflow`] if the value is negative or NaN,
-    /// or if a bucket counter or the total count would overflow.
+    /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
         self.record(value, 1)
@@ -680,13 +679,16 @@ impl<const N: usize> Histogram<N> {
 
     /// Records a value with a specified increment.
     ///
-    /// Returns `Err(Overflow)` if the value is negative or NaN,
-    /// or if the count or bucket counters would overflow.
+    /// The value must be non-negative and not NaN. Callers are responsible
+    /// for validating inputs (e.g. at the OTel API level).
+    ///
+    /// Returns `Err(Overflow)` if the count or bucket counters would overflow.
     /// On error the histogram is left unchanged (snapshot/rollback).
     pub fn record(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
-        if value.is_nan() || value < 0.0 {
-            return Err(Overflow);
-        }
+        debug_assert!(
+            !value.is_nan() && value >= 0.0,
+            "Histogram only accepts non-negative, non-NaN values"
+        );
 
         if incr == 0 {
             return Ok(());
