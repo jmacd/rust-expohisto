@@ -1,0 +1,89 @@
+[package]
+name = "otel-expohisto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.73"
+description = "OpenTelemetry Exponential Histogram"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/jmacd/rust-expohisto"
+keywords = ["opentelemetry", "histogram", "exponential", "metrics", "observability"]
+categories = ["data-structures"]
+exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md", "docs/"]
+
+[features]
+default = ["std", "newrelic", "scale-8"]
+
+# Std enables std::error::Error impls, nothing more.
+std = []
+
+# Lookup table scale chooses the maximum exact scale. Larger scales
+# use the logarithm mapping.
+scale-1 = []
+scale-2 = []
+scale-3 = []
+scale-4 = []
+scale-5 = []
+scale-6 = []
+scale-7 = []
+scale-8 = []
+scale-9 = []
+scale-10 = []
+scale-11 = []
+scale-12 = []
+scale-13 = []
+scale-14 = []
+scale-15 = []
+scale-16 = []
+scale-17 = []
+scale-18 = []
+scale-19 = []
+scale-20 = []
+
+# Mapping algorithms — choose one. Both produce identical results; they
+# differ only in index table size and correction count. Scales above the
+# table scale are rejected by Mapping::new().
+
+newrelic = ["scale-8"]
+dynatrace = ["scale-8"]
+
+# Logarithm mapper — for testing and benchmarking only.
+# Uses ln() and floor() from std.
+logarithm = ["std"]
+
+# Boundary computation (lower_boundary, quantile estimation).
+# Uses exp() from std.
+boundary = ["std"]
+
+# For benchmarking all algorithms together
+bench-all = ["newrelic", "dynatrace", "logarithm", "boundary", "scale-8", "bench-internals"]
+
+# Expose internal methods for benchmarking
+bench-internals = []
+
+[dependencies]
+
+[build-dependencies]
+expohisto-mapping-gen = { path = "mapping-gen" }
+
+[dev-dependencies]
+criterion = "0.5"
+rand = "0.8"
+rand_distr = "0.4"
+expohisto-mapping-gen = { path = "mapping-gen" }
+
+[[bench]]
+name = "mapping"
+harness = false
+
+[[bench]]
+name = "sub_byte"
+harness = false
+
+[[bench]]
+name = "downscale"
+harness = false
+
+[[bench]]
+name = "literal"
+harness = false

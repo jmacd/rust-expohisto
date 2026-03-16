@@ -1,0 +1,39 @@
+[package]
+name = "otel-expohisto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.otel-expohisto]
+path = ".."
+features = ["bench-internals"]
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "histogram_oracle"
+path = "fuzz_targets/histogram_oracle.rs"
+doc = false
+
+[[bin]]
+name = "merge_oracle"
+path = "fuzz_targets/merge_oracle.rs"
+doc = false
+
+[[bin]]
+name = "stateful_oracle"
+path = "fuzz_targets/stateful_oracle.rs"
+doc = false
+
+[[bin]]
+name = "rng_stress"
+path = "fuzz_targets/rng_stress.rs"
+doc = false
