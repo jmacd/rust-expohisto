@@ -40,7 +40,7 @@ impl<const N: usize> HistogramView<'_, N> {
     /// Returns 0 when no non-zero values have been recorded.
     #[inline]
     pub fn scale(&self) -> i32 {
-        if self.hist.non_zero_count() == 0 {
+        if self.hist.buckets_empty() {
             0
         } else {
             self.hist.mapping.scale()
@@ -112,17 +112,27 @@ impl<const N: usize> HistogramView<'_, N> {
         );
 
         let total_count = self.count();
-        let nz = self.hist.non_zero_count();
-        let zero_count = total_count.saturating_sub(nz);
         let min = self.min();
         let max = self.max();
-        let mapping = if nz == 0 {
+
+        let bucket_len = self.hist.range_len();
+        let offset = self.hist.index_start;
+
+        // Derive zero_count by summing positive buckets and subtracting
+        // from total. Any consumer that walks buckets learns this naturally.
+        let positive_count: u64 = (0..bucket_len)
+            .map(|pos| {
+                let index = offset + pos as i32;
+                self.hist.bucket_get(self.hist.slot_for(index))
+            })
+            .sum();
+        let zero_count = total_count.saturating_sub(positive_count);
+
+        let mapping = if positive_count == 0 {
             Mapping::new(0).unwrap()
         } else {
             self.hist.mapping
         };
-        let bucket_len = self.hist.range_len();
-        let offset = self.hist.index_start;
 
         QuantileIter::new(
             self.hist, mapping, quantiles, bucket_len, offset, total_count, zero_count, min, max,

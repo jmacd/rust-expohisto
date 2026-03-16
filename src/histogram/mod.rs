@@ -297,20 +297,6 @@ impl<const N: usize> Histogram<N> {
         self.stats.count = count;
     }
 
-    /// Returns the total count stored across all positive buckets.
-    fn non_zero_count(&self) -> u64 {
-        if self.literal {
-            return self.literal_count() as u64;
-        }
-        let len = self.range_len();
-        let mut total = 0u64;
-        for pos in 0..len {
-            let index = self.index_start + pos as i32;
-            total = total.saturating_add(self.bucket_get(self.slot_for(index)));
-        }
-        total
-    }
-
     // -- Index arithmetic helpers --
 
     /// Number of logical buckets in the live range, or 0 if empty.
