@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! SWAR (SIMD Within A Register) — per-word parallel pairwise summation.
+//!
+//! These primitives are no longer used by the production downscale path
+//! (which uses a clone + scatter-add approach), but are retained for
+//! unit tests that verify SWAR correctness in isolation.
+
+#![allow(dead_code)]
 
 use super::bucket_width::BucketWidth;
 

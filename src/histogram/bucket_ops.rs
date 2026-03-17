@@ -3,168 +3,172 @@
 
 //! Bucket operations — widen and downscale.
 //!
-//! Both widen and downscale use SWAR pairwise-merge steps at sub-U64
-//! widths, then scatter-write at U64.  Each step is self-contained:
-//! any value displaced by an odd-base alignment shift is fixed up
-//! immediately rather than being deferred to a later phase.
+//! Downscale merges groups of 2^change adjacent buckets by summing
+//! their counters.  The implementation clones the data array, then
+//! scatter-adds from the clone into a fresh, aligned output buffer.
+//! This linear read→fold→write pattern avoids in-place alignment
+//! fixups and is SIMD-friendly.
 
 use super::bucket_width::BucketWidth;
-use super::swar::{swar_has_overflow, swar_narrow_compact, swar_shift_up_one, swar_step};
 use super::Histogram;
 
 impl<const N: usize> Histogram<N> {
-    /// Performs one SWAR pairwise-merge step (1-step downscale).
+    /// Downscales by `change` steps: merges groups of `2^change`
+    /// adjacent bucket indices by summing their counters.
     ///
-    /// When `index_base` is odd, the data must be shifted up by one
-    /// physical slot before the SWAR step so that logical pairs align
-    /// with physical pairs.  If the top slot is occupied, its value is
-    /// saved, zeroed (freeing room for the shift), and re-inserted
-    /// immediately after the step completes.
+    /// `min_width` sets a floor on the output width (use the current
+    /// width for a normal downscale, or the next wider width when
+    /// a counter overflow forces widening).
     ///
-    /// When `force_widen` is true, always accepts the wider format
-    /// (used on counter overflow).  Otherwise narrows back to the
-    /// original width when possible (preserving bucket capacity).
-    ///
-    /// Returns `None` if already at U64.  Returns `Some(displaced)` on
-    /// success, where `displaced` is an optional `(index, count)` that
-    /// could not be placed after a widen (the caller must re-insert it).
-    pub(super) fn pairwise_merge(
-        &mut self,
-        force_widen: bool,
-    ) -> Option<Option<(i32, u64)>> {
-        let width = self.bucket_width;
-        if width == BucketWidth::U64 {
-            return None;
-        }
-
-        debug_assert!(
-            self.index_start >= self.index_base,
-            "sub-U64 data must not wrap: start={} base={}",
-            self.index_start,
-            self.index_base,
-        );
-
-        let odd_base = self.index_base & 1 != 0;
-
-        // Save the top slot if it would be clobbered by the shift.
-        let saved = if odd_base {
-            let cap = self.bucket_capacity() as i32;
-            let top_physical = (cap - 1) as usize;
-
-            // If the live range spans the full physical capacity, the
-            // top slot holds a real value that must be preserved.
-            let saved = if self.index_end == self.index_base + cap - 1 {
-                let top_idx = self.index_end;
-                let val = self.bucket_get(top_physical);
-                self.index_end -= 1;
-                Some((top_idx, val))
-            } else {
-                None
-            };
-
-            // The top slot must be empty for shift_up_one.  It may hold
-            // the saved live value or stale data from a previous trim.
-            self.bucket_set(top_physical, 0);
-            swar_shift_up_one(self.bucket_data_mut(), width);
-            saved
-        } else {
-            None
-        };
-
-        swar_step(self.bucket_data_mut(), width);
-
-        let widened = force_widen || swar_has_overflow(self.bucket_data(), width);
-        if widened {
-            // Cannot fail: width != U64 is checked at the top of this function.
-            self.bucket_width = width.wider().unwrap();
-        } else {
-            swar_narrow_compact(self.bucket_data_mut(), width);
-        }
-
-        self.shift_indices(1);
-
-        // Fix up the saved value.  After the SWAR step, the output
-        // occupies the first ~half of the physical capacity; the saved
-        // value's target is always in the empty second half (no-widen)
-        // or wraps to slot 0 (widen — collision with the first pair sum).
-        if let Some((idx, val)) = saved {
-            let new_idx = idx >> 1;
-            if !widened {
-                // No widen → capacity unchanged → target slot is in the
-                // zeroed second half of the buffer.
-                if new_idx > self.index_end {
-                    self.index_end = new_idx;
-                }
-                let slot = self.slot_for(new_idx);
-                debug_assert_eq!(self.bucket_get(slot), 0);
-                self.bucket_set(slot, val);
-                Some(None)
-            } else {
-                // Widen → capacity halved → target wraps to slot 0, which
-                // already holds a different bucket's data.  Return the
-                // value so the caller can re-insert it (which may trigger
-                // a further downscale to make room).
-                Some(Some((new_idx, val)))
-            }
-        } else {
-            Some(None)
-        }
-    }
-
-    /// Downscales at U64 width by collapsing 2^by adjacent buckets.
-    ///
-    /// Rotates the ring buffer to make the live range contiguous, then
-    /// folds groups in-place with checked addition.  No temporary
-    /// buffer is needed because the write position never overtakes the
-    /// read position.
+    /// Clones the data array, determines the minimum output width
+    /// that can hold all group sums (at least `min_width`), then
+    /// scatter-adds each old counter into the corresponding output
+    /// slot.  `index_base` is freshly computed and word-aligned, so
+    /// no alignment fixups are needed.
     ///
     /// Returns `Err(Overflow)` if any group sum exceeds `u64::MAX`.
-    pub(super) fn downscale_u64(&mut self, by: i32) -> Result<(), super::Overflow> {
-        debug_assert_eq!(self.bucket_width, BucketWidth::U64);
-        debug_assert!(by >= 1);
+    pub(super) fn do_downscale(
+        &mut self,
+        change: i32,
+        min_width: BucketWidth,
+    ) -> Result<(), super::Overflow> {
+        debug_assert!(change >= 1);
 
         if self.range_is_empty() {
-            self.shift_indices(by);
+            self.shift_indices(change);
             return Ok(());
         }
 
-        let range_len = (self.index_end - self.index_start + 1) as usize;
-        let new_start = self.index_start >> by;
-        let new_end = self.index_end >> by;
-        let new_len = (new_end - new_start + 1) as usize;
+        let old_data = self.data;
+        let old_width = self.bucket_width;
+        let old_base = self.index_base;
+        let old_start = self.index_start;
+        let old_end = self.index_end;
 
-        // Rotate the ring so index_start maps to physical slot 0,
-        // making the live range contiguous in data[0..range_len].
-        let start_slot = self.slot_for(self.index_start);
-        self.data.rotate_left(start_slot);
+        let new_start = old_start >> change;
+        let new_end = old_end >> change;
 
-        // Fold in-place: sum adjacent entries that share the same
-        // shifted index.  write ≤ k holds at every step because each
-        // output group contains at least one input entry.
-        let mut write = 0usize;
-        let mut acc = 0u64;
-        let mut cur_new = self.index_start >> by;
+        // Phase 1: Determine output width.
+        //
+        // Walk the old live range, summing each group of adjacent
+        // counters that share the same shifted index.  Track the
+        // maximum group sum to find the minimum width that fits.
+        let mut max_sum: u64 = 0;
+        let mut cur_group = old_start >> change;
+        let mut group_acc: u64 = 0;
 
-        for k in 0..range_len {
-            let new_idx = (self.index_start + k as i32) >> by;
-            if new_idx != cur_new {
-                self.data[write] = acc;
-                write += 1;
-                acc = 0;
-                cur_new = new_idx;
+        for idx in old_start..=old_end {
+            let new_idx = idx >> change;
+            if new_idx != cur_group {
+                if group_acc > max_sum {
+                    max_sum = group_acc;
+                }
+                group_acc = 0;
+                cur_group = new_idx;
             }
-            acc = acc.checked_add(self.data[k]).ok_or(super::Overflow)?;
+            let slot = Self::slot_in(idx, old_base, old_width);
+            let val = Self::get_in(&old_data, slot, old_width);
+            group_acc = group_acc.checked_add(val).ok_or(super::Overflow)?;
         }
-        self.data[write] = acc;
-        write += 1;
-        debug_assert_eq!(write, new_len);
+        // Final group.
+        if group_acc > max_sum {
+            max_sum = group_acc;
+        }
 
-        // Zero all slots beyond the new live range.
-        self.data[new_len..].fill(0);
+        // Find the minimum width that can hold max_sum, starting
+        // from the requested floor (also respecting min_bucket_width).
+        let mut new_width = if min_width > self.min_bucket_width {
+            min_width
+        } else {
+            self.min_bucket_width
+        };
+        while max_sum > new_width.counter_max() {
+            new_width = new_width.wider().ok_or(super::Overflow)?;
+        }
 
+        // Phase 2: Scatter-add into a fresh, aligned buffer.
+        let new_spw = new_width.slots_per_word() as i32;
+        let new_base = new_start & !(new_spw - 1);
+
+        self.data = [0u64; N];
+        self.bucket_width = new_width;
+        self.index_base = new_base;
         self.index_start = new_start;
         self.index_end = new_end;
-        self.index_base = new_start;
+
+        cur_group = old_start >> change;
+        group_acc = 0;
+
+        for idx in old_start..=old_end {
+            let new_idx = idx >> change;
+            if new_idx != cur_group {
+                // Write the completed group sum.
+                let out_slot = Self::slot_in(cur_group, new_base, new_width);
+                Self::set_in(&mut self.data, out_slot, new_width, group_acc);
+                group_acc = 0;
+                cur_group = new_idx;
+            }
+            let in_slot = Self::slot_in(idx, old_base, old_width);
+            let val = Self::get_in(&old_data, in_slot, old_width);
+            // Cannot overflow: we already checked in phase 1.
+            group_acc += val;
+        }
+        // Write the final group.
+        let out_slot = Self::slot_in(cur_group, new_base, new_width);
+        Self::set_in(&mut self.data, out_slot, new_width, group_acc);
+
+        self.trim_bucket_range();
         Ok(())
+    }
+
+    /// Downscales by 1 step with forced widening.
+    ///
+    /// Used when a counter overflows: the width must increase by at
+    /// least one level.
+    pub(super) fn widen_by_one(&mut self) -> Result<(), super::Overflow> {
+        let min = self.bucket_width.wider().ok_or(super::Overflow)?;
+
+        if self.range_is_empty() {
+            self.bucket_width = min;
+            self.shift_indices(1);
+            return Ok(());
+        }
+
+        self.do_downscale(1, min)
+    }
+
+    // -- Static helpers for reading/writing packed counters in a
+    //    data array, parameterized by base and width so they work
+    //    on both the old (cloned) and new layouts.
+
+    /// Physical slot index for a logical bucket index, given a base
+    /// and width.
+    #[inline]
+    const fn slot_in(index: i32, base: i32, width: BucketWidth) -> usize {
+        let cap = width.capacity(N) as i32;
+        (index - base).rem_euclid(cap) as usize
+    }
+
+    /// Reads a counter from a data array at a physical slot.
+    #[inline]
+    const fn get_in(data: &[u64; N], slot: usize, width: BucketWidth) -> u64 {
+        let bits = width.bits();
+        let spw = 64 / bits;
+        let wi = slot / spw;
+        let shift = (slot % spw) * bits;
+        let mask = width.counter_max();
+        (data[wi] >> shift) & mask
+    }
+
+    /// Writes a counter into a data array at a physical slot.
+    #[inline]
+    fn set_in(data: &mut [u64; N], slot: usize, width: BucketWidth, value: u64) {
+        let bits = width.bits();
+        let spw = 64 / bits;
+        let wi = slot / spw;
+        let shift = (slot % spw) * bits;
+        let mask = width.counter_max();
+        let word = &mut data[wi];
+        *word = (*word & !(mask << shift)) | ((value & mask) << shift);
     }
 }

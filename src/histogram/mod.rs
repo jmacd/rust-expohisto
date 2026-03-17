@@ -743,23 +743,15 @@ impl<const N: usize> Histogram<N> {
             self.shift_indices(1);
             return self.decrease_scale(1);
         }
-        let displaced = self.pairwise_merge(true).ok_or(Overflow)?;
-        self.decrease_scale(1)?;
-        self.reinsert_displaced(displaced)
+        self.widen_by_one()?;
+        self.decrease_scale(1)
     }
 
     /// Downscales by `change` scale-steps.
     ///
-    /// At sub-U64 widths, processes one SWAR merge step at a time.
-    /// Each step does a pairwise sum and checks for overflow:
-    ///
-    /// - **No overflow**: narrows back to the original width (preserving
-    ///   bucket capacity) and continues to the next step.
-    /// - **Overflow**: accepts the wider format and continues at the new
-    ///   width.
-    ///
-    /// At U64 width, remaining steps use `downscale_u64`
-    /// (scatter-write collapse).
+    /// Clones the data array and scatter-adds groups of `2^change`
+    /// adjacent counters into a fresh, aligned output buffer.  The
+    /// output width is the minimum that holds all group sums.
     #[cfg(any(test, feature = "bench-internals"))]
     pub fn downscale(&mut self, change: i32) -> Result<(), Overflow> {
         self.downscale_by(change)
@@ -775,36 +767,8 @@ impl<const N: usize> Histogram<N> {
             return self.decrease_scale(change);
         }
 
-        let mut remaining = change;
-
-        // Phase 1: SWAR merge at sub-U64 widths, one step at a time.
-        while remaining > 0 && self.bucket_width != BucketWidth::U64 {
-            let displaced = self.pairwise_merge(false).ok_or(Overflow)?;
-            self.decrease_scale(1)?;
-            remaining -= 1;
-            self.reinsert_displaced(displaced)?;
-        }
-
-        // Phase 2: At U64, scatter-write for remaining steps.
-        if remaining > 0 {
-            debug_assert_eq!(self.bucket_width, BucketWidth::U64);
-            self.downscale_u64(remaining)?;
-            self.decrease_scale(remaining)?;
-        }
-
-        self.trim_bucket_range();
-        Ok(())
-    }
-
-    /// Re-inserts a value displaced by an odd-base SWAR shift that could
-    /// not be placed after a widen (capacity halved, target wrapped).
-    /// This may trigger a further downscale to make room.
-    fn reinsert_displaced(&mut self, displaced: Option<(i32, u64)>) -> Result<(), Overflow> {
-        if let Some((idx, val)) = displaced {
-            let scale = self.mapping.scale();
-            self.retry_increment(val, |h| idx >> (scale - h.mapping.scale()))?;
-        }
-        Ok(())
+        self.do_downscale(change, self.bucket_width)?;
+        self.decrease_scale(change)
     }
 
     fn downscale_to(&mut self, target_scale: i32) -> Result<(), Overflow> {

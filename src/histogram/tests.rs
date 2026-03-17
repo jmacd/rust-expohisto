@@ -1270,8 +1270,8 @@ fn test_odd_base_downscale_preserves_total() {
     }
 
     if h.index_base & 1 != 0 {
-        // One more downscale at odd base — the saved-value fix-up
-        // is handled internally by pairwise_merge.
+        // One more downscale at odd base — do_downscale handles
+        // alignment internally via a fresh, aligned output buffer.
         h.downscale(1).unwrap();
 
         let total_after = bucket_total(&mut h);
