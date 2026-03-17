@@ -124,6 +124,14 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
             let new_cumulative = self.cumulative + count;
 
             if new_cumulative as f64 >= target {
+                // lower_boundary(index) cannot fail: bucket indices in
+                // the histogram always correspond to normal f64 values
+                // (subnormals are clamped to MIN_VALUE before mapping).
+                //
+                // lower_boundary(index + 1) can return Overflow when
+                // the uppermost bucket spans the boundary of
+                // representable f64.  In that case self.max is the
+                // correct upper bound for interpolation.
                 let lower = self.mapping.lower_boundary(index).unwrap_or(0.0);
                 let upper = self
                     .mapping

@@ -254,7 +254,7 @@ relative error) across the full range.
 
 | Method | Effect |
 |--------|--------|
-| `with_scale(s)` | Set exact starting scale (panics if invalid; does not clamp) |
+| `with_scale(s)` | Set exact starting scale (returns `Err` if invalid; does not clamp) |
 | `with_min_bucket_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
 | `with_literal_mode(false)` | Disable literal mode when the value range is already known |
 
@@ -328,7 +328,7 @@ a.merge_from(&b).unwrap();
 
 // Cross-size merge (different N parameters)
 let c: Histogram<32> = Histogram::new();
-a.merge_from_other(&c).unwrap();
+a.merge_from(&c).unwrap();
 
 // Raw merge — from arbitrary bucket data via a closure
 a.merge_from_raw(
@@ -345,7 +345,7 @@ All merge operations compute the minimum common scale, downscale as needed, and 
 | Method | Description |
 |--------|-------------|
 | `new()` | Create at maximum scale (20) with default settings |
-| `with_scale(s)` | Create at exact scale (panics if invalid; does not clamp) |
+| `with_scale(s)` | Create at exact scale (returns `Err` if invalid; does not clamp) |
 | `swap(&mut other)` | Exchange contents with another histogram (O(N) memswap) |
 | `is_literal()` | Check if in literal mode |
 | `bucket_capacity()` | Number of logical buckets at the current width |
@@ -358,7 +358,7 @@ All merge operations compute the minimum common scale, downscale as needed, and 
 use otel_expohisto::{Histogram, BucketWidth};
 
 let h: Histogram<16> = Histogram::new()
-    .with_scale(8)                                    // set starting scale
+    .with_scale(8)?                                   // set starting scale
     .with_min_bucket_width(BucketWidth::U8)           // skip sub-byte widths
     .with_literal_mode(false);                        // disable cold-start optimization
 ```

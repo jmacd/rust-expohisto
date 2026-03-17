@@ -2,7 +2,7 @@
 
 ## Error Handling & Atomicity
 
-All mutating operations (`update`, `record`, `merge_from`, `merge_from_other`, `merge_from_raw`) return `Result<(), Overflow>`. The `Overflow` error indicates that a bucket counter or the total count would exceed its maximum representable value.
+All mutating operations (`update`, `record`, `merge_from`, `merge_from_raw`) return `Result<(), Overflow>`. The `Overflow` error indicates that a bucket counter or the total count would exceed its maximum representable value.
 
 **Snapshot/rollback guarantee:** Before any mutating operation, the histogram clones itself. If the operation fails (e.g., a U64 counter would overflow), the clone is restored and the histogram is left unchanged. This ensures that partial mutations from multi-step operations (downscale + widen + insert) never leak to the caller.
 
@@ -49,7 +49,7 @@ The CI test matrix includes `--no-default-features` to ensure `no_std` compatibi
 
 The crate includes comprehensive validation at multiple levels:
 
-- **125 unit tests** covering basic operations, promotion, widening, downscaling, SWAR pairwise merge, all merge strategies, quantile estimation, and boundary conditions
+- **122 unit tests** covering basic operations, promotion, widening, downscaling, SWAR pairwise merge, all merge strategies, quantile estimation, and boundary conditions
 - **4 fuzz targets** (`cargo +nightly fuzz run <target>`):
   - `histogram_oracle` — validates invariants (count, sum, min/max, bucket integrity) with random f64 sequences
   - `merge_oracle` — fuzzes weighted `record()` + cross-scale merge
@@ -140,8 +140,7 @@ The spec defines both positive and negative bucket ranges. **This implementation
 
 The spec requires aggregations to be mergeable. This implementation supports:
 
-- **Same-type merge:** `Histogram::merge_from()` merges identically-typed histograms, computing the minimum common scale and downscaling as needed.
-- **Cross-size merge:** `Histogram::merge_from_other()` merges histograms with different `N` parameters.
+- **Same- or cross-size merge:** `Histogram::merge_from()` merges histograms, computing the minimum common scale and downscaling as needed.  The source and destination may have different `N` parameters (e.g., `Histogram<16>` into `Histogram<8>`).
 - **Raw merge:** `Histogram::merge_from_raw()` merges from raw histogram data via a closure-based bucket accessor, enabling cross-library interop.
 
 ### Counter Widening

@@ -206,8 +206,11 @@ pub struct Histogram<const N: usize> {
     min_bucket_width: BucketWidth,
     bucket_width: BucketWidth,
     /// When true, `data[..]` holds raw f64 bit patterns (literals)
-    /// instead of bucket counters. `index_end` is repurposed as the literal
-    /// count.
+    /// instead of bucket counters.  `index_end` is repurposed as the
+    /// literal count — this saves a struct field in a fixed-size type
+    /// where every byte matters.  Code that reads `index_end` must
+    /// check `self.literal` first; `literal_count()` provides the
+    /// safe accessor.
     literal: bool,
     index_base: i32,
     index_start: i32,
@@ -368,6 +371,12 @@ impl<const N: usize> Histogram<N> {
 
     /// Eagerly promotes from literal mode to bucket mode.
     /// No-op if already in bucket mode.
+    ///
+    /// The error from `promote()` is intentionally discarded: literal
+    /// mode stores at most `N` values, each replayed with `incr = 1`.
+    /// Even at the narrowest counter width (B1 = 1-bit), the data pool
+    /// holds `64 * N` counters — far more than `N` — so replay cannot
+    /// overflow.
     #[inline]
     fn ensure_promoted(&mut self) {
         if self.literal {
@@ -534,14 +543,20 @@ impl<const N: usize> Histogram<N> {
 
     /// Returns a read-only view of the histogram.
     ///
-    /// Takes `&mut self` because it may promote from literal mode to
-    /// bucket mode internally. The returned [`HistogramView`] provides
-    /// access to scale, stats, positive buckets, and quantile
+    /// Takes `&mut self` because it may need to promote from literal
+    /// mode to bucket mode internally.  The returned [`HistogramView`]
+    /// provides access to scale, stats, positive buckets, and quantile
     /// estimation — all via `&self`.
     ///
-    /// In the intended usage pattern, each caller owns its own
-    /// histogram exclusively. To export data, call `view()` then
-    /// [`swap`](Self::swap) with a fresh histogram to reset.
+    /// # Why `&mut self` and not `&self`?
+    ///
+    /// Shared-read access (via `&self`) is intentionally not supported.
+    /// In the OTel aggregation pattern, each collector owns its
+    /// histogram exclusively: record into it, then [`swap`](Self::swap)
+    /// or [`merge_from`](Self::merge_from) to hand off data.  Shared
+    /// access is unnecessary and the internal-mutability machinery
+    /// required to support it (`Cell`/`OnceCell`) would add complexity
+    /// and runtime cost to every read path for no practical benefit.
     ///
     /// ```
     /// use otel_expohisto::Histogram;
@@ -623,10 +638,8 @@ impl<const N: usize> Histogram<N> {
 
     /// Records a single value.
     ///
-    /// The value must be non-negative and not NaN. This is not checked
-    /// at runtime — the caller is expected to validate inputs before
-    /// calling this method (e.g. at the OTel API level). Passing NaN
-    /// or negative values produces unspecified but safe results.
+    /// The value must be non-negative and not NaN.  See
+    /// [`record`](Self::record) for why this is not checked at runtime.
     ///
     /// Positive infinity (`f64::INFINITY`) is accepted and mapped to
     /// the same bucket as `f64::MAX`, consistent with the Prometheus
@@ -647,10 +660,15 @@ impl<const N: usize> Histogram<N> {
 
     /// Records a value with a specified increment.
     ///
-    /// The value must be non-negative and not NaN. This is not checked
-    /// at runtime — the caller is expected to validate inputs before
-    /// calling this method (e.g. at the OTel API level). Passing NaN
-    /// or negative values produces unspecified but safe results.
+    /// The value must be non-negative and not NaN.  **This is not
+    /// checked at runtime** — `debug_assert!` catches violations in
+    /// debug builds, but release builds assume valid input.
+    ///
+    /// This is deliberate: an OTel SDK must already validate values
+    /// at the API boundary (rejecting NaN, Inf, and negative values
+    /// before selecting an aggregator), so repeating that check here
+    /// would add a branch to the hot path for no benefit.  The
+    /// `debug_assert!` exists as a safety net during development.
     ///
     /// Positive infinity (`f64::INFINITY`) is accepted and mapped to
     /// the same bucket as `f64::MAX`, consistent with the Prometheus

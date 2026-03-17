@@ -69,7 +69,9 @@ src/
 │   ├── quantile.rs  #   quantile estimation
 │   ├── bucket_ops.rs   # bucket widen and downscale operations
 │   ├── bucket_width.rs # BucketWidth enum
-│   └── swar.rs      #   SWAR helpers
+│   ├── swar.rs      #   SWAR helpers
+│   ├── tests.rs     #   unit tests
+│   └── regression.rs   # fuzz-derived regression tests
 ├── mapping.rs       # Scale-to-index mapping dispatch
 ├── exponent.rs      # Scale ≤ 0 mapping (bit extraction)
 ├── float64.rs       # IEEE 754 bit manipulation helpers

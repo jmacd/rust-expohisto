@@ -27,8 +27,8 @@ pub const MIN_NORMAL_EXPONENT: i32 = -EXPONENT_BIAS + 1;
 /// Maximum exponent of a normalized floating point: 1023.
 pub const MAX_NORMAL_EXPONENT: i32 = EXPONENT_BIAS;
 
-/// Smallest normal f64 value: 2^-1022.
-pub const MIN_VALUE: f64 = 2.2250738585072014e-308; // 0x1p-1022
+/// Smallest normal f64 value: 2^-1022 (same as `f64::MIN_POSITIVE`).
+pub const MIN_VALUE: f64 = f64::MIN_POSITIVE;
 
 /// Extracts the normalized base-2 exponent from an f64.
 #[inline]
