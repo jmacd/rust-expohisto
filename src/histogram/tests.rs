@@ -391,24 +391,23 @@ fn test_edge_values_subnormals() {
 /// These are not checked at runtime — the histogram remains safe but
 /// produces unspecified statistical results.
 #[test]
-fn test_nan_and_negative_are_unchecked() {
-    // NaN: treated as non-zero (enters bucket path), sum becomes NaN,
-    // min/max become NaN. Count still increments normally.
+fn test_nan_and_negative_debug_asserts() {
+    // NaN and negative values trigger debug_assert in record().
+    // In release mode they produce unspecified but safe results.
     let mut h: Histogram<16> = Histogram::new();
     h.update(1.0).unwrap();
-    assert!(h.update(f64::NAN).is_ok());
-    assert_eq!(h.view().count(), 2);
-    assert!(h.view().sum().is_nan());
 
-    // Negative: treated as a normal positive value by the mapping
-    // (bit pattern has same exponent structure). Count increments,
-    // sum/min/max reflect the negative value.
-    let mut h: Histogram<16> = Histogram::new();
-    h.update(1.0).unwrap();
-    assert!(h.update(-1.0).is_ok());
-    assert_eq!(h.view().count(), 2);
-    assert_eq!(h.view().sum(), 0.0);
-    assert_eq!(h.view().min(), -1.0);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut h2 = h.clone();
+        h2.update(f64::NAN).unwrap();
+    }));
+    assert!(result.is_err(), "NaN should trigger debug_assert");
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut h2 = h.clone();
+        h2.update(-1.0).unwrap();
+    }));
+    assert!(result.is_err(), "negative values should trigger debug_assert");
 }
 
 #[test]
@@ -2345,9 +2344,8 @@ fn repro_fuzz_merge_oracle_offset() {
 
 #[test]
 fn repro_fuzz_stateful_bucket_total() {
-    // Regression test: exercises a merge path that previously required
-    // rollback. Without rollback, a failed merge may leave partial state;
-    // the caller should discard the histogram on error.
+    // Regression test: exercises a merge path with extreme value
+    // combinations that stress the downscale/widen recovery loop.
     let v1: f64 = f64::from_bits(0x5829f8b15858ff40);
     let v2: f64 = f64::from_bits(0x004b000000000000);
     let v3: f64 = f64::from_bits(0x56562c0000000000);
@@ -2365,8 +2363,7 @@ fn repro_fuzz_stateful_bucket_total() {
 }
 
 /// Exercises the record path with a huge increment at a wildly different
-/// exponent. Without rollback, overflow may leave partial state — the
-/// caller should discard the histogram on error.
+/// exponent, stressing the downscale/widen recovery loop.
 #[test]
 fn repro_fuzz_stateful_update_atomicity() {
     let v1 = f64::from_bits(0x002f233d41000000); // 8.66e-308

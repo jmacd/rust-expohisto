@@ -40,13 +40,19 @@ pub use bucket_width::BucketWidth;
 // Error type
 // ---------------------------------------------------------------------------
 
-/// Error returned when a histogram operation would overflow.
+/// Error returned when the total count would exceed `u64::MAX`.
+///
+/// The total count is checked before any bucket mutation.  Because the
+/// total is always ≥ any individual bucket count, a `u64`-width bucket
+/// counter cannot overflow once the total-count check passes.  In
+/// practice, callers should flush and reset histograms periodically
+/// long before `u64` exhaustion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Overflow;
 
 impl fmt::Display for Overflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("histogram counter overflow")
+        f.write_str("histogram total count overflow")
     }
 }
 
@@ -628,7 +634,12 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
+    /// Returns [`Overflow`] if the total count would exceed `u64::MAX`.
+    /// This is the only fallible check — because the total count is
+    /// always ≥ any individual bucket count, a bucket counter at `u64`
+    /// width cannot overflow when the total count fits. In practice,
+    /// callers should flush and reset histograms periodically long
+    /// before `u64` exhaustion.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
         self.record(value, 1)
@@ -645,11 +656,19 @@ impl<const N: usize> Histogram<N> {
     /// the same bucket as `f64::MAX`, consistent with the Prometheus
     /// exponential histogram specification.
     ///
-    /// Returns `Err(Overflow)` if the count or bucket counters would
-    /// overflow. On error the histogram may be in a partially updated
-    /// state — callers should discard it (e.g. swap with a fresh
-    /// histogram). This only occurs when u64 counters are exhausted.
+    /// # Errors
+    ///
+    /// Returns [`Overflow`] if the total count would exceed `u64::MAX`.
+    /// The total count is checked before any mutation, and because the
+    /// total is always ≥ any individual bucket count, no bucket at
+    /// `u64` width can overflow once the total-count check passes.
+    /// Callers that need rollback semantics can `clone()` beforehand,
+    /// but in practice histograms should be flushed and reset long
+    /// before `u64` exhaustion.
     pub fn record(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
+        debug_assert!(!value.is_nan(), "NaN is not a valid histogram value");
+        debug_assert!(value >= 0.0, "negative values are not supported");
+
         if incr == 0 {
             return Ok(());
         }

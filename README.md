@@ -19,7 +19,6 @@ Exponential histograms provide a compact, high-resolution representation of valu
 - **Sub-byte counters**: 1-bit bucket counters (B1) maximize resolution; auto-widen on overflow
 - **Configurable table size**: Trade static memory for lookup acceleration at higher scales
 - **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
-- **Atomic error recovery**: Snapshot/rollback ensures failed operations leave the histogram unchanged
 - **Literal mode**: Cold-start optimization defers bucket allocation until the value range is known
 - **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature
 - **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate

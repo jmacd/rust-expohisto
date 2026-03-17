@@ -75,6 +75,7 @@ impl<const N: usize> Histogram<N> {
 
         let widened = force_widen || swar_has_overflow(self.bucket_data(), width);
         if widened {
+            // Cannot fail: width != U64 is checked at the top of this function.
             self.bucket_width = width.wider().unwrap();
         } else {
             swar_narrow_compact(self.bucket_data_mut(), width);

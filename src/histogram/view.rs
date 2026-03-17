@@ -129,6 +129,7 @@ impl<const N: usize> HistogramView<'_, N> {
         let zero_count = total_count.saturating_sub(positive_count);
 
         let mapping = if positive_count == 0 {
+            // Cannot fail: scale 0 is always valid.
             Mapping::new(0).unwrap()
         } else {
             self.hist.mapping

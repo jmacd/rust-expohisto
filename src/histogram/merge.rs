@@ -11,6 +11,11 @@ impl<const N: usize> Histogram<N> {
     /// The source histogram may have a different pool size (`M`).
     /// When the destination is empty, the source's bucket width is
     /// adopted to avoid unnecessary widening steps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Overflow`] if the combined total count would exceed
+    /// `u64::MAX`. See [`record()`](Self::record) for details.
     pub fn merge_from<const M: usize>(
         &mut self,
         other: &Histogram<M>,
@@ -59,7 +64,8 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`Overflow`] if a bucket counter or the total count would overflow.
+    /// Returns [`Overflow`] if the combined total count would exceed
+    /// `u64::MAX`. See [`record()`](Self::record) for details.
     pub fn merge_from_raw(
         &mut self,
         stats: &Stats,
