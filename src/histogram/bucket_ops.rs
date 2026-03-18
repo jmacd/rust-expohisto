@@ -66,7 +66,7 @@ impl<const N: usize> Histogram<N> {
                 group_acc = 0;
                 cur_group = new_idx;
             }
-            let slot = Self::slot_in(idx, old_base, old_width);
+            let slot = Self::old_slot(idx, old_base, old_width);
             let val = Self::get_in(&old_data, slot, old_width);
             group_acc = group_acc.checked_add(val).ok_or(super::Overflow)?;
         }
@@ -103,18 +103,18 @@ impl<const N: usize> Histogram<N> {
             let new_idx = idx >> change;
             if new_idx != cur_group {
                 // Write the completed group sum.
-                let out_slot = Self::slot_in(cur_group, new_base, new_width);
+                let out_slot = (cur_group - new_base) as usize;
                 Self::set_in(&mut self.data, out_slot, new_width, group_acc);
                 group_acc = 0;
                 cur_group = new_idx;
             }
-            let in_slot = Self::slot_in(idx, old_base, old_width);
+            let in_slot = Self::old_slot(idx, old_base, old_width);
             let val = Self::get_in(&old_data, in_slot, old_width);
             // Cannot overflow: we already checked in phase 1.
             group_acc += val;
         }
         // Write the final group.
-        let out_slot = Self::slot_in(cur_group, new_base, new_width);
+        let out_slot = (cur_group - new_base) as usize;
         Self::set_in(&mut self.data, out_slot, new_width, group_acc);
 
         self.trim_bucket_range();
@@ -141,12 +141,20 @@ impl<const N: usize> Histogram<N> {
     //    data array, parameterized by base and width so they work
     //    on both the old (cloned) and new layouts.
 
-    /// Physical slot index for a logical bucket index, given a base
-    /// and width.
+    /// Physical slot for reading from the *old* layout.
+    ///
+    /// At U64 width, `index_base` may not equal `index_start` (the
+    /// ring buffer can wrap), so `rem_euclid` is needed.  At sub-U64
+    /// widths the live range is always contiguous (`index >= base`),
+    /// so a plain subtraction suffices.
     #[inline]
-    const fn slot_in(index: i32, base: i32, width: BucketWidth) -> usize {
-        let cap = width.capacity(N) as i32;
-        (index - base).rem_euclid(cap) as usize
+    const fn old_slot(index: i32, base: i32, width: BucketWidth) -> usize {
+        if matches!(width, BucketWidth::U64) {
+            (index - base).rem_euclid(N as i32) as usize
+        } else {
+            debug_assert!((index - base) >= 0);
+            (index - base) as usize
+        }
     }
 
     /// Reads a counter from a data array at a physical slot.
