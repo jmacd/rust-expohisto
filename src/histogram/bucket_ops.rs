@@ -20,11 +20,11 @@ impl<const N: usize> Histogram<N> {
     /// width for a normal downscale, or the next wider width when
     /// a counter overflow forces widening).
     ///
-    /// Clones the data array, determines the minimum output width
-    /// that can hold all group sums (at least `min_width`), then
-    /// scatter-adds each old counter into the corresponding output
-    /// slot.  `index_base` is freshly computed and word-aligned, so
-    /// no alignment fixups are needed.
+    /// Uses a speculative single-pass approach: clones the data array,
+    /// picks `min_width` as the output width, then scatter-adds in one
+    /// pass.  If any group sum exceeds `counter_max` for the chosen
+    /// width, the pass restarts at the next wider width.  In the common
+    /// case (sums fit), this halves the work vs. a two-pass scan.
     ///
     /// Returns `Err(Overflow)` if any group sum exceeds `u64::MAX`.
     pub(super) fn do_downscale(
@@ -48,77 +48,62 @@ impl<const N: usize> Histogram<N> {
         let new_start = old_start >> change;
         let new_end = old_end >> change;
 
-        // Phase 1: Determine output width.
-        //
-        // Walk the old live range, summing each group of adjacent
-        // counters that share the same shifted index.  Track the
-        // maximum group sum to find the minimum width that fits.
-        let mut max_sum: u64 = 0;
-        let mut cur_group = old_start >> change;
-        let mut group_acc: u64 = 0;
-
-        for idx in old_start..=old_end {
-            let new_idx = idx >> change;
-            if new_idx != cur_group {
-                if group_acc > max_sum {
-                    max_sum = group_acc;
-                }
-                group_acc = 0;
-                cur_group = new_idx;
-            }
-            let slot = Self::old_slot(idx, old_base, old_width);
-            let val = Self::get_in(&old_data, slot, old_width);
-            group_acc = group_acc.checked_add(val).ok_or(super::Overflow)?;
-        }
-        // Final group.
-        if group_acc > max_sum {
-            max_sum = group_acc;
-        }
-
-        // Find the minimum width that can hold max_sum, starting
-        // from the requested floor (also respecting min_bucket_width).
-        let mut new_width = if min_width > self.min_bucket_width {
+        let mut spec_width = if min_width > self.min_bucket_width {
             min_width
         } else {
             self.min_bucket_width
         };
-        while max_sum > new_width.counter_max() {
-            new_width = new_width.wider().ok_or(super::Overflow)?;
-        }
 
-        // Phase 2: Scatter-add into a fresh, aligned buffer.
-        let new_spw = new_width.slots_per_word() as i32;
-        let new_base = new_start & !(new_spw - 1);
+        // Speculative single-pass: scatter-add at spec_width, retry
+        // at the next wider width if any group sum overflows it.
+        loop {
+            let new_spw = spec_width.slots_per_word() as i32;
+            let new_base = new_start & !(new_spw - 1);
+            let counter_max = spec_width.counter_max();
 
-        self.data = [0u64; N];
-        self.bucket_width = new_width;
-        self.index_base = new_base;
-        self.index_start = new_start;
-        self.index_end = new_end;
+            self.data = [0u64; N];
+            self.bucket_width = spec_width;
+            self.index_base = new_base;
+            self.index_start = new_start;
+            self.index_end = new_end;
 
-        cur_group = old_start >> change;
-        group_acc = 0;
+            let mut cur_group = old_start >> change;
+            let mut group_acc: u64 = 0;
+            let mut retry = false;
 
-        for idx in old_start..=old_end {
-            let new_idx = idx >> change;
-            if new_idx != cur_group {
-                // Write the completed group sum.
-                let out_slot = (cur_group - new_base) as usize;
-                Self::set_in(&mut self.data, out_slot, new_width, group_acc);
-                group_acc = 0;
-                cur_group = new_idx;
+            for idx in old_start..=old_end {
+                let new_idx = idx >> change;
+                if new_idx != cur_group {
+                    if group_acc > counter_max {
+                        retry = true;
+                        break;
+                    }
+                    let out_slot = (cur_group - new_base) as usize;
+                    Self::set_in(&mut self.data, out_slot, spec_width, group_acc);
+                    group_acc = 0;
+                    cur_group = new_idx;
+                }
+                let in_slot = Self::old_slot(idx, old_base, old_width);
+                let val = Self::get_in(&old_data, in_slot, old_width);
+                group_acc = group_acc.checked_add(val).ok_or(super::Overflow)?;
             }
-            let in_slot = Self::old_slot(idx, old_base, old_width);
-            let val = Self::get_in(&old_data, in_slot, old_width);
-            // Cannot overflow: we already checked in phase 1.
-            group_acc += val;
-        }
-        // Write the final group.
-        let out_slot = (cur_group - new_base) as usize;
-        Self::set_in(&mut self.data, out_slot, new_width, group_acc);
 
-        self.trim_bucket_range();
-        Ok(())
+            if !retry && group_acc > counter_max {
+                retry = true;
+            }
+
+            if retry {
+                spec_width = spec_width.wider().ok_or(super::Overflow)?;
+                continue;
+            }
+
+            // Write the final group and finish.
+            let out_slot = (cur_group - new_base) as usize;
+            Self::set_in(&mut self.data, out_slot, spec_width, group_acc);
+
+            self.trim_bucket_range();
+            return Ok(());
+        }
     }
 
     /// Downscales by 1 step with forced widening.
