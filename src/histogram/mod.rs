@@ -404,15 +404,43 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Trims leading and trailing zero buckets from the index range.
+    ///
+    /// Uses word-level checks to skip `slots_per_word` counters at a
+    /// time when the entire word is zero, falling back to per-counter
+    /// checks only at partially-occupied word boundaries.
     fn trim_bucket_range(&mut self) {
+        let spw = self.bucket_width.slots_per_word() as i32;
+
+        // Trim trailing zeros.
         while self.index_end > self.index_start {
-            if self.bucket_get(self.slot_for(self.index_end)) != 0 {
+            let slot = self.slot_for(self.index_end);
+            let wi = slot / spw as usize;
+
+            // If this is the last slot in its word and the word is
+            // all zero, skip the whole word.
+            if slot % spw as usize == (spw as usize - 1) && self.data[wi] == 0 {
+                // Don't go below index_start.
+                let skip = spw.min(self.index_end - self.index_start);
+                self.index_end -= skip;
+                continue;
+            }
+            if self.bucket_get(slot) != 0 {
                 break;
             }
             self.index_end -= 1;
         }
+
+        // Trim leading zeros.
         while self.index_start < self.index_end {
-            if self.bucket_get(self.slot_for(self.index_start)) != 0 {
+            let slot = self.slot_for(self.index_start);
+            let wi = slot / spw as usize;
+
+            if slot % spw as usize == 0 && self.data[wi] == 0 {
+                let skip = spw.min(self.index_end - self.index_start);
+                self.index_start += skip;
+                continue;
+            }
+            if self.bucket_get(slot) != 0 {
                 break;
             }
             self.index_start += 1;
@@ -445,6 +473,50 @@ impl<const N: usize> Histogram<N> {
         let (wi, shift, mask) = self.slot_addr(slot);
         let word = &mut self.bucket_data_mut()[wi];
         *word = (*word & !(mask << shift)) | ((value & mask) << shift);
+    }
+
+    /// Zeroes all counter slots in `[from_index, to_index)`.
+    ///
+    /// Operates at word granularity where possible: partial words at the
+    /// edges are cleared per-slot, but interior words are zeroed whole.
+    fn zero_slots(&mut self, from_index: i32, to_index: i32) {
+        if from_index >= to_index {
+            return;
+        }
+        let spw = self.bucket_width.slots_per_word();
+        let from_slot = self.slot_for(from_index);
+        let to_slot = self.slot_for(to_index - 1) + 1;
+
+        let first_word = from_slot / spw;
+        let last_word = (to_slot - 1) / spw;
+
+        if first_word == last_word {
+            // All slots in one word — clear per-slot.
+            for slot in from_slot..to_slot {
+                self.bucket_set(slot, 0);
+            }
+            return;
+        }
+
+        // Partial first word.
+        if from_slot % spw != 0 {
+            for slot in from_slot..(first_word + 1) * spw {
+                self.bucket_set(slot, 0);
+            }
+            // Interior whole words.
+            self.data[first_word + 1..last_word].fill(0);
+        } else {
+            self.data[first_word..last_word].fill(0);
+        }
+
+        // Partial last word.
+        if to_slot % spw != 0 {
+            for slot in last_word * spw..to_slot {
+                self.bucket_set(slot, 0);
+            }
+        } else {
+            self.data[last_word] = 0;
+        }
     }
 
     /// Attempts to add `incr` to a physical slot. Returns false on overflow.
@@ -811,9 +883,7 @@ impl<const N: usize> Histogram<N> {
                     high: self.index_end,
                 });
             }
-            for idx in index..self.index_start {
-                self.bucket_set(self.slot_for(idx), 0);
-            }
+            self.zero_slots(index, self.index_start);
             self.index_start = index;
         } else if index > self.index_end {
             if self.swar_would_wrap(index) {
@@ -828,9 +898,7 @@ impl<const N: usize> Histogram<N> {
                     high: index,
                 });
             }
-            for idx in (self.index_end + 1)..=index {
-                self.bucket_set(self.slot_for(idx), 0);
-            }
+            self.zero_slots(self.index_end + 1, index + 1);
             self.index_end = index;
         }
 
