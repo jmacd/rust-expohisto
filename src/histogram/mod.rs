@@ -759,15 +759,23 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
+            if self.current.width.is_literal() && incr != 1 {
+                // Literal mode only stores individual observations.
+                // Promote to bucket mode before recording a weighted value.
+                self.promote()?;
+            }
             if self.current.width.is_literal() {
-                self.update_literal(value, incr)?;
+                self.update_literal(value)?;
             } else {
                 self.update_buckets(value, incr)?;
             }
+            // Min/max reflect the positive bucket range only.
+            self.stats.min = self.stats.min.min(value);
+            self.stats.max = self.stats.max.max(value);
         }
 
-        let new_sum = self.sum() + value * incr as f64;
-        self.commit_stats(new_sum, new_count, value, value);
+        self.stats.sum += value * incr as f64;
+        self.stats.count = new_count;
         Ok(())
     }
 

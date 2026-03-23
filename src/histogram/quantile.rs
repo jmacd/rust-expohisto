@@ -97,10 +97,8 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
 
         // Boundary quantiles use exact stats.
         if q <= 0.0 {
-            return Some(QuantileValue {
-                quantile: q,
-                value: self.min,
-            });
+            let value = if self.zero_count > 0 { 0.0 } else { self.min };
+            return Some(QuantileValue { quantile: q, value });
         }
         if q >= 1.0 {
             return Some(QuantileValue {
