@@ -66,7 +66,7 @@ Four examples are included in the `examples/` directory:
 |---------|------------|-------------|
 | `basic` | `cargo run --example basic` | Record latencies, view stats and iterate buckets |
 | `merge` | `cargo run --example merge` | Same-size and cross-size histogram merging |
-| `sizing` | `cargo run --example sizing` | Interactive capacity explorer for choosing `N` and `min_bucket_width` |
+| `sizing` | `cargo run --example sizing` | Interactive capacity explorer for choosing `N` and `min_width` |
 | `quick_start_test` | `cargo run --example quick_start_test` | Minimal 3-value example |
 
 ## References

@@ -16,18 +16,18 @@
 //!    including the benefit of starting wider (skip sub-byte entirely).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{BucketWidth, Histogram};
+use otel_expohisto::{Width, Histogram};
 
 mod common;
 
 use common::unique_values;
 
-const WIDTHS: &[(&str, BucketWidth)] = &[
-    ("B1", BucketWidth::B1),
-    ("B2", BucketWidth::B2),
-    ("B4", BucketWidth::B4),
-    ("U8", BucketWidth::U8),
-    ("U16", BucketWidth::U16),
+const WIDTHS: &[(&str, Width)] = &[
+    ("B1", Width::B1),
+    ("B2", Width::B2),
+    ("B4", Width::B4),
+    ("U8", Width::U8),
+    ("U16", Width::U16),
 ];
 
 fn bench_sub_byte(c: &mut Criterion) {
@@ -50,7 +50,7 @@ fn bench_sub_byte(c: &mut Criterion) {
                     let mut h: Histogram<16> = Histogram::new()
                         .with_scale(scale)
                         .unwrap()
-                        .with_min_bucket_width(min_w);
+                        .with_min_width(min_w);
                     for &v in &values {
                         h.update(black_box(v)).unwrap();
                     }
@@ -80,7 +80,7 @@ fn bench_sub_byte(c: &mut Criterion) {
                         let mut h: Histogram<16> = Histogram::new()
                             .with_scale(scale)
                             .unwrap()
-                            .with_min_bucket_width(min_w);
+                            .with_min_width(min_w);
                         for &v in &values {
                             h.record(black_box(v), reps).unwrap();
                         }
@@ -105,7 +105,7 @@ fn bench_sub_byte(c: &mut Criterion) {
                     let mut h: Histogram<16> = Histogram::new()
                         .with_scale(scale)
                         .unwrap()
-                        .with_min_bucket_width(min_w);
+                        .with_min_width(min_w);
                     for _cycle in 0..10 {
                         for &v in &values {
                             h.update(black_box(v)).unwrap();
@@ -113,7 +113,7 @@ fn bench_sub_byte(c: &mut Criterion) {
                         h = Histogram::new()
                             .with_scale(scale)
                             .unwrap()
-                            .with_min_bucket_width(min_w);
+                            .with_min_width(min_w);
                     }
                     black_box(&h);
                 })

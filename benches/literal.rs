@@ -26,7 +26,7 @@
 //!    literal-start vs bucket-start.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{BucketWidth, Histogram};
+use otel_expohisto::{Width, Histogram};
 
 mod common;
 
@@ -72,7 +72,7 @@ fn bench_literal(c: &mut Criterion) {
 
             group.bench_function(BenchmarkId::new("bucket", count), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                    let mut h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
                     for &val in v {
                         h.update(black_box(val)).unwrap();
                     }
@@ -128,7 +128,7 @@ fn bench_literal(c: &mut Criterion) {
         // Compare: bucket mode inserting 9 values (no promotion overhead).
         group.bench_function("bucket_narrow_H8", |b| {
             b.iter(|| {
-                let mut h: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                let mut h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
                 for &v in &narrow[..9] {
                     h.update(black_box(v)).unwrap();
                 }
@@ -138,7 +138,7 @@ fn bench_literal(c: &mut Criterion) {
 
         group.bench_function("bucket_wide_H8", |b| {
             b.iter(|| {
-                let mut h: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                let mut h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
                 for &v in &wide[..9] {
                     h.update(black_box(v)).unwrap();
                 }
@@ -206,7 +206,7 @@ fn bench_literal(c: &mut Criterion) {
 
                 group.bench_function(BenchmarkId::new("bucket_H8", &tag), |b| {
                     b.iter(|| {
-                        let mut h: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                        let mut h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
                         for &v in vals.iter() {
                             let _ = h.update(black_box(v));
                         }
@@ -226,7 +226,7 @@ fn bench_literal(c: &mut Criterion) {
 
                 group.bench_function(BenchmarkId::new("bucket_H16", &tag), |b| {
                     b.iter(|| {
-                        let mut h: Histogram<16> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                        let mut h: Histogram<16> = Histogram::new().with_min_width(Width::B1);
                         for &v in vals.iter() {
                             let _ = h.update(black_box(v));
                         }
@@ -257,7 +257,7 @@ fn bench_literal(c: &mut Criterion) {
         }
 
         // Bucket mode: same 8 values in bucket counters.
-        let mut h_bkt: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+        let mut h_bkt: Histogram<8> = Histogram::new().with_min_width(Width::B1);
         for &v in &values {
             h_bkt.update(v).unwrap();
         }
@@ -315,7 +315,7 @@ fn bench_literal(c: &mut Criterion) {
         let src_values = unique_values(0, 8);
 
         // Build a bucket-mode destination template.
-        let mut dst_template: Histogram<16> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+        let mut dst_template: Histogram<16> = Histogram::new().with_min_width(Width::B1);
         for &v in &dst_values {
             dst_template.update(v).unwrap();
         }
@@ -327,7 +327,7 @@ fn bench_literal(c: &mut Criterion) {
         }
 
         // Bucket source (same values).
-        let mut src_bkt: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+        let mut src_bkt: Histogram<8> = Histogram::new().with_min_width(Width::B1);
         for &v in &src_values {
             src_bkt.update(v).unwrap();
         }
@@ -394,12 +394,12 @@ fn bench_literal(c: &mut Criterion) {
 
         group.bench_function("bucket_5v_x20", |b| {
             b.iter(|| {
-                let mut h: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                let mut h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
                 for _cycle in 0..20 {
                     for &v in &values {
                         h.update(black_box(v)).unwrap();
                     }
-                    h = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                    h = Histogram::new().with_min_width(Width::B1);
                 }
                 black_box(&h);
             })
@@ -423,12 +423,12 @@ fn bench_literal(c: &mut Criterion) {
 
         group.bench_function("bucket_10v_x20", |b| {
             b.iter(|| {
-                let mut h: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                let mut h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
                 for _cycle in 0..20 {
                     for &v in &more_values {
                         h.update(black_box(v)).unwrap();
                     }
-                    h = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+                    h = Histogram::new().with_min_width(Width::B1);
                 }
                 black_box(&h);
             })

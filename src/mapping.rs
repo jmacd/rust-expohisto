@@ -53,10 +53,11 @@ pub const fn max_scale() -> i32 {
 }
 
 /// Converts values to bucket indices at a given scale.
-#[derive(Debug, Clone, Copy)]
-pub struct Mapping {
-    scale: i32,
-}
+///
+/// Scale fits in −10..=20 and is stored as `i8` for compactness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Mapping(i8);
 
 impl Mapping {
     /// Creates a new mapping for the given scale.
@@ -68,13 +69,13 @@ impl Mapping {
             return Err(MappingError::InvalidScale);
         }
 
-        Ok(Self { scale })
+        Ok(Self(scale as i8))
     }
 
-    /// Returns the current scale.
+    /// Returns the current scale as `i32`.
     #[inline]
     pub const fn scale(&self) -> i32 {
-        self.scale
+        self.0 as i32
     }
 
     /// Maps a positive f64 value to a bucket index.
@@ -83,11 +84,11 @@ impl Mapping {
     /// bucket as `MIN_VALUE` at every scale.
     #[inline]
     pub fn map_to_index(&self, value: f64) -> i32 {
-        if self.scale <= 0 {
-            crate::exponent::map_to_index(value, self.scale)
+        let scale = self.scale();
+        if scale <= 0 {
+            crate::exponent::map_to_index(value, scale)
         } else if value < MIN_VALUE {
-            // All subnormals land in the MIN_VALUE bucket (2^-1022).
-            (MIN_NORMAL_EXPONENT << (self.scale)) - 1
+            (MIN_NORMAL_EXPONENT << scale) - 1
         } else {
             self.map_to_index_positive_scale(value)
         }
@@ -96,7 +97,7 @@ impl Mapping {
     /// Mapping for positive scales — delegates to the compiled lookup table.
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
-        crate::lookup::map_to_index(value, self.scale)
+        crate::lookup::map_to_index(value, self.scale())
     }
 }
 

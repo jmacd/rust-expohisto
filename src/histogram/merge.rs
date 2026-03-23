@@ -17,11 +17,11 @@ impl<const N: usize> Histogram<N> {
     /// Returns [`Overflow`] if the combined total count would exceed
     /// `u64::MAX`. See [`record()`](Self::record) for details.
     pub fn merge_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
-        if other.bucket_width.is_literal() {
+        if other.current.width.is_literal() {
             return self.merge_literal_from(other);
         }
         if !other.buckets_empty() && self.buckets_empty() {
-            self.bucket_width = self.bucket_width.max(other.bucket_width);
+            self.current.width = self.current.width.max(other.current.width);
         }
         self.merge_as_raw(other)
     }
@@ -37,7 +37,7 @@ impl<const N: usize> Histogram<N> {
                 max: other.max(),
             },
             &BucketDescriptor {
-                scale: other.mapping.scale(),
+                scale: other.current.mapping.scale(),
                 offset: other.index_start,
                 len: other.range_len(),
             },
@@ -82,13 +82,13 @@ impl<const N: usize> Histogram<N> {
         let new_sum = self.sum() + stats.sum;
 
         if buckets.len > 0 {
-            if self.bucket_width.is_literal() {
+            if self.current.width.is_literal() {
                 self.promote()?;
             }
 
             let other_end = buckets.offset + buckets.len as i32 - 1;
             let cap = self.bucket_capacity() as i32;
-            let min_scale = self.mapping.scale().min(buckets.scale);
+            let min_scale = self.current.mapping.scale().min(buckets.scale);
 
             let self_hl = self.index_range_at_scale(min_scale);
             let other_hl = {
@@ -109,7 +109,7 @@ impl<const N: usize> Histogram<N> {
                     continue;
                 }
                 self.retry_increment(count, |h| {
-                    let shift = buckets.scale - h.mapping.scale();
+                    let shift = buckets.scale - h.current.mapping.scale();
                     (buckets.offset + i as i32) >> shift
                 })?;
             }
@@ -121,7 +121,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Merges literal values from another histogram into this one.
     fn merge_literal_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
-        debug_assert!(other.bucket_width.is_literal());
+        debug_assert!(other.current.width.is_literal());
         if other.count() == 0 {
             return Ok(());
         }
@@ -134,7 +134,7 @@ impl<const N: usize> Histogram<N> {
     ) -> Result<(), Overflow> {
         let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
         let new_sum = self.sum() + other.sum();
-        if self.bucket_width.is_literal() {
+        if self.current.width.is_literal() {
             self.promote()?;
         }
         for &bits in other.literal_values() {
@@ -148,7 +148,7 @@ impl<const N: usize> Histogram<N> {
         if self.buckets_empty() {
             return HighLow::empty();
         }
-        let shift = self.mapping.scale() - target_scale;
+        let shift = self.current.mapping.scale() - target_scale;
         HighLow {
             low: self.index_start >> shift,
             high: self.index_end >> shift,

@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run --example sizing`
 
-use otel_expohisto::{BucketWidth, Histogram};
+use otel_expohisto::{Width, Histogram};
 
 fn show_capacity<const N: usize>(label: &str) {
     let bucket_words = N;
@@ -96,13 +96,13 @@ fn main() {
     println!("\n--- Minimum Bucket Width ---\n");
 
     // Skip sub-byte overhead by starting at U8 (fewer buckets, faster ops)
-    let mut fast: Histogram<16> = Histogram::new().with_min_bucket_width(BucketWidth::U8);
+    let mut fast: Histogram<16> = Histogram::new().with_min_width(Width::U8);
     for &v in &values {
         fast.update(v).unwrap();
     }
 
     println!(
-        "with_min_bucket_width(U8): {} buckets at {:?}",
+        "with_min_width(U8): {} buckets at {:?}",
         fast.view().positive().capacity(),
         fast.view().positive().width()
     );

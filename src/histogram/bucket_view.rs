@@ -3,7 +3,7 @@
 
 //! Read-only view of bucket data in a histogram.
 
-use super::bucket_width::BucketWidth;
+use super::width::Width;
 use super::Histogram;
 
 /// Read-only view of bucket data in a histogram.
@@ -31,8 +31,8 @@ impl<const N: usize> BucketView<'_, N> {
 
     /// Returns the current counter width.
     #[inline]
-    pub fn width(&self) -> BucketWidth {
-        self.hist.bucket_width
+    pub fn width(&self) -> Width {
+        self.hist.current.width
     }
 
     /// Returns true if no buckets are in use.

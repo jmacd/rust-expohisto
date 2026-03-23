@@ -213,7 +213,7 @@ otel-expohisto/
 │   │   ├── mod.rs        #   Histogram<N>: update, merge, downscale, widen
 │   │   ├── view.rs       #   HistogramView: read-only promoted view
 │   │   ├── bucket_view.rs#   BucketView + BucketsIter: bucket access
-│   │   ├── bucket_width.rs#  BucketWidth enum (B1..U64)
+│   │   ├── width.rs#  Width enum (B0..U64)
 │   │   ├── bucket_ops.rs #   Sub-byte get/set/increment
 │   │   ├── swar.rs       #   SWAR pairwise merge, shift, narrow-compact
 │   │   ├── quantile.rs   #   QuantileIter: CDF-walk quantile estimation

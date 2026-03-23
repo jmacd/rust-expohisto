@@ -23,8 +23,8 @@ pub mod logarithm;
 pub mod lookup;
 
 pub use histogram::{
-    BucketDescriptor, BucketView, BucketWidth, BucketsIter, Histogram, HistogramView, Overflow,
-    Stats,
+    BucketDescriptor, BucketView, Width, BucketsIter, Histogram, HistogramView, Overflow,
+    Settings, Stats,
 };
 #[cfg(feature = "boundary")]
 pub use histogram::{QuantileIter, QuantileValue};

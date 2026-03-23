@@ -9,7 +9,7 @@
 //! This linear read→fold→write pattern avoids in-place alignment
 //! fixups and is SIMD-friendly.
 
-use super::bucket_width::BucketWidth;
+use super::width::Width;
 use super::Histogram;
 
 /// Captured old-layout state for a downscale operation.
@@ -19,7 +19,7 @@ use super::Histogram;
 struct DownscaleCtx<'a, const N: usize> {
     change: i32,
     old_data: &'a [u64; N],
-    old_width: BucketWidth,
+    old_width: Width,
     old_base: i32,
     old_start: i32,
     old_end: i32,
@@ -67,7 +67,7 @@ impl<const N: usize> Histogram<N> {
     pub(super) fn do_downscale(
         &mut self,
         change: i32,
-        min_width: BucketWidth,
+        min_width: Width,
     ) -> Result<(), super::Overflow> {
         debug_assert!(change >= 1);
 
@@ -80,7 +80,7 @@ impl<const N: usize> Histogram<N> {
         let ctx = DownscaleCtx {
             change,
             old_data: &old_data,
-            old_width: self.bucket_width,
+            old_width: self.current.width,
             old_base: self.index_base,
             old_start: self.index_start,
             old_end: self.index_end,
@@ -88,10 +88,10 @@ impl<const N: usize> Histogram<N> {
             new_end: self.index_end >> change,
         };
 
-        let spec_width = if min_width > self.min_bucket_width {
+        let spec_width = if min_width > self.initial.width {
             min_width
         } else {
-            self.min_bucket_width
+            self.initial.width
         };
 
         if self.count() <= spec_width.counter_max() {
@@ -105,7 +105,7 @@ impl<const N: usize> Histogram<N> {
     /// Safe path: `count ≤ counter_max`, so no group can overflow.
     /// This always covers the U64 case (count is u64, counter_max
     /// is u64::MAX).
-    fn downscale_safe(&mut self, ctx: &DownscaleCtx<'_, N>, w: BucketWidth) {
+    fn downscale_safe(&mut self, ctx: &DownscaleCtx<'_, N>, w: Width) {
         let base = w.word_start(ctx.new_start);
         self.init_output(w, base, ctx.new_start, ctx.new_end);
 
@@ -122,7 +122,7 @@ impl<const N: usize> Histogram<N> {
     fn downscale_speculative(
         &mut self,
         ctx: &DownscaleCtx<'_, N>,
-        w: BucketWidth,
+        w: Width,
     ) -> Result<(), super::Overflow> {
         let base = w.word_start(ctx.new_start);
         let counter_max = w.counter_max();
@@ -145,7 +145,7 @@ impl<const N: usize> Histogram<N> {
     fn downscale_repair(
         &mut self,
         ctx: &DownscaleCtx<'_, N>,
-        spec_width: BucketWidth,
+        spec_width: Width,
         overflow_group: i32,
         overflow_acc: u64,
     ) -> Result<(), super::Overflow> {
@@ -160,8 +160,8 @@ impl<const N: usize> Histogram<N> {
         // max_acc > spec_width.counter_max() is guaranteed (that's
         // why we're here).  Since counter_max = (1 << bits) - 1 and
         // bits is a power of two, max_acc ≥ 1 << bits, which always
-        // maps to a strictly wider BucketWidth via from_max_value.
-        let tw = BucketWidth::from_max_value(max_acc).ok_or(super::Overflow)?;
+        // maps to a strictly wider Width via from_max_value.
+        let tw = Width::from_max_value(max_acc).ok_or(super::Overflow)?;
         debug_assert!(tw > spec_width);
 
         // Phase 3: repair prefix — re-read groups already written
@@ -186,9 +186,9 @@ impl<const N: usize> Histogram<N> {
 
     /// Initializes output state for a downscale pass.
     #[inline]
-    fn init_output(&mut self, width: BucketWidth, base: i32, start: i32, end: i32) {
+    fn init_output(&mut self, width: Width, base: i32, start: i32, end: i32) {
         self.data = [0u64; N];
-        self.bucket_width = width;
+        self.current.width = width;
         self.index_base = base;
         self.index_start = start;
         self.index_end = end;
@@ -199,10 +199,10 @@ impl<const N: usize> Histogram<N> {
     /// Used when a counter overflows: the width must increase by at
     /// least one level.
     pub(super) fn widen_by_one(&mut self) -> Result<(), super::Overflow> {
-        let min = self.bucket_width.wider().ok_or(super::Overflow)?;
+        let min = self.current.width.wider().ok_or(super::Overflow)?;
 
         if self.range_is_empty() {
-            self.bucket_width = min;
+            self.current.width = min;
             self.shift_indices(1);
             return Ok(());
         }
@@ -221,8 +221,8 @@ impl<const N: usize> Histogram<N> {
     /// widths the live range is always contiguous (`index >= base`),
     /// so a plain subtraction suffices.
     #[inline]
-    const fn old_slot(index: i32, base: i32, width: BucketWidth) -> usize {
-        if matches!(width, BucketWidth::U64) {
+    const fn old_slot(index: i32, base: i32, width: Width) -> usize {
+        if matches!(width, Width::U64) {
             (index - base).rem_euclid(N as i32) as usize
         } else {
             debug_assert!((index - base) >= 0);
@@ -232,7 +232,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Reads a counter from a data array at a physical slot.
     #[inline]
-    const fn get_in(data: &[u64; N], slot: usize, width: BucketWidth) -> u64 {
+    const fn get_in(data: &[u64; N], slot: usize, width: Width) -> u64 {
         let spw = width.slots_per_word();
         let bits = width.bits();
         let wi = slot / spw;
@@ -243,7 +243,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Writes a counter into a data array at a physical slot.
     #[inline]
-    fn set_in(data: &mut [u64; N], slot: usize, width: BucketWidth, value: u64) {
+    fn set_in(data: &mut [u64; N], slot: usize, width: Width, value: u64) {
         let spw = width.slots_per_word();
         let bits = width.bits();
         let wi = slot / spw;

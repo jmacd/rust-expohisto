@@ -5,7 +5,7 @@
 //! invariants after every operation.
 //!
 //! This targets risks that single-operation oracles miss:
-//!   - reset → reuse cycles (stale index_base, wrong bucket_width)
+//!   - reset → reuse cycles (stale index_base, wrong width)
 //!   - merge after partial inserts with different bucket widths
 //!   - swap correctness (does shadow state track?)
 //!   - cross-size merge (Histogram<8> → Histogram<16> via merge_from)
@@ -14,7 +14,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::{BucketWidth, Histogram};
+use otel_expohisto::{Width, Histogram};
 
 #[path = "verify.rs"]
 mod verify;
@@ -181,16 +181,16 @@ fuzz_target!(|data: &[u8]| {
     let lit_ctl: u8 = u.arbitrary().unwrap_or(0xFF);
 
     // Pool of histograms — small N to maximize pressure on downscale/widen.
-    let lit_width = |bit: u8| -> BucketWidth {
-        if lit_ctl & bit != 0 { BucketWidth::B0 } else { BucketWidth::B1 }
+    let lit_width = |bit: u8| -> Width {
+        if lit_ctl & bit != 0 { Width::B0 } else { Width::B1 }
     };
     let mut pool: [Histogram<8>; POOL] = core::array::from_fn(|i| {
-        Histogram::new().with_min_bucket_width(lit_width(1 << i))
+        Histogram::new().with_min_width(lit_width(1 << i))
     });
     let mut shadows: [Shadow; POOL] = core::array::from_fn(|_| Shadow::default());
 
     // Also keep one Histogram<16> for cross-size merges.
-    let mut big: Histogram<16> = Histogram::new().with_min_bucket_width(lit_width(0x80));
+    let mut big: Histogram<16> = Histogram::new().with_min_width(lit_width(0x80));
     let mut big_shadow: Shadow = Shadow::default();
 
     // Cap operations to keep memory bounded.
@@ -243,7 +243,7 @@ fuzz_target!(|data: &[u8]| {
 
             Op::Clear { idx } => {
                 let i = idx as usize % POOL;
-                pool[i] = Histogram::new().with_min_bucket_width(lit_width(1 << i));
+                pool[i] = Histogram::new().with_min_width(lit_width(1 << i));
                 shadows[i].clear();
             }
 

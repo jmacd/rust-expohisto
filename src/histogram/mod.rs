@@ -18,7 +18,7 @@ use core::fmt;
 use crate::mapping::{Mapping, MappingError, max_scale};
 
 mod bucket_ops;
-pub mod bucket_width;
+pub mod width;
 mod literal;
 mod merge;
 mod swar;
@@ -34,7 +34,49 @@ pub use quantile::{QuantileIter, QuantileValue};
 mod view;
 pub use view::HistogramView;
 
-pub use bucket_width::BucketWidth;
+pub use width::Width;
+
+// ---------------------------------------------------------------------------
+// Settings — compact (scale, width) pair
+// ---------------------------------------------------------------------------
+
+/// Compact histogram configuration: scale + counter width in 2 bytes.
+///
+/// Used as both the "initial" settings (configured at construction time,
+/// restored on reset) and the "current" settings (mutated during
+/// downscale/widen operations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct Settings {
+    mapping: Mapping,
+    width: Width,
+}
+
+impl Settings {
+    /// Creates settings from a mapping and bucket width.
+    #[inline]
+    pub const fn new(mapping: Mapping, width: Width) -> Self {
+        Self { mapping, width }
+    }
+
+    /// Returns the mapping (scale).
+    #[inline]
+    pub const fn mapping(&self) -> Mapping {
+        self.mapping
+    }
+
+    /// Returns the scale.
+    #[inline]
+    pub const fn scale(&self) -> i32 {
+        self.mapping.scale()
+    }
+
+    /// Returns the bucket width.
+    #[inline]
+    pub const fn width(&self) -> Width {
+        self.width
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -104,8 +146,6 @@ pub struct BucketDescriptor {
     /// Number of contiguous buckets.
     pub len: u32,
 }
-
-// (BucketWidth is in bucket_width.rs)
 
 // ---------------------------------------------------------------------------
 // High-low range helpers
@@ -189,13 +229,13 @@ const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 ///
 /// # Literal Mode (`B0`)
 ///
-/// New histograms start in **literal mode** (`bucket_width == B0`),
+/// New histograms start in **literal mode** (`width == B0`),
 /// where the data pool stores raw `f64` bit patterns instead of bucket
 /// counters. This holds up to `N` values (e.g. 8 for `Histogram<8>`).
 /// When the next non-zero observation would exceed capacity, the
 /// histogram **promotes** to bucket mode: all stored literals are
 /// replayed through `update_buckets` at the configured max scale.
-/// Literal mode can be disabled via `with_min_bucket_width(BucketWidth::B1)`.
+/// Literal mode can be disabled via `with_min_width(Width::B1)`.
 ///
 /// Read operations are accessed through [`view()`](Self::view),
 /// which promotes from literal mode if needed and returns a
@@ -210,10 +250,11 @@ const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 /// At minimum, `N` should be 8 (64 bytes of pool), giving 8 bucket words
 /// (128 B4 buckets or 8 U64 buckets).
 pub struct Histogram<const N: usize> {
-    // -- Fixed metadata (never relocates) --
-    mapping: Mapping,
-    min_bucket_width: BucketWidth,
-    bucket_width: BucketWidth,
+    // -- Settings: initial (restored on reset) and current --
+    initial: Settings,
+    current: Settings,
+
+    // -- Bucket index state --
     index_base: i32,
     index_start: i32,
     index_end: i32,
@@ -228,9 +269,8 @@ pub struct Histogram<const N: usize> {
 impl<const N: usize> Clone for Histogram<N> {
     fn clone(&self) -> Self {
         Self {
-            mapping: self.mapping,
-            min_bucket_width: self.min_bucket_width,
-            bucket_width: self.bucket_width,
+            initial: self.initial,
+            current: self.current,
             index_base: self.index_base,
             index_start: self.index_start,
             index_end: self.index_end,
@@ -243,15 +283,15 @@ impl<const N: usize> Clone for Histogram<N> {
 impl<const N: usize> fmt::Debug for Histogram<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = f.debug_struct("Histogram");
-        s.field("bucket_width", &self.bucket_width)
+        s.field("width", &self.current.width)
             .field("count", &self.count())
             .field("sum", &self.sum())
             .field("min", &self.min())
             .field("max", &self.max());
-        if self.bucket_width.is_literal() {
+        if self.current.width.is_literal() {
             s.field("literal_count", &self.literal_count());
         } else {
-            s.field("scale", &self.mapping.scale());
+            s.field("scale", &self.current.mapping.scale());
             s.field("bucket_len", &self.range_len());
         }
         s.finish()
@@ -339,7 +379,7 @@ impl<const N: usize> Histogram<N> {
     /// At U64 the ring buffer handles wrapping, so this always returns false.
     #[inline]
     const fn swar_would_wrap(&self, index: i32) -> bool {
-        !matches!(self.bucket_width, BucketWidth::U64)
+        !matches!(self.current.width, Width::U64)
             && (index < self.index_base || index >= self.index_base + self.bucket_capacity() as i32)
     }
 }
@@ -366,10 +406,10 @@ impl<const N: usize> Histogram<N> {
     /// In literal mode (`B0`), returns `N` (the number of raw f64 slots).
     #[inline]
     pub const fn bucket_capacity(&self) -> usize {
-        if self.bucket_width.is_literal() {
+        if self.current.width.is_literal() {
             N
         } else {
-            self.bucket_width.capacity(N)
+            self.current.width.capacity(N)
         }
     }
 
@@ -383,7 +423,7 @@ impl<const N: usize> Histogram<N> {
     /// overflow.
     #[inline]
     fn ensure_promoted(&mut self) {
-        if self.bucket_width.is_literal() {
+        if self.current.width.is_literal() {
             let _ = self.promote();
         }
     }
@@ -391,7 +431,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns true if no buckets have been used.
     #[inline]
     pub const fn buckets_empty(&self) -> bool {
-        if self.bucket_width.is_literal() {
+        if self.current.width.is_literal() {
             return self.literal_count() == 0;
         }
         self.range_is_empty()
@@ -410,12 +450,12 @@ impl<const N: usize> Histogram<N> {
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
     #[inline]
     const fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
-        let bits = self.bucket_width.bits();
+        let bits = self.current.width.bits();
         let spw = 64 / bits;
         (
             slot / spw,
             (slot % spw) * bits,
-            self.bucket_width.counter_max(),
+            self.current.width.counter_max(),
         )
     }
 
@@ -447,7 +487,7 @@ impl<const N: usize> Histogram<N> {
         if from_index >= to_index {
             return;
         }
-        let spw = self.bucket_width.slots_per_word();
+        let spw = self.current.width.slots_per_word();
         let from_slot = self.slot_for(from_index);
         let to_slot = self.slot_for(to_index - 1) + 1;
 
@@ -488,7 +528,7 @@ impl<const N: usize> Histogram<N> {
     fn bucket_try_increment(&mut self, slot: usize, incr: u64) -> bool {
         let val = self.bucket_get(slot);
         let new_val = match val.checked_add(incr) {
-            Some(v) if v <= self.bucket_width.counter_max() => v,
+            Some(v) if v <= self.current.width.counter_max() => v,
             _ => return false,
         };
         self.bucket_set(slot, new_val);
@@ -510,10 +550,10 @@ impl<const N: usize> Histogram<N> {
     // Shared constructor — all public constructors delegate here.
     fn new_at_scale(scale: i32) -> Result<Self, MappingError> {
         const { assert!(N >= 1, "N must be >= 1 for at least 1 bucket word") };
+        let settings = Settings::new(Mapping::new(scale)?, Width::B0);
         Ok(Self {
-            mapping: Mapping::new(scale)?,
-            min_bucket_width: BucketWidth::B0,
-            bucket_width: BucketWidth::B0,
+            initial: settings,
+            current: settings,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -542,7 +582,9 @@ impl<const N: usize> Histogram<N> {
     /// the supported range [`MIN_SCALE`](crate::MIN_SCALE)..=[`max_scale()`](crate::max_scale).
     #[inline]
     pub fn with_scale(mut self, scale: i32) -> Result<Self, MappingError> {
-        self.mapping = Mapping::new(scale)?;
+        let mapping = Mapping::new(scale)?;
+        self.initial.mapping = mapping;
+        self.current.mapping = mapping;
         Ok(self)
     }
 
@@ -553,9 +595,9 @@ impl<const N: usize> Histogram<N> {
     /// for immediate bucket indexing.
     #[inline]
     #[must_use]
-    pub fn with_min_bucket_width(mut self, width: BucketWidth) -> Self {
-        self.min_bucket_width = width;
-        self.bucket_width = width;
+    pub fn with_min_width(mut self, width: Width) -> Self {
+        self.initial.width = width;
+        self.current.width = width;
         self
     }
 
@@ -596,7 +638,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns the number of literal values stored (0 if not in literal mode).
     #[inline]
     const fn literal_count(&self) -> usize {
-        if self.bucket_width.is_literal() {
+        if self.current.width.is_literal() {
             self.index_end as usize
         } else {
             0
@@ -618,18 +660,18 @@ impl<const N: usize> Histogram<N> {
         head
     }
 
-    /// Returns the current bucket counter width.
+    /// Returns the current counter width.
     #[inline]
-    pub const fn bucket_width(&self) -> BucketWidth {
-        self.bucket_width
+    pub const fn width(&self) -> Width {
+        self.current.width
     }
 
     /// Resets the bucket-related fields to empty state. Does not touch
-    /// stats or mapping. Sets bucket_width to at least B1 (never B0),
-    /// since this prepares for bucket-mode operation.
+    /// stats or mapping. Sets width to at least B1 (never B0), since
+    /// this prepares for bucket-mode operation.
     fn reset_bucket_state(&mut self) {
         self.data.fill(0);
-        self.bucket_width = self.min_bucket_width.max(BucketWidth::B1);
+        self.current.width = self.initial.width.max(Width::B1);
         self.index_start = 0;
         self.index_end = 0;
         self.index_base = 0;
@@ -637,9 +679,8 @@ impl<const N: usize> Histogram<N> {
 
     /// Swaps contents with another histogram.
     ///
-    /// There is no `clear()` method — the histogram's initial scale is
-    /// not stored separately. To reset, swap with a freshly constructed
-    /// histogram at your desired scale:
+    /// Useful for the "swap and export" pattern: record into a histogram,
+    /// then swap with a fresh one to hand off the data:
     ///
     /// ```
     /// use otel_expohisto::Histogram;
@@ -653,6 +694,17 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     pub fn swap(&mut self, other: &mut Self) {
         core::mem::swap(self, other);
+    }
+
+    /// Resets the histogram to its initial state, preserving the
+    /// configured scale and minimum bucket width.
+    pub fn clear(&mut self) {
+        self.current = self.initial;
+        self.index_base = 0;
+        self.index_start = 0;
+        self.index_end = 0;
+        self.stats = Stats::EMPTY;
+        self.data.fill(0);
     }
 
     /// Records a single value.
@@ -713,7 +765,7 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
-            if self.bucket_width.is_literal() {
+            if self.current.width.is_literal() {
                 self.update_literal(value, incr)?;
             } else {
                 self.update_buckets(value, incr)?;
@@ -727,7 +779,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Updates buckets for a positive value.
     fn update_buckets(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
-        self.retry_increment(incr, |h| h.mapping.map_to_index(value))
+        self.retry_increment(incr, |h| h.current.mapping.map_to_index(value))
     }
 
     /// Retries an increment until it succeeds, performing downscale or
@@ -749,8 +801,8 @@ impl<const N: usize> Histogram<N> {
 
     /// Decreases the mapping scale by `decrease` steps.
     fn decrease_scale(&mut self, decrease: i32) -> Result<(), Overflow> {
-        let new_scale = self.mapping.scale() - decrease;
-        self.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
+        let new_scale = self.current.mapping.scale() - decrease;
+        self.current.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
         Ok(())
     }
 
@@ -758,7 +810,7 @@ impl<const N: usize> Histogram<N> {
     /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Overflow> {
         if self.range_is_empty() {
-            self.bucket_width = self.bucket_width.wider().ok_or(Overflow)?;
+            self.current.width = self.current.width.wider().ok_or(Overflow)?;
             self.shift_indices(1);
             return self.decrease_scale(1);
         }
@@ -786,12 +838,12 @@ impl<const N: usize> Histogram<N> {
             return self.decrease_scale(change);
         }
 
-        self.do_downscale(change, self.bucket_width)?;
+        self.do_downscale(change, self.current.width)?;
         self.decrease_scale(change)
     }
 
     fn downscale_to(&mut self, target_scale: i32) -> Result<(), Overflow> {
-        let change = self.mapping.scale() - target_scale;
+        let change = self.current.mapping.scale() - target_scale;
         if change <= 0 {
             return Ok(());
         }
@@ -815,7 +867,7 @@ impl<const N: usize> Histogram<N> {
             self.index_end = index;
             // Align base to a word boundary so that SWAR pairwise ops
             // never split a counter pair across u64 words.
-            self.index_base = self.bucket_width.word_start(index);
+            self.index_base = self.current.width.word_start(index);
         } else if index < self.index_start {
             if self.swar_would_wrap(index) {
                 return IncrResult::NeedsDownscale(HighLow {

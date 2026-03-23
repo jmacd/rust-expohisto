@@ -43,7 +43,7 @@ impl<const N: usize> HistogramView<'_, N> {
         if self.hist.buckets_empty() {
             0
         } else {
-            self.hist.mapping.scale()
+            self.hist.current.mapping.scale()
         }
     }
 
@@ -132,7 +132,7 @@ impl<const N: usize> HistogramView<'_, N> {
             // Cannot fail: scale 0 is always valid.
             Mapping::new(0).unwrap()
         } else {
-            self.hist.mapping
+            self.hist.current.mapping
         };
 
         QuantileIter::new(

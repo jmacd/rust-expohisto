@@ -12,7 +12,7 @@
 /// pool stores raw `f64` bit patterns instead of bucket counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
-pub enum BucketWidth {
+pub enum Width {
     /// Literal mode: data pool stores raw f64 bit patterns, not counters.
     B0 = 0,
     /// 1-bit counters (max 1 per bucket — presence bitmap).
@@ -32,17 +32,17 @@ pub enum BucketWidth {
 }
 
 /// All counter widths in level order (excludes B0), for computed lookups.
-pub(crate) const ALL_WIDTHS: [BucketWidth; 7] = [
-    BucketWidth::B1,
-    BucketWidth::B2,
-    BucketWidth::B4,
-    BucketWidth::U8,
-    BucketWidth::U16,
-    BucketWidth::U32,
-    BucketWidth::U64,
+pub(crate) const ALL_WIDTHS: [Width; 7] = [
+    Width::B1,
+    Width::B2,
+    Width::B4,
+    Width::U8,
+    Width::U16,
+    Width::U32,
+    Width::U64,
 ];
 
-impl BucketWidth {
+impl Width {
     /// Returns true if this is `B0` (literal mode).
     #[inline]
     pub const fn is_literal(self) -> bool {
@@ -87,9 +87,9 @@ impl BucketWidth {
     ///
     /// For `B0`, returns `B1` (promotion from literal to bucket mode).
     #[inline]
-    pub(crate) const fn wider(self) -> Option<BucketWidth> {
+    pub(crate) const fn wider(self) -> Option<Width> {
         if self.is_literal() {
-            return Some(BucketWidth::B1);
+            return Some(Width::B1);
         }
         let l = self.level();
         if l < 6 {
@@ -116,7 +116,7 @@ impl BucketWidth {
         // Round up to the next valid width (power-of-two bit count).
         let raw_bits = 64 - value.leading_zeros(); // u32, 1..=64
         let width_bits = raw_bits.next_power_of_two(); // 1,2,4,8,16,32,64
-                                                       // width_bits is already a valid BucketWidth discriminant.
+                                                       // width_bits is already a valid Width discriminant.
         Some(ALL_WIDTHS[width_bits.trailing_zeros() as usize])
     }
 }

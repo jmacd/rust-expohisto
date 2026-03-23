@@ -35,7 +35,7 @@ values refine the range. Literal mode eliminates all that incremental work — t
 scale and bucket width are determined from the full initial set in one shot.
 
 For `Histogram<16>`, literal capacity is 16 values (= `N`).
-Literal mode can be disabled via `.with_min_bucket_width(BucketWidth::B1)` for benchmarks or when the
+Literal mode can be disabled via `.with_min_width(Width::B1)` for benchmarks or when the
 caller already knows the value range.
 
 ## Sub-Byte Bucket Widths and Bit-Level Arithmetic
@@ -188,7 +188,7 @@ Either way, one downscale step is consumed: indices are halved by right-shifting
 Both downscale and counter-widening use a single `do_downscale(change, min_width)` function that works identically at all counter widths (B1 through U64):
 
 1. **Clone** the `[u64; N]` data array.
-2. **Determine output width**: walk the old live range, summing each group of `2^change` adjacent counters that share the same shifted index.  Track the maximum group sum to find the minimum `BucketWidth` whose `counter_max` accommodates all sums (at least `min_width`).
+2. **Determine output width**: walk the old live range, summing each group of `2^change` adjacent counters that share the same shifted index.  Track the maximum group sum to find the minimum `Width` whose `counter_max` accommodates all sums (at least `min_width`).
 3. **Zero the data array** and compute a fresh, word-aligned `index_base`.
 4. **Scatter-add**: for each old bucket, read its counter from the clone, compute the shifted output index, and add the value into the corresponding slot of the zeroed output buffer.
 
@@ -237,8 +237,8 @@ relative error) across the full range.
 | Method | Effect |
 |--------|--------|
 | `with_scale(s)` | Set exact starting scale (returns `Err` if invalid; does not clamp) |
-| `with_min_bucket_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
-| `with_min_bucket_width(BucketWidth::B1)` | Disable literal mode when the value range is already known |
+| `with_min_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
+| `with_min_width(Width::B1)` | Disable literal mode when the value range is already known |
 
 Run `cargo run --example sizing` for an interactive capacity explorer.
 
@@ -276,7 +276,7 @@ v.scale()                      // i32  — current mapping scale
 let buckets = v.positive();
 buckets.offset()               // i32  — index of the first bucket
 buckets.len()                  // u32  — number of contiguous buckets
-buckets.width()                // BucketWidth — current counter width
+buckets.width()                // Width — current counter width
 for count in &buckets {
     // each count is u64
 }
@@ -329,20 +329,20 @@ All merge operations compute the minimum common scale, downscale as needed, and 
 | `new()` | Create at maximum scale (20) with default settings |
 | `with_scale(s)` | Create at exact scale (returns `Err` if invalid; does not clamp) |
 | `swap(&mut other)` | Exchange contents with another histogram (O(N) memswap) |
-| `bucket_width() == BucketWidth::B0` | Check if in literal mode |
+| `width() == Width::B0` | Check if in literal mode |
 | `bucket_capacity()` | Number of logical buckets at the current width |
-| `bucket_width()` | Current counter width (`B1`..`U64`) |
+| `width()` | Current counter width (`B1`..`U64`) |
 | `buckets_empty()` | Whether all bucket counters are zero |
 
 ### Constructor chain
 
 ```rust,ignore
-use otel_expohisto::{Histogram, BucketWidth};
+use otel_expohisto::{Histogram, Width};
 
 let h: Histogram<16> = Histogram::new()
     .with_scale(8)?                                   // set starting scale
-    .with_min_bucket_width(BucketWidth::U8)           // skip sub-byte widths
-    .with_min_bucket_width(BucketWidth::B1);    // disable cold-start optimization
+    .with_min_width(Width::U8)           // skip sub-byte widths
+    .with_min_width(Width::B1);    // disable cold-start optimization
 ```
 
 ### Standalone `Mapping` API
@@ -381,7 +381,7 @@ assert_eq!(max_scale(), 20);
 | `BucketsIter` | `Iterator<Item = u64>`, `ExactSizeIterator`, `Debug` |
 | `QuantileIter` | `Iterator<Item = QuantileValue>`, `ExactSizeIterator`, `Debug` |
 | `QuantileValue` | `Clone`, `Copy`, `Debug`, `PartialEq` |
-| `BucketWidth` | `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord` |
+| `Width` | `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord` |
 | `Stats` | `Clone`, `Copy`, `Debug` (also has `Stats::EMPTY` constant) |
 | `BucketDescriptor` | `Clone`, `Copy`, `Debug` |
 | `Overflow` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |

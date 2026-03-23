@@ -68,7 +68,7 @@ src/
 │   ├── view.rs      #   HistogramView (read-only snapshot)
 │   ├── quantile.rs  #   quantile estimation
 │   ├── bucket_ops.rs   # bucket widen and downscale operations
-│   ├── bucket_width.rs # BucketWidth enum
+│   ├── width.rs # Width enum
 │   ├── swar.rs      #   SWAR helpers
 │   ├── tests.rs     #   unit tests
 │   └── regression.rs   # fuzz-derived regression tests
