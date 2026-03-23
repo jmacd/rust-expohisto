@@ -12,6 +12,30 @@
 use super::bucket_width::BucketWidth;
 use super::Histogram;
 
+/// Captured old-layout state for a downscale operation.
+///
+/// Bundles the immutable parameters shared by all downscale codepaths,
+/// keeping their signatures compact.
+struct DownscaleCtx<'a, const N: usize> {
+    change: i32,
+    old_data: &'a [u64; N],
+    old_width: BucketWidth,
+    old_base: i32,
+    old_start: i32,
+    old_end: i32,
+    new_start: i32,
+    new_end: i32,
+}
+
+impl<const N: usize> DownscaleCtx<'_, N> {
+    /// Reads a counter from the old layout at bucket index `idx`.
+    #[inline]
+    fn read_old(&self, idx: i32) -> u64 {
+        let slot = Histogram::<N>::old_slot(idx, self.old_base, self.old_width);
+        Histogram::<N>::get_in(self.old_data, slot, self.old_width)
+    }
+}
+
 impl<const N: usize> Histogram<N> {
     /// Downscales by `change` steps: merges groups of `2^change`
     /// adjacent bucket indices by summing their counters.
@@ -20,11 +44,15 @@ impl<const N: usize> Histogram<N> {
     /// width for a normal downscale, or the next wider width when
     /// a counter overflow forces widening).
     ///
-    /// Uses a speculative single-pass approach: clones the data array,
-    /// picks `min_width` as the output width, then scatter-adds in one
-    /// pass.  If any group sum exceeds `counter_max` for the chosen
-    /// width, the pass restarts at the next wider width.  In the common
-    /// case (sums fit), this halves the work vs. a two-pass scan.
+    /// Two codepaths:
+    ///
+    /// - **Safe**: `count ≤ counter_max` — even the worst-case group
+    ///   sum (all count in one bucket) fits, so no overflow checks.
+    ///   This always covers U64 width (`counter_max` = `u64::MAX`).
+    /// - **Speculative hybrid**: begins writing at `spec_width`; on
+    ///   the first group overflow, scans the remainder to find the
+    ///   true max group sum, computes the exact target width, then
+    ///   repairs the already-written prefix.
     ///
     /// Returns `Err(Overflow)` if any group sum exceeds `u64::MAX`.
     pub(super) fn do_downscale(
@@ -40,70 +68,212 @@ impl<const N: usize> Histogram<N> {
         }
 
         let old_data = self.data;
-        let old_width = self.bucket_width;
-        let old_base = self.index_base;
-        let old_start = self.index_start;
-        let old_end = self.index_end;
+        let ctx = DownscaleCtx {
+            change,
+            old_data: &old_data,
+            old_width: self.bucket_width,
+            old_base: self.index_base,
+            old_start: self.index_start,
+            old_end: self.index_end,
+            new_start: self.index_start >> change,
+            new_end: self.index_end >> change,
+        };
 
-        let new_start = old_start >> change;
-        let new_end = old_end >> change;
-
-        let mut spec_width = if min_width > self.min_bucket_width {
+        let spec_width = if min_width > self.min_bucket_width {
             min_width
         } else {
             self.min_bucket_width
         };
 
-        // Speculative single-pass: scatter-add at spec_width, retry
-        // at the next wider width if any group sum overflows it.
-        loop {
-            let new_spw = spec_width.slots_per_word() as i32;
-            let new_base = new_start & !(new_spw - 1);
-            let counter_max = spec_width.counter_max();
-
-            self.data = [0u64; N];
-            self.bucket_width = spec_width;
-            self.index_base = new_base;
-            self.index_start = new_start;
-            self.index_end = new_end;
-
-            let mut cur_group = old_start >> change;
-            let mut group_acc: u64 = 0;
-            let mut retry = false;
-
-            for idx in old_start..=old_end {
-                let new_idx = idx >> change;
-                if new_idx != cur_group {
-                    if group_acc > counter_max {
-                        retry = true;
-                        break;
-                    }
-                    let out_slot = (cur_group - new_base) as usize;
-                    Self::set_in(&mut self.data, out_slot, spec_width, group_acc);
-                    group_acc = 0;
-                    cur_group = new_idx;
-                }
-                let in_slot = Self::old_slot(idx, old_base, old_width);
-                let val = Self::get_in(&old_data, in_slot, old_width);
-                group_acc = group_acc.checked_add(val).ok_or(super::Overflow)?;
-            }
-
-            if !retry && group_acc > counter_max {
-                retry = true;
-            }
-
-            if retry {
-                spec_width = spec_width.wider().ok_or(super::Overflow)?;
-                continue;
-            }
-
-            // Write the final group and finish.
-            let out_slot = (cur_group - new_base) as usize;
-            Self::set_in(&mut self.data, out_slot, spec_width, group_acc);
-
-            self.trim_bucket_range();
-            return Ok(());
+        if self.count() <= spec_width.counter_max() {
+            self.downscale_safe(&ctx, spec_width);
+            Ok(())
+        } else {
+            self.downscale_speculative(&ctx, spec_width)
         }
+    }
+
+    /// Safe path: `count ≤ counter_max`, so no group can overflow.
+    /// This always covers the U64 case (count is u64, counter_max
+    /// is u64::MAX).
+    fn downscale_safe(
+        &mut self,
+        ctx: &DownscaleCtx<'_, N>,
+        w: BucketWidth,
+    ) {
+        let base = w.word_start(ctx.new_start);
+        self.init_output(w, base, ctx.new_start, ctx.new_end);
+
+        let mut cur_group = ctx.old_start >> ctx.change;
+        let mut group_acc: u64 = 0;
+
+        for idx in ctx.old_start..=ctx.old_end {
+            let new_idx = idx >> ctx.change;
+            if new_idx != cur_group {
+                Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
+                group_acc = 0;
+                cur_group = new_idx;
+            }
+            group_acc += ctx.read_old(idx);
+        }
+        Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
+
+        self.trim_bucket_range();
+    }
+
+    /// Speculative hybrid: begin writing at `spec_width`; on the
+    /// first overflow, scan the remainder for the true max, compute
+    /// the exact target width, then repair the prefix.
+    fn downscale_speculative(
+        &mut self,
+        ctx: &DownscaleCtx<'_, N>,
+        w: BucketWidth,
+    ) -> Result<(), super::Overflow> {
+        let base = w.word_start(ctx.new_start);
+        let counter_max = w.counter_max();
+        self.init_output(w, base, ctx.new_start, ctx.new_end);
+
+        let mut cur_group = ctx.old_start >> ctx.change;
+        let mut group_acc: u64 = 0;
+
+        for idx in ctx.old_start..=ctx.old_end {
+            let new_idx = idx >> ctx.change;
+            if new_idx != cur_group {
+                if group_acc > counter_max {
+                    return self.downscale_repair(
+                        ctx, w, idx, cur_group, group_acc,
+                    );
+                }
+                Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
+                group_acc = 0;
+                cur_group = new_idx;
+            }
+            group_acc = group_acc.checked_add(ctx.read_old(idx)).ok_or(super::Overflow)?;
+        }
+
+        if group_acc > counter_max {
+            return self.downscale_repair(
+                ctx, w, ctx.old_end + 1, cur_group, group_acc,
+            );
+        }
+
+        Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
+        self.trim_bucket_range();
+        Ok(())
+    }
+
+    /// Overflow recovery: scan remaining groups for the true max,
+    /// compute exact target width, re-read the prefix from the
+    /// speculative output, and write everything at the new width.
+    fn downscale_repair(
+        &mut self,
+        ctx: &DownscaleCtx<'_, N>,
+        spec_width: BucketWidth,
+        resume_idx: i32,
+        overflow_group: i32,
+        overflow_acc: u64,
+    ) -> Result<(), super::Overflow> {
+        let spec_base = spec_width.word_start(ctx.new_start);
+
+        // Phase 1: scan remaining old indices for the true max
+        // group sum across all groups from overflow_group onward.
+        let mut max_acc = overflow_acc;
+        let mut cur_group = overflow_group;
+        let mut group_acc = overflow_acc;
+
+        for idx in resume_idx..=ctx.old_end {
+            let new_idx = idx >> ctx.change;
+            if new_idx != cur_group {
+                if group_acc > max_acc {
+                    max_acc = group_acc;
+                }
+                group_acc = 0;
+                cur_group = new_idx;
+            }
+            group_acc = group_acc
+                .checked_add(ctx.read_old(idx))
+                .ok_or(super::Overflow)?;
+        }
+        if group_acc > max_acc {
+            max_acc = group_acc;
+        }
+
+        // Phase 2: compute exact target width.
+        // max_acc > spec_width.counter_max() is guaranteed (that's
+        // why we're here).  Since counter_max = (1 << bits) - 1 and
+        // bits is a power of two, max_acc ≥ 1 << bits, which always
+        // maps to a strictly wider BucketWidth via from_max_value.
+        let tw = BucketWidth::from_max_value(max_acc).ok_or(super::Overflow)?;
+        debug_assert!(tw > spec_width);
+
+        // Phase 3: repair prefix — re-read groups already written
+        // at spec_width and rewrite at the target width.
+        let prefix_data = self.data;
+        let tbase = tw.word_start(ctx.new_start);
+        self.init_output(tw, tbase, ctx.new_start, ctx.new_end);
+
+        for grp in ctx.new_start..overflow_group {
+            let val = Self::get_in(
+                &prefix_data,
+                (grp - spec_base) as usize,
+                spec_width,
+            );
+            if val != 0 {
+                Self::set_in(
+                    &mut self.data,
+                    (grp - tbase) as usize,
+                    tw,
+                    val,
+                );
+            }
+        }
+
+        // Phase 4: re-scan old indices from overflow_group onward
+        // and write at the target width (guaranteed to fit).
+        let first_idx =
+            (overflow_group << ctx.change).max(ctx.old_start);
+        cur_group = first_idx >> ctx.change;
+        group_acc = 0;
+
+        for idx in first_idx..=ctx.old_end {
+            let new_idx = idx >> ctx.change;
+            if new_idx != cur_group {
+                Self::set_in(
+                    &mut self.data,
+                    (cur_group - tbase) as usize,
+                    tw,
+                    group_acc,
+                );
+                group_acc = 0;
+                cur_group = new_idx;
+            }
+            group_acc += ctx.read_old(idx);
+        }
+        Self::set_in(
+            &mut self.data,
+            (cur_group - tbase) as usize,
+            tw,
+            group_acc,
+        );
+
+        self.trim_bucket_range();
+        Ok(())
+    }
+
+    /// Initializes output state for a downscale pass.
+    #[inline]
+    fn init_output(
+        &mut self,
+        width: BucketWidth,
+        base: i32,
+        start: i32,
+        end: i32,
+    ) {
+        self.data = [0u64; N];
+        self.bucket_width = width;
+        self.index_base = base;
+        self.index_start = start;
+        self.index_end = end;
     }
 
     /// Downscales by 1 step with forced widening.
@@ -145,8 +315,8 @@ impl<const N: usize> Histogram<N> {
     /// Reads a counter from a data array at a physical slot.
     #[inline]
     const fn get_in(data: &[u64; N], slot: usize, width: BucketWidth) -> u64 {
+        let spw = width.slots_per_word();
         let bits = width.bits();
-        let spw = 64 / bits;
         let wi = slot / spw;
         let shift = (slot % spw) * bits;
         let mask = width.counter_max();
@@ -156,8 +326,8 @@ impl<const N: usize> Histogram<N> {
     /// Writes a counter into a data array at a physical slot.
     #[inline]
     fn set_in(data: &mut [u64; N], slot: usize, width: BucketWidth, value: u64) {
+        let spw = width.slots_per_word();
         let bits = width.bits();
-        let spw = 64 / bits;
         let wi = slot / spw;
         let shift = (slot % spw) * bits;
         let mask = width.counter_max();

@@ -63,6 +63,12 @@ impl BucketWidth {
         64 / self.bits()
     }
 
+    /// Rounds a bucket index down to the first slot in its u64 word.
+    #[inline]
+    pub(crate) const fn word_start(self, index: i32) -> i32 {
+        index & !(self.slots_per_word() as i32 - 1)
+    }
+
     /// Returns the next wider counter width, or `None` if already at u64.
     #[inline]
     pub(crate) const fn wider(self) -> Option<BucketWidth> {
@@ -78,5 +84,20 @@ impl BucketWidth {
     #[inline]
     pub(crate) const fn counter_max(self) -> u64 {
         u64::MAX >> (64 - self.bits())
+    }
+
+    /// Returns the narrowest width whose `counter_max()` ≥ `value`,
+    /// or `None` if `value` is 0 (no width needed).
+    #[inline]
+    pub(crate) const fn from_max_value(value: u64) -> Option<Self> {
+        if value == 0 {
+            return None;
+        }
+        // Bits needed to represent `value`: 64 - leading_zeros.
+        // Round up to the next valid width (power-of-two bit count).
+        let raw_bits = 64 - value.leading_zeros(); // u32, 1..=64
+        let width_bits = raw_bits.next_power_of_two(); // 1,2,4,8,16,32,64
+        // width_bits is already a valid BucketWidth discriminant.
+        Some(ALL_WIDTHS[width_bits.trailing_zeros() as usize])
     }
 }

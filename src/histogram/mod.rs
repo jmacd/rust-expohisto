@@ -868,8 +868,7 @@ impl<const N: usize> Histogram<N> {
             self.index_end = index;
             // Align base to a word boundary so that SWAR pairwise ops
             // never split a counter pair across u64 words.
-            let spw = self.bucket_width.slots_per_word() as i32;
-            self.index_base = index & !(spw - 1);
+            self.index_base = self.bucket_width.word_start(index);
         } else if index < self.index_start {
             if self.swar_would_wrap(index) {
                 return IncrResult::NeedsDownscale(HighLow {
