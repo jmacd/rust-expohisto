@@ -15,7 +15,7 @@
 
 use core::fmt;
 
-use crate::mapping::{max_scale, Mapping, MappingError};
+use crate::mapping::{Mapping, MappingError, max_scale};
 
 mod bucket_ops;
 pub mod bucket_width;
@@ -43,7 +43,7 @@ pub use bucket_width::BucketWidth;
 /// Error returned when the total count would exceed `u64::MAX`.
 ///
 /// The total count is checked before any bucket mutation.  Because the
-/// total is always ≥ any individual bucket count, a `u64`-width bucket
+/// total is always >= any individual bucket count, a `u64`-width bucket
 /// counter cannot overflow once the total-count check passes.  In
 /// practice, callers should flush and reset histograms periodically
 /// long before `u64` exhaustion.
@@ -408,50 +408,6 @@ impl<const N: usize> Histogram<N> {
         }
         let slot = self.slot_for(self.index_start);
         self.bucket_get(slot) == 0
-    }
-
-    /// Trims leading and trailing zero buckets from the index range.
-    ///
-    /// Uses word-level checks to skip `slots_per_word` counters at a
-    /// time when the entire word is zero, falling back to per-counter
-    /// checks only at partially-occupied word boundaries.
-    fn trim_bucket_range(&mut self) {
-        let spw = self.bucket_width.slots_per_word() as i32;
-
-        // Trim trailing zeros.
-        while self.index_end > self.index_start {
-            let slot = self.slot_for(self.index_end);
-            let wi = slot / spw as usize;
-
-            // If this is the last slot in its word and the word is
-            // all zero, skip the whole word.
-            if slot % spw as usize == (spw as usize - 1) && self.data[wi] == 0 {
-                // Don't go below index_start.
-                let skip = spw.min(self.index_end - self.index_start);
-                self.index_end -= skip;
-                continue;
-            }
-            if self.bucket_get(slot) != 0 {
-                break;
-            }
-            self.index_end -= 1;
-        }
-
-        // Trim leading zeros.
-        while self.index_start < self.index_end {
-            let slot = self.slot_for(self.index_start);
-            let wi = slot / spw as usize;
-
-            if slot % spw as usize == 0 && self.data[wi] == 0 {
-                let skip = spw.min(self.index_end - self.index_start);
-                self.index_start += skip;
-                continue;
-            }
-            if self.bucket_get(slot) != 0 {
-                break;
-            }
-            self.index_start += 1;
-        }
     }
 
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
@@ -947,10 +903,6 @@ impl<const N: usize> Histogram<N> {
     }
 }
 
-// (Quantile estimation is in quantile.rs)
-
-// ---------------------------------------------------------------------------
-
 // Compile-time proof that Histogram is Send + Sync (all fields are Copy
 // primitives). This prevents regressions if a non-Send/Sync type is
 // accidentally added in the future.
@@ -959,6 +911,3 @@ const _: () = _assert_send_sync::<Histogram<1>>();
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod regression;

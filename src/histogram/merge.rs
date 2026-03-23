@@ -3,7 +3,7 @@
 
 //! Merge logic for combining histograms.
 
-use super::{scale_reduction, BucketDescriptor, HighLow, Histogram, Overflow, Stats};
+use super::{BucketDescriptor, HighLow, Histogram, Overflow, Stats, scale_reduction};
 
 impl<const N: usize> Histogram<N> {
     /// Merges another histogram into this one.
@@ -113,8 +113,6 @@ impl<const N: usize> Histogram<N> {
                     (buckets.offset + i as i32) >> shift
                 })?;
             }
-
-            self.trim_bucket_range();
         }
 
         self.commit_stats(new_sum, new_count, stats.min, stats.max);
