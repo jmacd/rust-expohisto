@@ -19,7 +19,6 @@ mod boundary;
 #[doc(hidden)]
 pub mod logarithm;
 
-#[cfg(has_lookup_table)]
 #[doc(hidden)]
 pub mod lookup;
 

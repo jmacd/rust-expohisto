@@ -49,10 +49,7 @@ impl std::error::Error for MappingError {}
 /// feature). Exponent mapping (scale ≤ 0) is always available.
 #[inline]
 pub const fn max_scale() -> i32 {
-    #[cfg(has_lookup_table)]
-    { crate::lookup::TABLE_SCALE }
-    #[cfg(not(has_lookup_table))]
-    { 0 }
+    crate::lookup::TABLE_SCALE
 }
 
 /// Converts values to bucket indices at a given scale.
@@ -101,18 +98,7 @@ impl Mapping {
     /// Mapping for positive scales — delegates to the compiled lookup table.
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
-        let scale = self.scale;
-
-        #[cfg(has_lookup_table)]
-        {
-            crate::lookup::map_to_index(value, scale)
-        }
-
-        #[cfg(not(has_lookup_table))]
-        {
-            let _ = (value, scale);
-            0
-        }
+        crate::lookup::map_to_index(value, self.scale)
     }
 }
 
@@ -126,12 +112,8 @@ mod tests {
         assert!(Mapping::new(-10).is_ok());
         assert!(Mapping::new(-11).is_err());
 
-        // Positive scales require a lookup table
-        if max_scale() > 0 {
-            assert!(Mapping::new(1).is_ok());
-        } else {
-            assert!(Mapping::new(1).is_err());
-        }
+        // Positive scales always available via lookup table
+        assert!(Mapping::new(1).is_ok());
 
         // All scales up to max_scale() are supported
         for scale in MIN_SCALE..=max_scale() {
@@ -183,9 +165,6 @@ mod tests {
 
     #[test]
     fn test_map_to_index_positive_scale() {
-        if max_scale() < 1 {
-            return; // No lookup table compiled in
-        }
         let m = Mapping::new(1).unwrap();
 
         // At scale 1, each power-of-2 bucket is split in two
