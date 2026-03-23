@@ -11,7 +11,7 @@
 //! This entire module is gated behind `#[cfg(feature = "boundary")]`.
 
 use crate::float64::{pow2, MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE};
-use crate::mapping::{Mapping, MappingError};
+use crate::mapping::{Scale, ScaleError};
 
 include!(concat!(env!("OUT_DIR"), "/inverse_factors.rs"));
 
@@ -23,15 +23,15 @@ const fn max_normal_index_exp(scale: i32) -> i32 {
 }
 
 /// Returns the lower boundary of a bucket at non-positive scale.
-fn lower_boundary_exponent(index: i32, scale: i32) -> Result<f64, MappingError> {
+fn lower_boundary_exponent(index: i32, scale: i32) -> Result<f64, ScaleError> {
     debug_assert!(scale <= 0);
     let shift = (-scale) as u32;
 
     if index < crate::exponent::min_normal_lower_boundary_index(scale) {
-        return Err(MappingError::Underflow);
+        return Err(ScaleError::Underflow);
     }
     if index > max_normal_index_exp(scale) {
-        return Err(MappingError::Overflow);
+        return Err(ScaleError::Overflow);
     }
 
     Ok(pow2(index << shift))
@@ -50,7 +50,7 @@ const fn max_normal_index_log(scale: i32) -> i32 {
 }
 
 /// Returns the lower boundary of a bucket at positive scale.
-fn lower_boundary_logarithm(index: i32, scale: i32) -> Result<f64, MappingError> {
+fn lower_boundary_logarithm(index: i32, scale: i32) -> Result<f64, ScaleError> {
     debug_assert!((1..=INVERSE_FACTOR.len()).contains(&(scale as usize)));
     let inv = INVERSE_FACTOR[scale as usize - 1];
     let max_idx = max_normal_index_log(scale);
@@ -60,7 +60,7 @@ fn lower_boundary_logarithm(index: i32, scale: i32) -> Result<f64, MappingError>
         if index == max_idx {
             return Ok(2.0 * crate::float64::exp((index - (1 << scale)) as f64 * inv));
         }
-        return Err(MappingError::Overflow);
+        return Err(ScaleError::Overflow);
     }
 
     if index <= min_idx {
@@ -69,19 +69,19 @@ fn lower_boundary_logarithm(index: i32, scale: i32) -> Result<f64, MappingError>
         } else if index == min_idx - 1 {
             return Ok(crate::float64::exp((index + (1 << scale)) as f64 * inv) / 2.0);
         }
-        return Err(MappingError::Underflow);
+        return Err(ScaleError::Underflow);
     }
 
     Ok(crate::float64::exp(index as f64 * inv))
 }
 
-impl Mapping {
+impl Scale {
     /// Returns the lower boundary of a bucket at the given index.
     ///
     /// For scale <= 0 this is an exact power of two.  For positive
     /// scales, uses `exp()` with a precomputed inverse factor.
     #[inline]
-    pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
+    pub fn lower_boundary(&self, index: i32) -> Result<f64, ScaleError> {
         if self.scale() <= 0 {
             lower_boundary_exponent(index, self.scale())
         } else {
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn test_lower_boundary_scale_0() {
-        let m = Mapping::new(0).unwrap();
+        let m = Scale::new(0).unwrap();
         assert_eq!(m.lower_boundary(0).unwrap(), 1.0);
         assert_eq!(m.lower_boundary(1).unwrap(), 2.0);
         assert_eq!(m.lower_boundary(-1).unwrap(), 0.5);
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_lower_boundary_min_scale() {
-        let m = Mapping::new(crate::mapping::MIN_SCALE).unwrap();
+        let m = Scale::new(crate::mapping::MIN_SCALE).unwrap();
         assert_eq!(m.lower_boundary(0).unwrap(), 1.0);
         assert!(m.lower_boundary(1).is_err());
     }

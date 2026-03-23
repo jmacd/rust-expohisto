@@ -14,7 +14,7 @@ mod boundary;
 
 // Algorithm modules - conditionally compiled.
 // These are public for benchmark access but hidden from docs since users
-// should go through `Mapping` rather than calling algorithms directly.
+// should go through `Scale` rather than calling algorithms directly.
 #[cfg(feature = "logarithm")]
 #[doc(hidden)]
 pub mod logarithm;
@@ -28,4 +28,4 @@ pub use histogram::{
 };
 #[cfg(feature = "boundary")]
 pub use histogram::{QuantileIter, QuantileValue};
-pub use mapping::{max_scale, Mapping, MappingError, MAX_SCALE, MIN_SCALE};
+pub use mapping::{max_scale, Scale, ScaleError, MAX_SCALE, MIN_SCALE};

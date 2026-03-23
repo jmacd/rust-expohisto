@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use otel_expohisto::{Histogram, Mapping};
+use otel_expohisto::{Histogram, Scale};
 
 /// Verifies histogram state against expected (value, incr) operations.
 ///
@@ -52,11 +52,11 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         return;
     }
 
-    let mapping = Mapping::new(scale).expect("reported scale should be valid");
+    let scale = Scale::new(scale).expect("reported scale should be valid");
     let mut expected: BTreeMap<i32, u64> = BTreeMap::new();
     for &(value, incr) in ops {
         if value != 0.0 {
-            let idx = mapping.map_to_index(value);
+            let idx = scale.map_to_index(value);
             *expected.entry(idx).or_insert(0) += incr;
         }
     }

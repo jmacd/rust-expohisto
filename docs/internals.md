@@ -345,15 +345,15 @@ let h: Histogram<16> = Histogram::new()
     .with_min_width(Width::B1);    // disable cold-start optimization
 ```
 
-### Standalone `Mapping` API
+### Standalone `Scale` API
 
-The `Mapping` struct is re-exported at the crate root for direct value-to-index conversion, independent of any histogram instance:
+The `Scale` struct is re-exported at the crate root for direct value-to-index conversion, independent of any histogram instance:
 
 ```rust,ignore
-use otel_expohisto::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
+use otel_expohisto::{Scale, ScaleError, MAX_SCALE, MIN_SCALE, max_scale};
 
 // Create a mapping at scale 8
-let m = Mapping::new(8).unwrap();
+let m = Scale::new(8).unwrap();
 assert_eq!(m.scale(), 8);
 
 // Map a value to its bucket index
@@ -369,7 +369,7 @@ assert_eq!(MAX_SCALE, 20);
 assert_eq!(max_scale(), 20);
 ```
 
-`Mapping::new(scale)` returns `Err(MappingError::InvalidScale)` for scales outside \[-10, 20\]. `lower_boundary()` returns `Err(MappingError::Underflow)` or `Err(MappingError::Overflow)` when the index corresponds to a subnormal or infinite value.
+`Scale::new(scale)` returns `Err(ScaleError::InvalidScale)` for scales outside \[-10, 20\]. `lower_boundary()` returns `Err(ScaleError::Underflow)` or `Err(ScaleError::Overflow)` when the index corresponds to a subnormal or infinite value.
 
 ### Trait implementations
 
@@ -385,5 +385,5 @@ assert_eq!(max_scale(), 20);
 | `Stats` | `Clone`, `Copy`, `Debug` (also has `Stats::EMPTY` constant) |
 | `BucketDescriptor` | `Clone`, `Copy`, `Debug` |
 | `Overflow` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
-| `MappingError` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
-| `Mapping` | `Clone`, `Copy`, `Debug` |
+| `ScaleError` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
+| `Scale` | `Clone`, `Copy`, `Debug` |

@@ -4,7 +4,7 @@
 //! Benchmarks for exponential histogram mapping functions.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{max_scale, Mapping};
+use otel_expohisto::{max_scale, Scale};
 
 /// 100 test values with significands roughly uniformly distributed across [1.0, 2.0).
 /// 10 base significands × 10 magnitude groups = 100 values.
@@ -38,17 +38,17 @@ fn bench_map_to_index(c: &mut Criterion) {
 
     // Non-positive scales (exponent mapping)
     for scale in [-10, -5, -1, 0] {
-        let mapping = Mapping::new(scale).unwrap();
+        let scale = Scale::new(scale).unwrap();
         group.bench_function(BenchmarkId::new("exponent", scale), |b| {
             b.iter(|| {
                 for &v in TEST_VALUES {
-                    black_box(mapping.map_to_index(black_box(v)));
+                    black_box(scale.map_to_index(black_box(v)));
                 }
             })
         });
     }
 
-    // Positive scales - benchmark the lookup table algorithm via Mapping
+    // Positive scales - benchmark the lookup table algorithm via Scale
     let max = max_scale();
     let scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20]
         .into_iter()
@@ -56,11 +56,11 @@ fn bench_map_to_index(c: &mut Criterion) {
         .collect();
 
     for &scale in &scales {
-        let mapping = Mapping::new(scale).unwrap();
+        let scale = Scale::new(scale).unwrap();
         group.bench_function(BenchmarkId::new("lookup", scale), |b| {
             b.iter(|| {
                 for &v in TEST_VALUES {
-                    black_box(mapping.map_to_index(black_box(v)));
+                    black_box(scale.map_to_index(black_box(v)));
                 }
             })
         });
@@ -90,13 +90,13 @@ fn bench_lower_boundary(c: &mut Criterion) {
 
     // Non-positive scales (exponent mapping)
     for scale in [-10, -5, -1, 0] {
-        let mapping = Mapping::new(scale).unwrap();
+        let scale = Scale::new(scale).unwrap();
         // Use indices that are valid for this scale
         let indices: Vec<i32> = (-10..=10).collect();
         group.bench_function(BenchmarkId::new("exponent", scale), |b| {
             b.iter(|| {
                 for &idx in &indices {
-                    let _ = black_box(mapping.lower_boundary(black_box(idx)));
+                    let _ = black_box(scale.lower_boundary(black_box(idx)));
                 }
             })
         });
@@ -110,13 +110,13 @@ fn bench_lower_boundary(c: &mut Criterion) {
         .collect();
 
     for scale in scales {
-        let mapping = Mapping::new(scale).unwrap();
+        let scale = Scale::new(scale).unwrap();
         // Use indices that are representative for this scale
         let indices: Vec<i32> = (-100..=100).collect();
         group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
             b.iter(|| {
                 for &idx in &indices {
-                    let _ = black_box(mapping.lower_boundary(black_box(idx)));
+                    let _ = black_box(scale.lower_boundary(black_box(idx)));
                 }
             })
         });

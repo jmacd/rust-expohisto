@@ -7,7 +7,7 @@
 //! at the highest compiled-in scale. The algorithm uses 2N linear buckets
 //! per scale with one boundary correction.
 //!
-//! Mapping at any scale S ≤ TABLE_SCALE is computed by mapping at
+//! Scale at any scale S ≤ TABLE_SCALE is computed by mapping at
 //! TABLE_SCALE and right-shifting: `fine_index >> (TABLE_SCALE - S)`.
 //! This eliminates all runtime table derivation and heap allocation.
 

@@ -4,7 +4,7 @@
 //! Promoted read-only view of a histogram.
 
 #[cfg(feature = "boundary")]
-use crate::mapping::Mapping;
+use crate::mapping::Scale;
 
 use super::bucket_view::BucketView;
 #[cfg(feature = "boundary")]
@@ -43,7 +43,7 @@ impl<const N: usize> HistogramView<'_, N> {
         if self.hist.buckets_empty() {
             0
         } else {
-            self.hist.current.mapping.scale()
+            self.hist.current.scale.scale()
         }
     }
 
@@ -128,16 +128,16 @@ impl<const N: usize> HistogramView<'_, N> {
             .sum();
         let zero_count = total_count.saturating_sub(positive_count);
 
-        let mapping = if positive_count == 0 {
+        let scale = if positive_count == 0 {
             // Cannot fail: scale 0 is always valid.
-            Mapping::new(0).unwrap()
+            Scale::new(0).unwrap()
         } else {
-            self.hist.current.mapping
+            self.hist.current.scale
         };
 
         QuantileIter::new(
             self.hist,
-            mapping,
+            scale,
             quantiles,
             bucket_len,
             offset,

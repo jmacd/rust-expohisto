@@ -3,7 +3,7 @@
 
 //! Quantile estimation — CDF walk over bucket view.
 
-use crate::mapping::Mapping;
+use crate::mapping::Scale;
 
 use super::Histogram;
 
@@ -29,7 +29,7 @@ pub struct QuantileValue {
 #[derive(Debug)]
 pub struct QuantileIter<'a, const N: usize> {
     hist: &'a Histogram<N>,
-    mapping: Mapping,
+    scale: Scale,
     quantiles: &'a [f64],
     qi: usize,
 
@@ -53,7 +53,7 @@ impl<'a, const N: usize> QuantileIter<'a, N> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         hist: &'a Histogram<N>,
-        mapping: Mapping,
+        scale: Scale,
         quantiles: &'a [f64],
         bucket_len: u32,
         offset: i32,
@@ -64,7 +64,7 @@ impl<'a, const N: usize> QuantileIter<'a, N> {
     ) -> Self {
         Self {
             hist,
-            mapping,
+            scale,
             quantiles,
             qi: 0,
             bucket_len,
@@ -144,8 +144,8 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
                 // the uppermost bucket spans the boundary of
                 // representable f64.  In that case self.max is the
                 // correct upper bound for interpolation.
-                let lower = self.mapping.lower_boundary(index).unwrap_or(0.0);
-                let upper = self.mapping.lower_boundary(index + 1).unwrap_or(self.max);
+                let lower = self.scale.lower_boundary(index).unwrap_or(0.0);
+                let upper = self.scale.lower_boundary(index + 1).unwrap_or(self.max);
                 let fraction = (target - self.cumulative as f64) / count as f64;
                 let value = (lower + fraction * (upper - lower)).clamp(self.min, self.max);
 

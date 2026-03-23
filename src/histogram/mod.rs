@@ -15,7 +15,7 @@
 
 use core::fmt;
 
-use crate::mapping::{Mapping, MappingError, max_scale};
+use crate::mapping::{Scale, ScaleError, max_scale};
 
 mod bucket_ops;
 pub mod width;
@@ -48,30 +48,24 @@ pub use width::Width;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Settings {
-    mapping: Mapping,
+    scale: Scale,
     width: Width,
 }
 
 impl Settings {
-    /// Creates settings from a mapping and bucket width.
+    /// Creates settings from a scale and width.
     #[inline]
-    pub const fn new(mapping: Mapping, width: Width) -> Self {
-        Self { mapping, width }
-    }
-
-    /// Returns the mapping (scale).
-    #[inline]
-    pub const fn mapping(&self) -> Mapping {
-        self.mapping
+    pub const fn new(scale: Scale, width: Width) -> Self {
+        Self { scale, width }
     }
 
     /// Returns the scale.
     #[inline]
-    pub const fn scale(&self) -> i32 {
-        self.mapping.scale()
+    pub const fn scale(&self) -> Scale {
+        self.scale
     }
 
-    /// Returns the bucket width.
+    /// Returns the width.
     #[inline]
     pub const fn width(&self) -> Width {
         self.width
@@ -291,7 +285,7 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
         if self.current.width.is_literal() {
             s.field("literal_count", &self.literal_count());
         } else {
-            s.field("scale", &self.current.mapping.scale());
+            s.field("scale", &self.current.scale.scale());
             s.field("bucket_len", &self.range_len());
         }
         s.finish()
@@ -548,9 +542,9 @@ impl<const N: usize> Histogram<N> {
 
 impl<const N: usize> Histogram<N> {
     // Shared constructor — all public constructors delegate here.
-    fn new_at_scale(scale: i32) -> Result<Self, MappingError> {
+    fn new_at_scale(scale: i32) -> Result<Self, ScaleError> {
         const { assert!(N >= 1, "N must be >= 1 for at least 1 bucket word") };
-        let settings = Settings::new(Mapping::new(scale)?, Width::B0);
+        let settings = Settings::new(Scale::new(scale)?, Width::B0);
         Ok(Self {
             initial: settings,
             current: settings,
@@ -578,13 +572,13 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`MappingError::InvalidScale`] if `scale` is outside
+    /// Returns [`ScaleError::InvalidScale`] if `scale` is outside
     /// the supported range [`MIN_SCALE`](crate::MIN_SCALE)..=[`max_scale()`](crate::max_scale).
     #[inline]
-    pub fn with_scale(mut self, scale: i32) -> Result<Self, MappingError> {
-        let mapping = Mapping::new(scale)?;
-        self.initial.mapping = mapping;
-        self.current.mapping = mapping;
+    pub fn with_scale(mut self, scale: i32) -> Result<Self, ScaleError> {
+        let s = Scale::new(scale)?;
+        self.initial.scale = s;
+        self.current.scale = s;
         Ok(self)
     }
 
@@ -667,7 +661,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Resets the bucket-related fields to empty state. Does not touch
-    /// stats or mapping. Sets width to at least B1 (never B0), since
+    /// stats or scale. Sets width to at least B1 (never B0), since
     /// this prepares for bucket-mode operation.
     fn reset_bucket_state(&mut self) {
         self.data.fill(0);
@@ -779,12 +773,12 @@ impl<const N: usize> Histogram<N> {
 
     /// Updates buckets for a positive value.
     fn update_buckets(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
-        self.retry_increment(incr, |h| h.current.mapping.map_to_index(value))
+        self.retry_increment(incr, |h| h.current.scale.map_to_index(value))
     }
 
     /// Retries an increment until it succeeds, performing downscale or
     /// widen as needed between attempts.  `index_fn` is called each
-    /// iteration because the mapping scale may have changed.
+    /// iteration because the scale may have changed.
     fn retry_increment(
         &mut self,
         incr: u64,
@@ -799,14 +793,14 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    /// Decreases the mapping scale by `decrease` steps.
+    /// Decreases the scale by `decrease` steps.
     fn decrease_scale(&mut self, decrease: i32) -> Result<(), Overflow> {
-        let new_scale = self.current.mapping.scale() - decrease;
-        self.current.mapping = Mapping::new(new_scale).map_err(|_| Overflow)?;
+        let new_scale = self.current.scale.scale() - decrease;
+        self.current.scale = Scale::new(new_scale).map_err(|_| Overflow)?;
         Ok(())
     }
 
-    /// Widens bucket counters by one step, adjusting the mapping scale
+    /// Widens bucket counters by one step, adjusting the scale
     /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Overflow> {
         if self.range_is_empty() {
@@ -843,7 +837,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     fn downscale_to(&mut self, target_scale: i32) -> Result<(), Overflow> {
-        let change = self.current.mapping.scale() - target_scale;
+        let change = self.current.scale.scale() - target_scale;
         if change <= 0 {
             return Ok(());
         }

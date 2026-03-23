@@ -4,7 +4,7 @@
 //! Literal mode: stores raw f64 bit patterns instead of bucket counters
 //! until the data pool overflows, then promotes to bucket mode.
 
-use crate::mapping::Mapping;
+use crate::mapping::Scale;
 
 use super::{Histogram, Overflow};
 
@@ -46,7 +46,7 @@ impl<const N: usize> Histogram<N> {
         // through the normal update path, which handles widening and
         // downscaling incrementally.
         self.reset_bucket_state();
-        self.current.mapping = Mapping::new(self.current.mapping.scale()).map_err(|_| Overflow)?;
+        self.current.scale = Scale::new(self.current.scale.scale()).map_err(|_| Overflow)?;
 
         for &bits in &literals[..count] {
             let v = f64::from_bits(bits);

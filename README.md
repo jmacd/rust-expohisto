@@ -62,7 +62,7 @@ Benchmark results — `map_to_index` over 100 random f64 values (criterion, medi
 | Lookup table | 1–14 | ~5.9 ns | Integer-only, compile-time generated |
 | Logarithm | 1–20 | ~10.5 ns | `ln()`-based, works at any scale |
 
-The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected by `Mapping::new()`.
+The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected by `Scale::new()`.
 
 ## Features
 
@@ -70,7 +70,7 @@ The lookup table accelerates all scales from 1 up to the compiled maximum. Scale
 
 Scale features `scale-1` through `scale-20` control the lookup table size.
 Each table supports all scales from 1 up to its maximum; higher scales
-are rejected by `Mapping::new()`. Selected examples:
+are rejected by `Scale::new()`. Selected examples:
 
 | Feature | Table Size | Scales Accelerated | Use Case |
 |---------|------------|-------------------|----------|

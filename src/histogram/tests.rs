@@ -348,12 +348,12 @@ fn test_merge_regression_bucket_total() {
 
 #[test]
 fn test_edge_values_inf() {
-    use crate::mapping::Mapping;
+    use crate::mapping::Scale;
 
     let max_f64: f64 = f64::MAX;
     let inf: f64 = f64::INFINITY;
 
-    let m0 = Mapping::new(0).unwrap();
+    let m0 = Scale::new(0).unwrap();
     let idx_max = m0.map_to_index(max_f64);
     let idx_inf = m0.map_to_index(inf);
     assert_eq!(idx_max, idx_inf);
@@ -372,12 +372,12 @@ fn test_edge_values_inf() {
 
 #[test]
 fn test_edge_values_subnormals() {
-    use crate::mapping::Mapping;
+    use crate::mapping::Scale;
 
     let subnormal: f64 = 5e-324;
     let min_normal: f64 = crate::float64::MIN_VALUE;
 
-    let m0 = Mapping::new(0).unwrap();
+    let m0 = Scale::new(0).unwrap();
     assert_eq!(m0.map_to_index(subnormal), m0.map_to_index(min_normal));
 
     let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap();
@@ -1696,7 +1696,7 @@ fn test_merge_p64_bucket_total_exceeds_count() {
 
 #[test]
 fn test_merge_p32_bucket_len_after_merge_chain() {
-    use crate::Mapping;
+    use crate::Scale;
 
     let v0: f64 = 5.653943197254256e-308;
     let v1: f64 = 2.740490672504645e-61;
@@ -1720,7 +1720,7 @@ fn test_merge_p32_bucket_len_after_merge_chain() {
     // Verify bucket structure
     let h0_view = h0.view();
     let scale = h0_view.scale();
-    let mapping = Mapping::new(scale).unwrap();
+    let mapping = Scale::new(scale).unwrap();
 
     // All non-zero values should map to indices at the current scale
     let idx0 = mapping.map_to_index(v0);
@@ -2199,7 +2199,7 @@ mod quantile_tests {
     fn reduced_chi_squared<const N: usize>(h: &mut Histogram<N>, cdf: fn(f64) -> f64) -> f64 {
         let histogram_view = h.view();
         let scale = histogram_view.scale();
-        let mapping = Mapping::new(scale).unwrap();
+        let mapping = Scale::new(scale).unwrap();
         let total = histogram_view.count() as f64;
         let view = histogram_view.positive();
 
@@ -2326,7 +2326,7 @@ fn repro_fuzz_histogram_oracle_offset() {
 
     // At every scale, the subnormal must have the same index as MIN_VALUE.
     for s in 0..=max_scale() {
-        let m = Mapping::new(s).unwrap();
+        let m = Scale::new(s).unwrap();
         assert_eq!(
             m.map_to_index(subnormal),
             m.map_to_index(min_value),
@@ -2341,7 +2341,7 @@ fn repro_fuzz_histogram_oracle_offset() {
         h.update(normal).unwrap();
 
         let v = h.view();
-        let mapping = Mapping::new(v.scale()).unwrap();
+        let mapping = Scale::new(v.scale()).unwrap();
         let exp_offset = mapping
             .map_to_index(min_value)
             .min(mapping.map_to_index(normal));
@@ -2373,7 +2373,7 @@ fn repro_fuzz_merge_oracle_offset() {
 
         let v = left.view();
         let buckets = v.positive();
-        let mapping = Mapping::new(v.scale()).unwrap();
+        let mapping = Scale::new(v.scale()).unwrap();
         let exp_idx = mapping.map_to_index(crate::float64::MIN_VALUE);
 
         assert_eq!(

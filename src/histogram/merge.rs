@@ -37,7 +37,7 @@ impl<const N: usize> Histogram<N> {
                 max: other.max(),
             },
             &BucketDescriptor {
-                scale: other.current.mapping.scale(),
+                scale: other.current.scale.scale(),
                 offset: other.index_start,
                 len: other.range_len(),
             },
@@ -88,7 +88,7 @@ impl<const N: usize> Histogram<N> {
 
             let other_end = buckets.offset + buckets.len as i32 - 1;
             let cap = self.bucket_capacity() as i32;
-            let min_scale = self.current.mapping.scale().min(buckets.scale);
+            let min_scale = self.current.scale.scale().min(buckets.scale);
 
             let self_hl = self.index_range_at_scale(min_scale);
             let other_hl = {
@@ -109,7 +109,7 @@ impl<const N: usize> Histogram<N> {
                     continue;
                 }
                 self.retry_increment(count, |h| {
-                    let shift = buckets.scale - h.current.mapping.scale();
+                    let shift = buckets.scale - h.current.scale.scale();
                     (buckets.offset + i as i32) >> shift
                 })?;
             }
@@ -148,7 +148,7 @@ impl<const N: usize> Histogram<N> {
         if self.buckets_empty() {
             return HighLow::empty();
         }
-        let shift = self.current.mapping.scale() - target_scale;
+        let shift = self.current.scale.scale() - target_scale;
         HighLow {
             low: self.index_start >> shift,
             high: self.index_end >> shift,

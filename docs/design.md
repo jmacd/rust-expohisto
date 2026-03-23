@@ -69,7 +69,7 @@ For the **logarithm fallback** and **exponent mapping** (scale ≤ 0), an explic
 if significand == 0 { return (exponent << scale) - 1; }
 ```
 
-## Index Mapping Algorithms
+## Index Scale Algorithms
 
 ### Scale ≤ 0: Exponent Extraction
 
@@ -125,7 +125,7 @@ for i in 0..2N:
 
 Each entry gives the approximate log bucket for the significand range starting at `i << SHIFT`.
 
-### Mapping algorithm
+### Scale algorithm
 
 ```text
 fn map_to_index(value, scale) -> index:
@@ -218,7 +218,7 @@ otel-expohisto/
 │   │   ├── swar.rs       #   SWAR pairwise merge, shift, narrow-compact
 │   │   ├── quantile.rs   #   QuantileIter: CDF-walk quantile estimation
 │   │   └── tests.rs      #   106 unit tests
-│   ├── mapping.rs        # Scale-to-index dispatch (Mapping struct)
+│   ├── mapping.rs        # Scale-to-index dispatch (Scale struct)
 │   ├── exponent.rs       # Scale ≤ 0: IEEE 754 exponent extraction
 │   ├── logarithm.rs      # Scale > 0 fallback: ln()-based mapping
 │   ├── lookup.rs         # Lookup table mapping (2N linear buckets, 1 correction)

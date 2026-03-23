@@ -3,10 +3,10 @@
 
 //! Exponential histogram scale mapping functions.
 //!
-//! This module provides the `Mapping` struct which converts f64 values to
+//! This module provides the `Scale` struct which converts f64 values to
 //! bucket indices. For scale <= 0, it uses direct exponent mapping. For
 //! scale > 0, it uses the compile-time generated lookup table algorithm.
-//! Scales above the compiled table scale are rejected by [`Mapping::new`].
+//! Scales above the compiled table scale are rejected by [`Scale::new`].
 
 use crate::float64::{MIN_NORMAL_EXPONENT, MIN_VALUE};
 use core::fmt;
@@ -21,7 +21,7 @@ pub const MAX_SCALE: i32 = 20;
 
 /// Error types for mapping operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MappingError {
+pub enum ScaleError {
     /// The bucket index corresponds to a subnormal value.
     Underflow,
     /// The bucket index corresponds to +Inf.
@@ -30,7 +30,7 @@ pub enum MappingError {
     InvalidScale,
 }
 
-impl fmt::Display for MappingError {
+impl fmt::Display for ScaleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Underflow => f.write_str("bucket index corresponds to a subnormal value"),
@@ -41,7 +41,7 @@ impl fmt::Display for MappingError {
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for MappingError {}
+impl std::error::Error for ScaleError {}
 
 /// Returns the maximum scale supported by the mapping.
 ///
@@ -57,16 +57,22 @@ pub const fn max_scale() -> i32 {
 /// Scale fits in −10..=20 and is stored as `i8` for compactness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct Mapping(i8);
+pub struct Scale(i8);
 
-impl Mapping {
+impl fmt::Display for Scale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Scale {
     /// Creates a new mapping for the given scale.
     ///
-    /// Returns `MappingError::InvalidScale` if scale is outside
+    /// Returns `ScaleError::InvalidScale` if scale is outside
     /// [`MIN_SCALE`]..=[`max_scale()`].
-    pub fn new(scale: i32) -> Result<Self, MappingError> {
+    pub fn new(scale: i32) -> Result<Self, ScaleError> {
         if !(MIN_SCALE..=max_scale()).contains(&scale) {
-            return Err(MappingError::InvalidScale);
+            return Err(ScaleError::InvalidScale);
         }
 
         Ok(Self(scale as i8))
@@ -94,7 +100,7 @@ impl Mapping {
         }
     }
 
-    /// Mapping for positive scales — delegates to the compiled lookup table.
+    /// Scale for positive scales — delegates to the compiled lookup table.
     #[inline]
     fn map_to_index_positive_scale(&self, value: f64) -> i32 {
         crate::lookup::map_to_index(value, self.scale())
@@ -107,31 +113,31 @@ mod tests {
 
     #[test]
     fn test_new_mapping() {
-        assert!(Mapping::new(0).is_ok());
-        assert!(Mapping::new(-10).is_ok());
-        assert!(Mapping::new(-11).is_err());
+        assert!(Scale::new(0).is_ok());
+        assert!(Scale::new(-10).is_ok());
+        assert!(Scale::new(-11).is_err());
 
         // Positive scales always available via lookup table
-        assert!(Mapping::new(1).is_ok());
+        assert!(Scale::new(1).is_ok());
 
         // All scales up to max_scale() are supported
         for scale in MIN_SCALE..=max_scale() {
             assert!(
-                Mapping::new(scale).is_ok(),
+                Scale::new(scale).is_ok(),
                 "scale {} should be supported",
                 scale
             );
         }
         // Scales above max_scale() are rejected
         if max_scale() < MAX_SCALE {
-            assert!(Mapping::new(max_scale() + 1).is_err());
+            assert!(Scale::new(max_scale() + 1).is_err());
         }
-        assert!(Mapping::new(MAX_SCALE + 1).is_err());
+        assert!(Scale::new(MAX_SCALE + 1).is_err());
     }
 
     #[test]
     fn test_min_scale() {
-        let m = Mapping::new(MIN_SCALE).unwrap();
+        let m = Scale::new(MIN_SCALE).unwrap();
         assert_eq!(m.scale(), MIN_SCALE);
 
         // At scale -10, shift = 10, so indices are exponent >> 10
@@ -149,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_map_to_index_scale_0() {
-        let m = Mapping::new(0).unwrap();
+        let m = Scale::new(0).unwrap();
         assert_eq!(m.scale(), 0, "scale should be 0");
 
         let idx_1 = m.map_to_index(1.0);
@@ -168,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_map_to_index_positive_scale() {
-        let m = Mapping::new(1).unwrap();
+        let m = Scale::new(1).unwrap();
 
         // At scale 1, each power-of-2 bucket is split in two
         assert_eq!(m.map_to_index(1.0), -1);
@@ -180,7 +186,7 @@ mod tests {
     fn test_powers_of_two_all_scales() {
         // Powers of two should map to (exp << scale) - 1 for all supported scales
         for scale in 1..=max_scale() {
-            let m = Mapping::new(scale).unwrap();
+            let m = Scale::new(scale).unwrap();
             for exp in -10..=10 {
                 let value = 2.0_f64.powi(exp);
                 let expected = (exp << scale) - 1;
