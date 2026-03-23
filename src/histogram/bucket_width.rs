@@ -97,7 +97,7 @@ impl BucketWidth {
         // Round up to the next valid width (power-of-two bit count).
         let raw_bits = 64 - value.leading_zeros(); // u32, 1..=64
         let width_bits = raw_bits.next_power_of_two(); // 1,2,4,8,16,32,64
-        // width_bits is already a valid BucketWidth discriminant.
+                                                       // width_bits is already a valid BucketWidth discriminant.
         Some(ALL_WIDTHS[width_bits.trailing_zeros() as usize])
     }
 }

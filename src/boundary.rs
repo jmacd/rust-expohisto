@@ -10,7 +10,7 @@
 //!
 //! This entire module is gated behind `#[cfg(feature = "boundary")]`.
 
-use crate::float64::{MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE, pow2};
+use crate::float64::{pow2, MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE};
 use crate::mapping::{Mapping, MappingError};
 
 include!(concat!(env!("OUT_DIR"), "/inverse_factors.rs"));

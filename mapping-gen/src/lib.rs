@@ -47,16 +47,10 @@ pub fn generate_inverse_factors() -> Vec<f64> {
 ///
 /// `factors` must have `MAX_SCALE` entries as returned by
 /// [`generate_inverse_factors`].
-pub fn write_inverse_factors<W: Write>(
-    w: &mut W,
-    factors: &[f64],
-) -> std::io::Result<()> {
+pub fn write_inverse_factors<W: Write>(w: &mut W, factors: &[f64]) -> std::io::Result<()> {
     debug_assert_eq!(factors.len(), MAX_SCALE as usize);
 
-    writeln!(
-        w,
-        "// Auto-generated inverse factor table: ln(2) / 2^scale"
-    )?;
+    writeln!(w, "// Auto-generated inverse factor table: ln(2) / 2^scale")?;
     writeln!(
         w,
         "// for scales 1..={}. Indexed as INVERSE_FACTOR[scale - 1].",
@@ -213,16 +207,8 @@ pub fn write_index_table<W: Write>(
     writeln!(w, "pub const INDEX_SHIFT: u32 = {};", shift)?;
     writeln!(w)?;
 
-    writeln!(
-        w,
-        "/// Linear-to-log index table ({} entries).",
-        count
-    )?;
-    writeln!(
-        w,
-        "pub static INDEX_TABLE: [u16; {}] = [",
-        count
-    )?;
+    writeln!(w, "/// Linear-to-log index table ({} entries).", count)?;
+    writeln!(w, "pub static INDEX_TABLE: [u16; {}] = [", count)?;
     for (i, &idx) in index_table.iter().enumerate() {
         if i % 16 == 0 {
             write!(w, "    ")?;

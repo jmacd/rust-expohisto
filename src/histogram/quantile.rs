@@ -89,15 +89,24 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
 
         // Empty histogram — no meaningful estimate.
         if self.total_count == 0 {
-            return Some(QuantileValue { quantile: q, value: f64::NAN });
+            return Some(QuantileValue {
+                quantile: q,
+                value: f64::NAN,
+            });
         }
 
         // Boundary quantiles use exact stats.
         if q <= 0.0 {
-            return Some(QuantileValue { quantile: q, value: self.min });
+            return Some(QuantileValue {
+                quantile: q,
+                value: self.min,
+            });
         }
         if q >= 1.0 {
-            return Some(QuantileValue { quantile: q, value: self.max });
+            return Some(QuantileValue {
+                quantile: q,
+                value: self.max,
+            });
         }
 
         let target = q * self.total_count as f64;
@@ -108,7 +117,10 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
             self.zeros_processed = true;
         }
         if self.cumulative as f64 >= target {
-            return Some(QuantileValue { quantile: q, value: 0.0 });
+            return Some(QuantileValue {
+                quantile: q,
+                value: 0.0,
+            });
         }
 
         // Walk positive buckets until cumulative count reaches the target.
@@ -133,10 +145,7 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
                 // representable f64.  In that case self.max is the
                 // correct upper bound for interpolation.
                 let lower = self.mapping.lower_boundary(index).unwrap_or(0.0);
-                let upper = self
-                    .mapping
-                    .lower_boundary(index + 1)
-                    .unwrap_or(self.max);
+                let upper = self.mapping.lower_boundary(index + 1).unwrap_or(self.max);
                 let fraction = (target - self.cumulative as f64) / count as f64;
                 let value = (lower + fraction * (upper - lower)).clamp(self.min, self.max);
 
@@ -150,7 +159,10 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
         }
 
         // All buckets exhausted — return max.
-        Some(QuantileValue { quantile: q, value: self.max })
+        Some(QuantileValue {
+            quantile: q,
+            value: self.max,
+        })
     }
 
     #[inline]

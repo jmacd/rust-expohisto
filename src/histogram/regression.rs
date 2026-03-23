@@ -19,5 +19,8 @@ fn trim_bucket_range_preserves_literal_mode() {
     let buckets = view.positive();
     let bucket_total: u64 = buckets.iter().sum();
     assert_eq!(view.count(), 14);
-    assert_eq!(bucket_total, 2, "non-zero observations should be in buckets");
+    assert_eq!(
+        bucket_total, 2,
+        "non-zero observations should be in buckets"
+    );
 }

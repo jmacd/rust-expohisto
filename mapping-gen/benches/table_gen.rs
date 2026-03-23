@@ -6,7 +6,7 @@
 //! This measures the cost of generating tables at runtime,
 //! which is relevant for lazy initialization strategies.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use expohisto_mapping_gen::LookupTables;
 
 fn bench_table_generation(c: &mut Criterion) {

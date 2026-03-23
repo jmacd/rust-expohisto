@@ -136,7 +136,15 @@ impl<const N: usize> HistogramView<'_, N> {
         };
 
         QuantileIter::new(
-            self.hist, mapping, quantiles, bucket_len, offset, total_count, zero_count, min, max,
+            self.hist,
+            mapping,
+            quantiles,
+            bucket_len,
+            offset,
+            total_count,
+            zero_count,
+            min,
+            max,
         )
     }
 }

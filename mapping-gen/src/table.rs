@@ -73,15 +73,17 @@ impl LookupTables {
         writeln!(
             w,
             "// Auto-generated lookup tables with {} index bits ({} buckets)",
-            self.index_bits,
-            self.n
+            self.index_bits, self.n
         )?;
         writeln!(w)?;
 
         writeln!(w, "use crate::float64::SIGNIFICAND_WIDTH;")?;
         writeln!(w)?;
 
-        writeln!(w, "/// Maximum histogram scale supported by this lookup table.")?;
+        writeln!(
+            w,
+            "/// Maximum histogram scale supported by this lookup table."
+        )?;
         writeln!(w, "pub const LOOKUP_SCALE: i32 = {};", self.index_bits)?;
         writeln!(w)?;
 
@@ -130,7 +132,10 @@ impl LookupTables {
         writeln!(w, "];")?;
         writeln!(w)?;
 
-        writeln!(w, "/// End significand (52-bit) for each log bucket (upper-inclusive).")?;
+        writeln!(
+            w,
+            "/// End significand (52-bit) for each log bucket (upper-inclusive)."
+        )?;
         writeln!(
             w,
             "/// boundary[0] = 1 handles upper-inclusive semantics: significand 0"
@@ -300,10 +305,21 @@ mod tests {
         for index_bits in [6, 8, 10, 12, 14] {
             let tables = LookupTables::generate(index_bits);
             let n = 1usize << index_bits;
-            assert_eq!(tables.index_bits, index_bits, "index_bits at scale {index_bits}");
+            assert_eq!(
+                tables.index_bits, index_bits,
+                "index_bits at scale {index_bits}"
+            );
             assert_eq!(tables.n, n, "n at scale {index_bits}");
-            assert_eq!(tables.log_bucket_index.len(), 2 * n, "index len at scale {index_bits}");
-            assert_eq!(tables.log_bucket_end.len(), n + 1, "boundary len at scale {index_bits}");
+            assert_eq!(
+                tables.log_bucket_index.len(),
+                2 * n,
+                "index len at scale {index_bits}"
+            );
+            assert_eq!(
+                tables.log_bucket_end.len(),
+                n + 1,
+                "boundary len at scale {index_bits}"
+            );
             assert_eq!(
                 tables.significand_shift,
                 52 - (index_bits + 1),
@@ -667,7 +683,10 @@ mod tests {
         // is ≥ 2^(2⁻²⁰).  Because 2^(2⁻²⁰) is irrational, this f64 is strictly
         // greater; it therefore falls in sub-bucket 1, not 0.
         let boundary_sig = boundaries[1];
-        eprintln!("First boundary significand: {} ({:#X})", boundary_sig, boundary_sig);
+        eprintln!(
+            "First boundary significand: {} ({:#X})",
+            boundary_sig, boundary_sig
+        );
 
         // Build lookup tables from these boundaries.
         eprintln!("Building lookup tables...");
@@ -679,7 +698,10 @@ mod tests {
         let start_bits = 1.0_f64.to_bits();
         let end_bits = start_bits + boundary_sig;
         let total = boundary_sig + 1;
-        eprintln!("Testing {} values (significands 0..={})", total, boundary_sig);
+        eprintln!(
+            "Testing {} values (significands 0..={})",
+            total, boundary_sig
+        );
 
         let mut errors = 0u64;
         let report_interval = 1u64 << 28; // ~268 M, progress reports ~11×
@@ -706,7 +728,10 @@ mod tests {
                 if errors < 10 {
                     eprintln!(
                         "error #{}: significand={} expected={} got={}",
-                        errors + 1, significand, expected, idx
+                        errors + 1,
+                        significand,
+                        expected,
+                        idx
                     );
                 }
                 errors += 1;
@@ -715,7 +740,8 @@ mod tests {
             if significand > 0 && significand % report_interval == 0 {
                 eprintln!(
                     "  progress: {}/{} ({:.1}%)",
-                    significand, total,
+                    significand,
+                    total,
                     significand as f64 / total as f64 * 100.0
                 );
             }

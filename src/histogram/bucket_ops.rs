@@ -105,11 +105,7 @@ impl<const N: usize> Histogram<N> {
     /// Safe path: `count ≤ counter_max`, so no group can overflow.
     /// This always covers the U64 case (count is u64, counter_max
     /// is u64::MAX).
-    fn downscale_safe(
-        &mut self,
-        ctx: &DownscaleCtx<'_, N>,
-        w: BucketWidth,
-    ) {
+    fn downscale_safe(&mut self, ctx: &DownscaleCtx<'_, N>, w: BucketWidth) {
         let base = w.word_start(ctx.new_start);
         self.init_output(w, base, ctx.new_start, ctx.new_end);
 
@@ -190,13 +186,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Initializes output state for a downscale pass.
     #[inline]
-    fn init_output(
-        &mut self,
-        width: BucketWidth,
-        base: i32,
-        start: i32,
-        end: i32,
-    ) {
+    fn init_output(&mut self, width: BucketWidth, base: i32, start: i32, end: i32) {
         self.data = [0u64; N];
         self.bucket_width = width;
         self.index_base = base;

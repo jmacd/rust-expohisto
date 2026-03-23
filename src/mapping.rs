@@ -68,9 +68,7 @@ impl Mapping {
             return Err(MappingError::InvalidScale);
         }
 
-        Ok(Self {
-            scale,
-        })
+        Ok(Self { scale })
     }
 
     /// Returns the current scale.
@@ -117,7 +115,11 @@ mod tests {
 
         // All scales up to max_scale() are supported
         for scale in MIN_SCALE..=max_scale() {
-            assert!(Mapping::new(scale).is_ok(), "scale {} should be supported", scale);
+            assert!(
+                Mapping::new(scale).is_ok(),
+                "scale {} should be supported",
+                scale
+            );
         }
         // Scales above max_scale() are rejected
         if max_scale() < MAX_SCALE {

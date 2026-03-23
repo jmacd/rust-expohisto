@@ -2,10 +2,8 @@
 extern crate std;
 use std::{format, vec, vec::Vec};
 
+use super::swar::{narrow_word, swar_has_overflow, swar_narrow_compact, swar_step};
 use super::*;
-use super::swar::{
-    narrow_word, swar_has_overflow, swar_narrow_compact, swar_step,
-};
 
 /// Helper: count total across all positive buckets.
 fn bucket_total<const N: usize>(h: &mut Histogram<N>) -> u64 {
@@ -141,7 +139,9 @@ fn test_auto_widen_b4_to_u8_from_b4_start() {
 
 #[test]
 fn test_bucket_count_halves_on_widen() {
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap()
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
         .with_min_bucket_width(BucketWidth::B4)
         .with_literal_mode(false);
     let initial_cap = h.bucket_capacity();
@@ -154,7 +154,9 @@ fn test_bucket_count_halves_on_widen() {
 
 #[test]
 fn test_recreate_preserves_b4() {
-    let mut h: Histogram<16> = Histogram::new().with_scale(3).unwrap()
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(3)
+        .unwrap()
         .with_min_bucket_width(BucketWidth::B4)
         .with_literal_mode(false);
     assert_eq!(h.bucket_width(), BucketWidth::B4);
@@ -279,7 +281,11 @@ fn test_merge_equivalence_for_size<const K: usize>(test_sets: &[Vec<f64>]) {
             let label = format!("size={K} sets {i} x {j}");
             let merged_view = merged.view();
             let single_view = single.view();
-            assert_eq!(merged_view.count(), single_view.count(), "count mismatch for {label}");
+            assert_eq!(
+                merged_view.count(),
+                single_view.count(),
+                "count mismatch for {label}"
+            );
             let ms = merged_view.sum();
             let ss = single_view.sum();
             let sum_diff = (ms - ss).abs();
@@ -322,7 +328,10 @@ fn test_merge_regression_bucket_total() {
             let v = other.view();
             v.count()
         } - derived_zero_count(&mut other);
-        assert_eq!(bt, non_zero_count, "bucket total mismatch after inserting {v}");
+        assert_eq!(
+            bt, non_zero_count,
+            "bucket total mismatch after inserting {v}"
+        );
     }
 
     let set_a: &[f64] = &[1.0];
@@ -403,7 +412,10 @@ fn test_nan_and_negative_debug_asserts() {
         let mut h2 = h.clone();
         h2.update(-1.0).unwrap();
     }));
-    assert!(result.is_err(), "negative values should trigger debug_assert");
+    assert!(
+        result.is_err(),
+        "negative values should trigger debug_assert"
+    );
 }
 
 #[test]
@@ -432,7 +444,9 @@ fn test_exhaustive_u8_overflow() {
 
 #[test]
 fn test_successive_sub_byte_widening() {
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap()
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
         .with_min_bucket_width(BucketWidth::B4)
         .with_literal_mode(false);
 
@@ -461,7 +475,10 @@ fn test_successive_sub_byte_widening() {
 
 #[test]
 fn test_successive_sub_byte_widening_multi_bucket() {
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap().with_min_bucket_width(BucketWidth::B4);
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
+        .with_min_bucket_width(BucketWidth::B4);
     let num_buckets = 8;
     let values: Vec<f64> = (1..=num_buckets).map(|k| 2.0_f64.powi(k)).collect();
 
@@ -706,19 +723,18 @@ fn assert_swar_roundtrip(
             );
         }
         for (i, word) in slice[expected.len()..input.len()].iter().enumerate() {
-            assert_eq!(*word, 0, "word {} should be zeroed after compact", expected.len() + i);
+            assert_eq!(
+                *word,
+                0,
+                "word {} should be zeroed after compact",
+                expected.len() + i
+            );
         }
     }
 }
 
 /// Helper for asserting `Stats` fields.
-fn assert_stats<const N: usize>(
-    h: &mut Histogram<N>,
-    count: u64,
-    sum: f64,
-    min: f64,
-    max: f64,
-) {
+fn assert_stats<const N: usize>(h: &mut Histogram<N>, count: u64, sum: f64, min: f64, max: f64) {
     let v = h.view();
     assert_eq!(v.count(), count, "count");
     assert_eq!(v.sum(), sum, "sum");
@@ -747,11 +763,7 @@ fn assert_literal_matches_bucket(values: &[f64]) {
     assert_eq!(lit_buckets.offset(), bkt_buckets.offset(), "offset");
     assert_eq!(lit_buckets.len(), bkt_buckets.len(), "len");
     for i in 0..lit_buckets.len() {
-        assert_eq!(
-            lit_buckets.at(i),
-            bkt_buckets.at(i),
-            "bucket[{i}] mismatch"
-        );
+        assert_eq!(lit_buckets.at(i), bkt_buckets.at(i), "bucket[{i}] mismatch");
     }
 }
 
@@ -892,11 +904,7 @@ fn test_swar_narrow_compact_odd_word_counts() {
     let lo0 = narrow_word(w0, BucketWidth::B4);
     let hi0 = narrow_word(w1, BucketWidth::B4);
     let lo1 = narrow_word(w2, BucketWidth::B4);
-    assert_compact(
-        BucketWidth::B4,
-        &[w0, w1, w2],
-        &[lo0 | (hi0 << 32), lo1],
-    );
+    assert_compact(BucketWidth::B4, &[w0, w1, w2], &[lo0 | (hi0 << 32), lo1]);
 
     // U8: 3 words → 2 compacted words
     let expected1 = narrow_word(pack_u16x4([255, 0, 128, 1]), BucketWidth::U8);
@@ -988,9 +996,7 @@ fn test_swar_step_then_narrow_compact_roundtrip() {
             pack_u8x8([3, 7, 0, 0, 0, 0, 0, 0]),
             pack_u8x8([0, 0, 0, 0, 0, 0, 5, 6]),
         ],
-        Some(&[pack_b4x16([
-            3, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6,
-        ])]),
+        Some(&[pack_b4x16([3, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6])]),
     );
 
     // U8: pair sums ≤ 255 → compact back to U8
@@ -1045,8 +1051,10 @@ fn test_downscale_width_behavior() {
     // Helper: insert ops into a B4 histogram at scale 0,
     // downscale(1), and verify the expected final width.
     let check = |ops: &[(f64, u64)], expected_width: BucketWidth, label: &str| {
-        let mut h: Histogram<16> =
-            Histogram::new().with_scale(0).unwrap().with_min_bucket_width(BucketWidth::B4);
+        let mut h: Histogram<16> = Histogram::new()
+            .with_scale(0)
+            .unwrap()
+            .with_min_bucket_width(BucketWidth::B4);
         for &(v, incr) in ops {
             h.record(v, incr).unwrap();
         }
@@ -1056,14 +1064,24 @@ fn test_downscale_width_behavior() {
     };
 
     check(&[(2.0, 5), (4.0, 7)], BucketWidth::B4, "small sums stay B4");
-    check(&[(2.0, 10), (4.0, 10)], BucketWidth::U8, "overflow widens to U8");
-    check(&[(2.0, 15), (4.0, 15)], BucketWidth::U8, "max B4 overflow widens to U8");
+    check(
+        &[(2.0, 10), (4.0, 10)],
+        BucketWidth::U8,
+        "overflow widens to U8",
+    );
+    check(
+        &[(2.0, 15), (4.0, 15)],
+        BucketWidth::U8,
+        "max B4 overflow widens to U8",
+    );
 }
 
 #[test]
 fn test_downscale_many_indices_preserves_width() {
     // Many small counts at spread-out indices → pair sums ≤ 2, stays B4.
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap()
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
         .with_min_bucket_width(BucketWidth::B4)
         .with_literal_mode(false);
     for i in 0..8 {
@@ -1115,12 +1133,7 @@ fn test_swar_step_single_word() {
             "u16",
         ),
         // U32: 2 ints → 1 u64 sum
-        (
-            BucketWidth::U32,
-            pack_u32x2(100000, 200000),
-            300000,
-            "u32",
-        ),
+        (BucketWidth::U32, pack_u32x2(100000, 200000), 300000, "u32"),
     ];
     for &(width, input, expected, label) in cases {
         let mut data = [input];
@@ -1169,7 +1182,10 @@ fn test_scale_reduction() {
 fn test_bucket_downscale_scalar_preserves_total_no_overflow() {
     // Two values at adjacent indices with small counts → scalar merge
     // should sum them without widening.
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap().with_literal_mode(false);
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
+        .with_literal_mode(false);
     h.record(2.0, 3).unwrap(); // index 0
     h.record(4.0, 5).unwrap(); // index 1
 
@@ -1194,7 +1210,9 @@ fn test_bucket_downscale_scalar_preserves_total_with_overflow() {
 #[test]
 fn test_downscale_multi_step_preserves_total() {
     // Insert 4 values at separate indices, then downscale by 3.
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap()
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
         .with_min_bucket_width(BucketWidth::B4)
         .with_literal_mode(false);
     for i in 0..4 {
@@ -1216,7 +1234,10 @@ fn test_downscale_multi_step_preserves_total() {
 fn test_downscale_multi_step_through_alignment_boundary() {
     // Start with base aligned to 16, downscale 5+ times so base
     // goes from even to odd and back. Verify totals survive.
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap().with_literal_mode(false);
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
+        .with_literal_mode(false);
     for i in 0..8 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1234,7 +1255,10 @@ fn test_downscale_multi_step_through_alignment_boundary() {
 #[test]
 fn test_downscale_odd_base_preserves_total() {
     // Downscale through odd-base steps using SWAR-shift.
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap().with_literal_mode(false);
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
+        .with_literal_mode(false);
     for i in 0..4 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1285,7 +1309,9 @@ fn test_odd_base_downscale_preserves_total() {
 fn test_speculative_merge_width_behavior() {
     // B4 sparse: many single-count buckets, pair sums ≤ 2 → stays B4
     {
-        let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap()
+        let mut h: Histogram<16> = Histogram::new()
+            .with_scale(0)
+            .unwrap()
             .with_min_bucket_width(BucketWidth::B4)
             .with_literal_mode(false);
         for i in 0..16 {
@@ -1343,7 +1369,10 @@ fn test_sum_conservation_through_full_widen_chain() {
 #[test]
 fn test_sum_conservation_scalar_path() {
     // Force the scalar path and check totals at each step.
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap().with_literal_mode(false);
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
+        .with_literal_mode(false);
     for i in 0..10 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1617,8 +1646,7 @@ fn test_weighted_subnormal_merge_bucket_total() {
     let v1 = f64::from_le_bytes([32, 0, 66, 0, 0, 98, 65, 3]); // ~5.44e-293, subnormal as f32
     let v2 = f64::from_le_bytes([0, 32, 0, 66, 0, 98, 65, 64]); // ~34.77
 
-    let left_ops: Vec<(f64, u64)> =
-        vec![(v1, 3), (v2, 1), (v1, 12), (v2, 4), (v1, 192), (v2, 64)];
+    let left_ops: Vec<(f64, u64)> = vec![(v1, 3), (v2, 1), (v1, 12), (v2, 4), (v1, 192), (v2, 64)];
     let right_ops: Vec<(f64, u64)> = vec![(v1, 3072), (v2, 1024)];
 
     merge_check::<8>(&left_ops, &right_ops, "same N=8");
@@ -1922,7 +1950,10 @@ fn test_merge_literal_source_not_promoted() {
     let source = build_from_values::<16>(&[10.0, 20.0, 30.0]);
     assert!(source.is_literal());
     dest.merge_from(&source).unwrap();
-    assert!(source.is_literal(), "same-size merge must not promote source");
+    assert!(
+        source.is_literal(),
+        "same-size merge must not promote source"
+    );
     assert_eq!(dest.view().count(), 6);
 
     // Cross-size merge: small literal source into large bucket dest.
@@ -1930,7 +1961,10 @@ fn test_merge_literal_source_not_promoted() {
     let small = build_from_values::<8>(&[100.0, 200.0]);
     assert!(small.is_literal());
     big.merge_from(&small).unwrap();
-    assert!(small.is_literal(), "cross-size merge must not promote source");
+    assert!(
+        small.is_literal(),
+        "cross-size merge must not promote source"
+    );
     assert_eq!(big.view().count(), 5);
 
     // Wide-range literal values: ensure even with values spanning
@@ -1940,9 +1974,16 @@ fn test_merge_literal_source_not_promoted() {
     let source2 = build_from_values::<16>(&[1e-200, 1e200]);
     assert!(source2.is_literal());
     dest2.merge_from(&source2).unwrap();
-    assert!(source2.is_literal(), "wide-range merge must not promote source");
+    assert!(
+        source2.is_literal(),
+        "wide-range merge must not promote source"
+    );
     assert_eq!(dest2.view().count(), 3);
-    assert_eq!(bucket_total(&mut dest2), 3, "all three non-zero values should be in buckets");
+    assert_eq!(
+        bucket_total(&mut dest2),
+        3,
+        "all three non-zero values should be in buckets"
+    );
 }
 
 #[test]
@@ -2001,268 +2042,282 @@ mod quantile_tests {
 
     #[test]
     fn test_quantile_empty_histogram() {
-    let mut h: Histogram<8> = Histogram::new();
-    let qs = [0.0, 0.5, 1.0];
-    let v = h.view();
-    let vals: Vec<_> = v.quantiles(&qs).collect();
-    assert_eq!(vals.len(), 3);
-    for v in &vals {
-        assert!(v.value.is_nan(), "empty histogram should yield NaN");
-    }
-}
-
-#[test]
-fn test_quantile_single_value() {
-    let mut h: Histogram<8> = Histogram::new();
-    h.update(42.0).unwrap();
-    let qs = [0.0, 0.5, 1.0];
-    let v = h.view();
-    let vals: Vec<_> = v.quantiles(&qs).collect();
-    assert_eq!(vals[0].value, 42.0); // p0 = min
-    assert_eq!(vals[2].value, 42.0); // p100 = max
-    assert!(
-        (vals[1].value - 42.0).abs() < 1.0,
-        "p50 = {} should be near 42.0",
-        vals[1].value
-    );
-}
-
-#[test]
-fn test_quantile_with_zeros() {
-    let mut h: Histogram<8> = Histogram::new();
-    for _ in 0..90 {
-        h.update(0.0).unwrap();
-    }
-    for _ in 0..10 {
-        h.update(100.0).unwrap();
-    }
-
-    let qs = [0.0, 0.5, 0.89, 0.95, 1.0];
-    let v = h.view();
-    let vals: Vec<_> = v.quantiles(&qs).collect();
-    assert_eq!(vals[0].value, 0.0, "p0 = min = 0");
-    assert_eq!(vals[1].value, 0.0, "p50 should be 0 (90% are zeros)");
-    assert_eq!(vals[2].value, 0.0, "p89 should still be 0");
-    assert!(vals[3].value > 0.0, "p95 should be > 0");
-    assert_eq!(vals[4].value, 100.0, "p100 = max");
-}
-
-/// Tests monotonicity, p0=min, p100=max, clamping, and ExactSizeIterator.
-#[test]
-fn test_quantile_properties() {
-    let mut h: Histogram<8> = Histogram::new();
-    for v in 1..=1000 {
-        h.update(v as f64).unwrap();
-    }
-
-    let qs = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0];
-    let view = h.view();
-    let iter = view.quantiles(&qs);
-    assert_eq!(iter.len(), qs.len(), "ExactSizeIterator");
-    let vals: Vec<_> = iter.collect();
-
-    // p0 = min, p100 = max.
-    assert_eq!(vals[0].value, view.min());
-    assert_eq!(vals[qs.len() - 1].value, view.max());
-
-    // All values clamped to [min, max].
-    for v in &vals {
-        assert!(
-            v.value >= view.min() && v.value <= view.max(),
-            "q={} value {} outside [{}, {}]",
-            v.quantile,
-            v.value,
-            view.min(),
-            view.max()
-        );
-    }
-
-    // Monotonically non-decreasing.
-    for w in vals.windows(2) {
-        assert!(
-            w[0].value <= w[1].value,
-            "not monotonic: q{}={} > q{}={}",
-            w[0].quantile,
-            w[0].value,
-            w[1].quantile,
-            w[1].value,
-        );
-    }
-
-    // Rough sanity: p50 should be near 500.
-    assert!(
-        (vals[3].value - 500.0).abs() < 100.0,
-        "p50 = {} should be near 500",
-        vals[3].value
-    );
-}
-
-/// All-same-value histogram: every quantile should return that value.
-#[test]
-fn test_quantile_all_same_value() {
-    let mut h: Histogram<8> = Histogram::new();
-    for _ in 0..100 {
-        h.update(7.0).unwrap();
-    }
-    let qs = [0.0, 0.25, 0.5, 0.75, 1.0];
-    let view = h.view();
-    let vals: Vec<_> = view.quantiles(&qs).collect();
-    for v in &vals {
-        assert_eq!(v.value, 7.0, "all-same histogram: q{}={}", v.quantile, v.value);
-    }
-}
-
-/// Monotonicity with many closely-spaced quantiles.
-#[test]
-fn test_quantile_fine_grained_monotonicity() {
-    let mut h: Histogram<16> = Histogram::new();
-    for v in 1..=500 {
-        h.update(v as f64).unwrap();
-    }
-    let qs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
-    let view = h.view();
-    let vals: Vec<_> = view.quantiles(&qs).collect();
-
-    assert_eq!(vals[0].value, view.min());
-    assert_eq!(vals[100].value, view.max());
-
-    for w in vals.windows(2) {
-        assert!(
-            w[0].value <= w[1].value,
-            "not monotonic at q={}: {} > {}",
-            w[1].quantile, w[0].value, w[1].value,
-        );
-    }
-}
-
-// -- Distribution-based goodness-of-fit test ------------------------------
-
-/// Error function via Horner form of the Abramowitz & Stegun
-/// approximation (max error ~1.5 × 10⁻⁷).
-fn erf(x: f64) -> f64 {
-    let a = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * a);
-    let poly = t
-        * (0.254829592
-            + t * (-0.284496736
-                + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    let result = 1.0 - poly * (-a * a).exp();
-    if x < 0.0 { -result } else { result }
-}
-
-/// Computes reduced χ²/df of histogram bucket counts vs a theoretical
-/// CDF. Bins with expected count < 5 are merged with neighbours.
-fn reduced_chi_squared<const N: usize>(
-    h: &mut Histogram<N>,
-    cdf: fn(f64) -> f64,
-) -> f64 {
-    let histogram_view = h.view();
-    let scale = histogram_view.scale();
-    let mapping = Mapping::new(scale).unwrap();
-    let total = histogram_view.count() as f64;
-    let view = histogram_view.positive();
-
-    // Collect (observed, expected) per bucket, merging on the fly.
-    let mut merged: Vec<(f64, f64)> = Vec::new();
-    let (mut acc_o, mut acc_e) = (0.0, 0.0);
-    for pos in 0..view.len() {
-        let index = view.offset() + pos as i32;
-        let lower = mapping.lower_boundary(index).unwrap_or(0.0);
-        let upper = mapping.lower_boundary(index + 1).unwrap_or(f64::INFINITY);
-        acc_o += view.at(pos) as f64;
-        acc_e += total * (cdf(upper) - cdf(lower));
-        if acc_e >= 5.0 {
-            merged.push((acc_o, acc_e));
-            acc_o = 0.0;
-            acc_e = 0.0;
-        }
-    }
-    if acc_e > 0.0 {
-        if let Some(last) = merged.last_mut() {
-            last.0 += acc_o;
-            last.1 += acc_e;
-        }
-    }
-
-    let df = merged.len().saturating_sub(1).max(1);
-    let chi2: f64 = merged.iter().map(|(o, e)| (o - e).powi(2) / e).sum();
-    chi2 / df as f64
-}
-
-/// Chi-squared goodness-of-fit: validates histogram bucket counts
-/// against three theoretical CDFs and spot-checks the p50 quantile.
-#[test]
-fn test_goodness_of_fit() {
-    use rand::SeedableRng;
-    use rand_distr::{Distribution, Exp, LogNormal, Uniform};
-
-    struct Case {
-        name: &'static str,
-        seed: u64,
-        sample: fn(&mut rand::rngs::StdRng) -> f64,
-        cdf: fn(f64) -> f64,
-        p50_expected: f64,
-    }
-
-    let cases = [
-        Case {
-            name: "Exponential(1.5)",
-            seed: 42,
-            sample: |rng| Exp::new(1.5).unwrap().sample(rng),
-            cdf: |x| 1.0 - (-1.5 * x).exp(),
-            p50_expected: core::f64::consts::LN_2 / 1.5,
-        },
-        Case {
-            name: "LogNormal(2, 0.5)",
-            seed: 123,
-            sample: |rng| LogNormal::new(2.0, 0.5).unwrap().sample(rng),
-            cdf: |x| {
-                0.5 * (1.0 + erf((x.ln() - 2.0) / (0.5 * std::f64::consts::SQRT_2)))
-            },
-            p50_expected: (2.0_f64).exp(),
-        },
-        Case {
-            name: "Uniform(10, 500)",
-            seed: 999,
-            sample: |rng| Uniform::new(10.0, 500.0).sample(rng),
-            cdf: |x| ((x - 10.0) / 490.0).clamp(0.0, 1.0),
-            p50_expected: 255.0,
-        },
-    ];
-
-    for case in &cases {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(case.seed);
-        let mut h: Histogram<160> = Histogram::new();
-        for _ in 0..1_000_000 {
-            h.update((case.sample)(&mut rng)).unwrap();
-        }
-
-        let reduced = reduced_chi_squared(&mut h, case.cdf);
-        eprintln!("{}: χ²/df={reduced:.4}", case.name);
-        assert!(
-            reduced < 2.0,
-            "{}: reduced χ²={reduced:.4} exceeds 2.0",
-            case.name,
-        );
-
-        // Spot-check p0, p50, p100.
+        let mut h: Histogram<8> = Histogram::new();
         let qs = [0.0, 0.5, 1.0];
+        let v = h.view();
+        let vals: Vec<_> = v.quantiles(&qs).collect();
+        assert_eq!(vals.len(), 3);
+        for v in &vals {
+            assert!(v.value.is_nan(), "empty histogram should yield NaN");
+        }
+    }
+
+    #[test]
+    fn test_quantile_single_value() {
+        let mut h: Histogram<8> = Histogram::new();
+        h.update(42.0).unwrap();
+        let qs = [0.0, 0.5, 1.0];
+        let v = h.view();
+        let vals: Vec<_> = v.quantiles(&qs).collect();
+        assert_eq!(vals[0].value, 42.0); // p0 = min
+        assert_eq!(vals[2].value, 42.0); // p100 = max
+        assert!(
+            (vals[1].value - 42.0).abs() < 1.0,
+            "p50 = {} should be near 42.0",
+            vals[1].value
+        );
+    }
+
+    #[test]
+    fn test_quantile_with_zeros() {
+        let mut h: Histogram<8> = Histogram::new();
+        for _ in 0..90 {
+            h.update(0.0).unwrap();
+        }
+        for _ in 0..10 {
+            h.update(100.0).unwrap();
+        }
+
+        let qs = [0.0, 0.5, 0.89, 0.95, 1.0];
+        let v = h.view();
+        let vals: Vec<_> = v.quantiles(&qs).collect();
+        assert_eq!(vals[0].value, 0.0, "p0 = min = 0");
+        assert_eq!(vals[1].value, 0.0, "p50 should be 0 (90% are zeros)");
+        assert_eq!(vals[2].value, 0.0, "p89 should still be 0");
+        assert!(vals[3].value > 0.0, "p95 should be > 0");
+        assert_eq!(vals[4].value, 100.0, "p100 = max");
+    }
+
+    /// Tests monotonicity, p0=min, p100=max, clamping, and ExactSizeIterator.
+    #[test]
+    fn test_quantile_properties() {
+        let mut h: Histogram<8> = Histogram::new();
+        for v in 1..=1000 {
+            h.update(v as f64).unwrap();
+        }
+
+        let qs = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0];
+        let view = h.view();
+        let iter = view.quantiles(&qs);
+        assert_eq!(iter.len(), qs.len(), "ExactSizeIterator");
+        let vals: Vec<_> = iter.collect();
+
+        // p0 = min, p100 = max.
+        assert_eq!(vals[0].value, view.min());
+        assert_eq!(vals[qs.len() - 1].value, view.max());
+
+        // All values clamped to [min, max].
+        for v in &vals {
+            assert!(
+                v.value >= view.min() && v.value <= view.max(),
+                "q={} value {} outside [{}, {}]",
+                v.quantile,
+                v.value,
+                view.min(),
+                view.max()
+            );
+        }
+
+        // Monotonically non-decreasing.
+        for w in vals.windows(2) {
+            assert!(
+                w[0].value <= w[1].value,
+                "not monotonic: q{}={} > q{}={}",
+                w[0].quantile,
+                w[0].value,
+                w[1].quantile,
+                w[1].value,
+            );
+        }
+
+        // Rough sanity: p50 should be near 500.
+        assert!(
+            (vals[3].value - 500.0).abs() < 100.0,
+            "p50 = {} should be near 500",
+            vals[3].value
+        );
+    }
+
+    /// All-same-value histogram: every quantile should return that value.
+    #[test]
+    fn test_quantile_all_same_value() {
+        let mut h: Histogram<8> = Histogram::new();
+        for _ in 0..100 {
+            h.update(7.0).unwrap();
+        }
+        let qs = [0.0, 0.25, 0.5, 0.75, 1.0];
         let view = h.view();
         let vals: Vec<_> = view.quantiles(&qs).collect();
-        assert_eq!(vals[0].value, view.min(), "{}: p0 must equal min", case.name);
-        assert_eq!(vals[2].value, view.max(), "{}: p100 must equal max", case.name);
-
-        let p50_err = ((vals[1].value - case.p50_expected) / case.p50_expected).abs();
-        assert!(
-            p50_err < 0.05,
-            "{}: p50={:.4} expected={:.4} err={:.2}%",
-            case.name,
-            vals[1].value,
-            case.p50_expected,
-            p50_err * 100.0,
-        );
+        for v in &vals {
+            assert_eq!(
+                v.value, 7.0,
+                "all-same histogram: q{}={}",
+                v.quantile, v.value
+            );
+        }
     }
-}
+
+    /// Monotonicity with many closely-spaced quantiles.
+    #[test]
+    fn test_quantile_fine_grained_monotonicity() {
+        let mut h: Histogram<16> = Histogram::new();
+        for v in 1..=500 {
+            h.update(v as f64).unwrap();
+        }
+        let qs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
+        let view = h.view();
+        let vals: Vec<_> = view.quantiles(&qs).collect();
+
+        assert_eq!(vals[0].value, view.min());
+        assert_eq!(vals[100].value, view.max());
+
+        for w in vals.windows(2) {
+            assert!(
+                w[0].value <= w[1].value,
+                "not monotonic at q={}: {} > {}",
+                w[1].quantile,
+                w[0].value,
+                w[1].value,
+            );
+        }
+    }
+
+    // -- Distribution-based goodness-of-fit test ------------------------------
+
+    /// Error function via Horner form of the Abramowitz & Stegun
+    /// approximation (max error ~1.5 × 10⁻⁷).
+    fn erf(x: f64) -> f64 {
+        let a = x.abs();
+        let t = 1.0 / (1.0 + 0.3275911 * a);
+        let poly = t
+            * (0.254829592
+                + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+        let result = 1.0 - poly * (-a * a).exp();
+        if x < 0.0 {
+            -result
+        } else {
+            result
+        }
+    }
+
+    /// Computes reduced χ²/df of histogram bucket counts vs a theoretical
+    /// CDF. Bins with expected count < 5 are merged with neighbours.
+    fn reduced_chi_squared<const N: usize>(h: &mut Histogram<N>, cdf: fn(f64) -> f64) -> f64 {
+        let histogram_view = h.view();
+        let scale = histogram_view.scale();
+        let mapping = Mapping::new(scale).unwrap();
+        let total = histogram_view.count() as f64;
+        let view = histogram_view.positive();
+
+        // Collect (observed, expected) per bucket, merging on the fly.
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        let (mut acc_o, mut acc_e) = (0.0, 0.0);
+        for pos in 0..view.len() {
+            let index = view.offset() + pos as i32;
+            let lower = mapping.lower_boundary(index).unwrap_or(0.0);
+            let upper = mapping.lower_boundary(index + 1).unwrap_or(f64::INFINITY);
+            acc_o += view.at(pos) as f64;
+            acc_e += total * (cdf(upper) - cdf(lower));
+            if acc_e >= 5.0 {
+                merged.push((acc_o, acc_e));
+                acc_o = 0.0;
+                acc_e = 0.0;
+            }
+        }
+        if acc_e > 0.0 {
+            if let Some(last) = merged.last_mut() {
+                last.0 += acc_o;
+                last.1 += acc_e;
+            }
+        }
+
+        let df = merged.len().saturating_sub(1).max(1);
+        let chi2: f64 = merged.iter().map(|(o, e)| (o - e).powi(2) / e).sum();
+        chi2 / df as f64
+    }
+
+    /// Chi-squared goodness-of-fit: validates histogram bucket counts
+    /// against three theoretical CDFs and spot-checks the p50 quantile.
+    #[test]
+    fn test_goodness_of_fit() {
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Exp, LogNormal, Uniform};
+
+        struct Case {
+            name: &'static str,
+            seed: u64,
+            sample: fn(&mut rand::rngs::StdRng) -> f64,
+            cdf: fn(f64) -> f64,
+            p50_expected: f64,
+        }
+
+        let cases = [
+            Case {
+                name: "Exponential(1.5)",
+                seed: 42,
+                sample: |rng| Exp::new(1.5).unwrap().sample(rng),
+                cdf: |x| 1.0 - (-1.5 * x).exp(),
+                p50_expected: core::f64::consts::LN_2 / 1.5,
+            },
+            Case {
+                name: "LogNormal(2, 0.5)",
+                seed: 123,
+                sample: |rng| LogNormal::new(2.0, 0.5).unwrap().sample(rng),
+                cdf: |x| 0.5 * (1.0 + erf((x.ln() - 2.0) / (0.5 * std::f64::consts::SQRT_2))),
+                p50_expected: (2.0_f64).exp(),
+            },
+            Case {
+                name: "Uniform(10, 500)",
+                seed: 999,
+                sample: |rng| Uniform::new(10.0, 500.0).sample(rng),
+                cdf: |x| ((x - 10.0) / 490.0).clamp(0.0, 1.0),
+                p50_expected: 255.0,
+            },
+        ];
+
+        for case in &cases {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(case.seed);
+            let mut h: Histogram<160> = Histogram::new();
+            for _ in 0..1_000_000 {
+                h.update((case.sample)(&mut rng)).unwrap();
+            }
+
+            let reduced = reduced_chi_squared(&mut h, case.cdf);
+            eprintln!("{}: χ²/df={reduced:.4}", case.name);
+            assert!(
+                reduced < 2.0,
+                "{}: reduced χ²={reduced:.4} exceeds 2.0",
+                case.name,
+            );
+
+            // Spot-check p0, p50, p100.
+            let qs = [0.0, 0.5, 1.0];
+            let view = h.view();
+            let vals: Vec<_> = view.quantiles(&qs).collect();
+            assert_eq!(
+                vals[0].value,
+                view.min(),
+                "{}: p0 must equal min",
+                case.name
+            );
+            assert_eq!(
+                vals[2].value,
+                view.max(),
+                "{}: p100 must equal max",
+                case.name
+            );
+
+            let p50_err = ((vals[1].value - case.p50_expected) / case.p50_expected).abs();
+            assert!(
+                p50_err < 0.05,
+                "{}: p50={:.4} expected={:.4} err={:.2}%",
+                case.name,
+                vals[1].value,
+                case.p50_expected,
+                p50_err * 100.0,
+            );
+        }
+    }
 } // mod quantile_tests
 
 #[test]
@@ -2293,7 +2348,8 @@ fn repro_fuzz_histogram_oracle_offset() {
 
         let v = h.view();
         let mapping = Mapping::new(v.scale()).unwrap();
-        let exp_offset = mapping.map_to_index(min_value)
+        let exp_offset = mapping
+            .map_to_index(min_value)
             .min(mapping.map_to_index(normal));
 
         assert_eq!(
@@ -2327,12 +2383,17 @@ fn repro_fuzz_merge_oracle_offset() {
         let exp_idx = mapping.map_to_index(crate::float64::MIN_VALUE);
 
         assert_eq!(
-            buckets.offset(), exp_idx,
-            "literal={literal}: offset mismatch at scale={}", v.scale()
+            buckets.offset(),
+            exp_idx,
+            "literal={literal}: offset mismatch at scale={}",
+            v.scale()
         );
         let bt: u64 = buckets.iter().sum();
-        assert!(bt <= v.count(),
-            "literal={literal}: bucket total ({bt}) > count ({})", v.count());
+        assert!(
+            bt <= v.count(),
+            "literal={literal}: bucket total ({bt}) > count ({})",
+            v.count()
+        );
     }
 }
 

@@ -7,9 +7,7 @@
 //! mapping reduces to extracting the IEEE 754 exponent with a right-shift.
 //! This is the simplest and fastest algorithm, always used for non-positive scales.
 
-use crate::float64::{
-    MIN_NORMAL_EXPONENT, MIN_VALUE, get_normal_base2, get_significand,
-};
+use crate::float64::{get_normal_base2, get_significand, MIN_NORMAL_EXPONENT, MIN_VALUE};
 
 /// Maps a positive f64 value to a bucket index at a non-positive scale.
 ///
@@ -31,7 +29,6 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
 
     // Upper-inclusive correction: exact powers of two (significand == 0)
     // must map one bucket lower.
-    // See https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261
     let correction = if get_significand(value) == 0 { -1 } else { 0 };
 
     // Arithmetic right shift handles negative exponents correctly
@@ -56,14 +53,14 @@ mod tests {
     #[test]
     fn test_scale_0() {
         // Powers of 2 map to exponent - 1
-        assert_eq!(map_to_index(1.0, 0), -1);  // 2^0 -> -1
-        assert_eq!(map_to_index(2.0, 0), 0);   // 2^1 -> 0
-        assert_eq!(map_to_index(4.0, 0), 1);   // 2^2 -> 1
-        assert_eq!(map_to_index(0.5, 0), -2);  // 2^-1 -> -2
+        assert_eq!(map_to_index(1.0, 0), -1); // 2^0 -> -1
+        assert_eq!(map_to_index(2.0, 0), 0); // 2^1 -> 0
+        assert_eq!(map_to_index(4.0, 0), 1); // 2^2 -> 1
+        assert_eq!(map_to_index(0.5, 0), -2); // 2^-1 -> -2
 
         // Non-powers of 2
-        assert_eq!(map_to_index(1.5, 0), 0);   // 1.5 in (1, 2] -> 0
-        assert_eq!(map_to_index(3.0, 0), 1);   // 3.0 in (2, 4] -> 1
+        assert_eq!(map_to_index(1.5, 0), 0); // 1.5 in (1, 2] -> 0
+        assert_eq!(map_to_index(3.0, 0), 1); // 3.0 in (2, 4] -> 1
         assert_eq!(map_to_index(0.75, 0), -1); // 0.75 in (0.5, 1] -> -1
     }
 

@@ -36,11 +36,7 @@ fn main() {
     println!("  count:  {}", buckets.len());
     for (i, count) in buckets.iter().enumerate() {
         if count > 0 {
-            println!(
-                "  bucket[{}]: {}",
-                buckets.offset() as usize + i,
-                count
-            );
+            println!("  bucket[{}]: {}", buckets.offset() as usize + i, count);
         }
     }
 }

@@ -18,3 +18,8 @@ Both algorithms share the same core idea: divide the 52-bit IEEE 754 significand
 Both share the same `BOUNDARIES` array (which dominates memory), so the total memory difference is ~20% — negligible in practice.
 
 This implementation uses the `2N`/1-correction variant. The choice is essentially arbitrary; both are equally correct and perform similarly at runtime.
+
+## Upper-inclusive boundary decision
+
+See the lengthy discussion on this topic in OpenTelemetry
+[here](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261).

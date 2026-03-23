@@ -84,14 +84,14 @@ mod tests {
         let expected: i32 = env!("EXPECTED_TABLE_SCALE").parse().unwrap();
         assert_eq!(
             TABLE_SCALE, expected,
-            "TABLE_SCALE ({}) != expected ({})", TABLE_SCALE, expected,
+            "TABLE_SCALE ({}) != expected ({})",
+            TABLE_SCALE, expected,
         );
     }
 
     #[test]
     fn test_all_scales_consistent() {
-        let test_values: &[f64] =
-            &[1.1, 1.5, 1.9, 2.5, 3.3, 7.7, 0.3, 0.7, 100.0, 1e-10, 1e10];
+        let test_values: &[f64] = &[1.1, 1.5, 1.9, 2.5, 3.3, 7.7, 0.3, 0.7, 100.0, 1e-10, 1e10];
         for scale in 1..TABLE_SCALE {
             for &v in test_values {
                 let direct = map_to_index(v, scale);

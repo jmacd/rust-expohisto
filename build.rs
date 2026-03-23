@@ -28,8 +28,7 @@ fn main() {
     // Derive and write the index table from the same boundaries.
     // The mapping function always computes at TABLE_SCALE and
     // right-shifts to the requested scale.
-    expohisto_mapping_gen::write_index_table(&mut file, scale, &boundaries)
-        .unwrap();
+    expohisto_mapping_gen::write_index_table(&mut file, scale, &boundaries).unwrap();
 
     // Generate inverse factor table for boundary computation.
     let inv_path = Path::new(&out_dir).join("inverse_factors.rs");

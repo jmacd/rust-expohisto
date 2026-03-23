@@ -22,7 +22,7 @@ use super::bucket_width::BucketWidth;
 pub(crate) const SWAR_TABLE: [(u32, u64); 6] = [
     (1, 0x5555_5555_5555_5555),  // B1
     (2, 0x3333_3333_3333_3333),  // B2
-    (4, 0x0F0F_0F0F_0F0F_0F0F), // B4
+    (4, 0x0F0F_0F0F_0F0F_0F0F),  // B4
     (8, 0x00FF_00FF_00FF_00FF),  // U8
     (16, 0x0000_FFFF_0000_FFFF), // U16
     (32, 0x0000_0000_FFFF_FFFF), // U32

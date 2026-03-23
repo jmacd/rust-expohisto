@@ -47,8 +47,10 @@ fn bench_sub_byte(c: &mut Criterion) {
         for &(label, min_w) in WIDTHS {
             group.bench_function(BenchmarkId::new("start", label), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<16> =
-                        Histogram::new().with_scale(scale).unwrap().with_min_bucket_width(min_w);
+                    let mut h: Histogram<16> = Histogram::new()
+                        .with_scale(scale)
+                        .unwrap()
+                        .with_min_bucket_width(min_w);
                     for &v in &values {
                         h.update(black_box(v)).unwrap();
                     }
@@ -75,8 +77,10 @@ fn bench_sub_byte(c: &mut Criterion) {
                 let id = format!("{dup_label}/{width_label}");
                 group.bench_function(BenchmarkId::new("start", &id), |b| {
                     b.iter(|| {
-                        let mut h: Histogram<16> =
-                            Histogram::new().with_scale(scale).unwrap().with_min_bucket_width(min_w);
+                        let mut h: Histogram<16> = Histogram::new()
+                            .with_scale(scale)
+                            .unwrap()
+                            .with_min_bucket_width(min_w);
                         for &v in &values {
                             h.record(black_box(v), reps).unwrap();
                         }
@@ -98,13 +102,18 @@ fn bench_sub_byte(c: &mut Criterion) {
         for &(label, min_w) in WIDTHS {
             group.bench_function(BenchmarkId::new("start", label), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<16> =
-                        Histogram::new().with_scale(scale).unwrap().with_min_bucket_width(min_w);
+                    let mut h: Histogram<16> = Histogram::new()
+                        .with_scale(scale)
+                        .unwrap()
+                        .with_min_bucket_width(min_w);
                     for _cycle in 0..10 {
                         for &v in &values {
                             h.update(black_box(v)).unwrap();
                         }
-                        h = Histogram::new().with_scale(scale).unwrap().with_min_bucket_width(min_w);
+                        h = Histogram::new()
+                            .with_scale(scale)
+                            .unwrap()
+                            .with_min_bucket_width(min_w);
                     }
                     black_box(&h);
                 })

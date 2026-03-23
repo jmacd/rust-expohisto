@@ -134,8 +134,16 @@ impl HighLow {
             (true, _) => other,
             (_, true) => self,
             _ => Self {
-                low: if self.low < other.low { self.low } else { other.low },
-                high: if self.high > other.high { self.high } else { other.high },
+                low: if self.low < other.low {
+                    self.low
+                } else {
+                    other.low
+                },
+                high: if self.high > other.high {
+                    self.high
+                } else {
+                    other.high
+                },
             },
         }
     }
@@ -341,8 +349,7 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     const fn swar_would_wrap(&self, index: i32) -> bool {
         !matches!(self.bucket_width, BucketWidth::U64)
-            && (index < self.index_base
-                || index >= self.index_base + self.bucket_capacity() as i32)
+            && (index < self.index_base || index >= self.index_base + self.bucket_capacity() as i32)
     }
 }
 
@@ -452,7 +459,11 @@ impl<const N: usize> Histogram<N> {
     const fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
         let bits = self.bucket_width.bits();
         let spw = 64 / bits;
-        (slot / spw, (slot % spw) * bits, self.bucket_width.counter_max())
+        (
+            slot / spw,
+            (slot % spw) * bits,
+            self.bucket_width.counter_max(),
+        )
     }
 
     /// Gets the value at a physical slot index.

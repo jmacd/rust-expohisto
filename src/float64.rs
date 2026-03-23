@@ -136,7 +136,11 @@ mod tests {
         // Verify bit-exact: every result has zero significand
         for k in -1022..=1023 {
             let v = pow2(k);
-            assert_eq!(get_significand(v), 0, "pow2({k}) should have zero significand");
+            assert_eq!(
+                get_significand(v),
+                0,
+                "pow2({k}) should have zero significand"
+            );
             assert_eq!(get_normal_base2(v), k, "pow2({k}) should have exponent {k}");
         }
     }
