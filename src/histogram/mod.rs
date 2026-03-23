@@ -18,10 +18,10 @@ use core::fmt;
 use crate::mapping::{Scale, ScaleError, max_scale};
 
 mod bucket_ops;
-pub mod width;
 mod literal;
 mod merge;
 mod swar;
+pub mod width;
 
 mod bucket_view;
 pub use bucket_view::{BucketView, BucketsIter};
@@ -283,7 +283,7 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
             .field("min", &self.min())
             .field("max", &self.max());
         if self.current.width.is_literal() {
-            s.field("literal_count", &self.literal_count());
+            s.field("pool", &(self.stats.count as usize % N));
         } else {
             s.field("scale", &self.current.scale.scale());
             s.field("bucket_len", &self.range_len());
@@ -423,10 +423,13 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Returns true if no buckets have been used.
+    ///
+    /// In literal mode, returns true when sum is zero (no positive
+    /// values recorded; zeros don't create buckets).
     #[inline]
-    pub const fn buckets_empty(&self) -> bool {
+    pub fn buckets_empty(&self) -> bool {
         if self.current.width.is_literal() {
-            return self.literal_count() == 0;
+            return self.stats.sum == 0.0;
         }
         self.range_is_empty()
     }
@@ -629,31 +632,6 @@ impl<const N: usize> Histogram<N> {
         HistogramView { hist: self }
     }
 
-    /// Returns the number of literal values stored (0 if not in literal mode).
-    #[inline]
-    const fn literal_count(&self) -> usize {
-        if self.current.width.is_literal() {
-            self.index_end as usize
-        } else {
-            0
-        }
-    }
-
-    /// Maximum number of literals that can be stored.
-    #[inline]
-    const fn literal_capacity(&self) -> usize {
-        N
-    }
-
-    /// Returns the stored literal values as a slice.
-    #[inline]
-    const fn literal_values(&self) -> &[u64] {
-        // Split the data slice to get [0..literal_count()]
-        // Using split_at for const-compatible slicing.
-        let (head, _) = self.data.split_at(self.literal_count());
-        head
-    }
-
     /// Returns the current counter width.
     #[inline]
     pub const fn width(&self) -> Width {
@@ -662,7 +640,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Resets the bucket-related fields to empty state. Does not touch
     /// stats or scale. Sets width to at least B1 (never B0), since
-    /// this prepares for bucket-mode operation.
+    /// this prepares for bucket-mode operation. @@@ Should reset original settings.
     fn reset_bucket_state(&mut self) {
         self.data.fill(0);
         self.current.width = self.initial.width.max(Width::B1);
@@ -758,20 +736,22 @@ impl<const N: usize> Histogram<N> {
 
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
+        // Update min/max early — promotion reads them.
         if value != 0.0 {
-            if self.current.width.is_literal() && incr != 1 {
-                // Literal mode only stores individual observations.
-                // Promote to bucket mode before recording a weighted value.
-                self.promote()?;
-            }
-            if self.current.width.is_literal() {
-                self.update_literal(value)?;
-            } else {
-                self.update_buckets(value, incr)?;
-            }
-            // Min/max reflect the positive bucket range only.
             self.stats.min = self.stats.min.min(value);
             self.stats.max = self.stats.max.max(value);
+        }
+
+        // Literal mode only stores individual observations.
+        if self.current.width.is_literal() && incr != 1 {
+            self.promote()?;
+        }
+
+        if self.current.width.is_literal() {
+            // Literal pool stores all values including zeros.
+            self.update_literal(value)?;
+        } else if value != 0.0 {
+            self.update_buckets(value, incr)?;
         }
 
         self.stats.sum += value * incr as f64;

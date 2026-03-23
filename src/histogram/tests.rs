@@ -1790,18 +1790,17 @@ fn test_literal_mode_stores_values() {
 
 #[test]
 fn test_literal_mode_capacity() {
-    // Histogram<8>: all 8 words available for literals.
+    // Histogram<8>: 8 literal slots. Pool fills on the 8th value.
     let mut h: Histogram<8> = Histogram::new();
-    for i in 0..8 {
+    for i in 0..7 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
-    assert!(h.width() == Width::B0, "should still be literal with 8 values");
-    assert_eq!(h.view().count(), 8);
+    assert!(h.width() == Width::B0, "should still be literal with 7 values");
 
-    // 9th value should trigger promotion.
-    h.update(256.0).unwrap();
-    assert!(h.width() != Width::B0, "should promote on 9th value");
-    assert_eq!(h.view().count(), 9);
+    // 8th non-zero value fills the pool and triggers promotion.
+    h.update(128.0).unwrap();
+    assert!(h.width() != Width::B0, "should promote when pool fills");
+    assert_eq!(h.view().count(), 8);
 }
 
 #[test]
@@ -2026,10 +2025,7 @@ fn test_literal_debug_format() {
     let mut h: Histogram<8> = Histogram::new();
     h.update(1.0).unwrap();
     let debug = format!("{:?}", h);
-    assert!(
-        debug.contains("literal"),
-        "Debug should mention literal mode"
-    );
+    assert!(debug.contains("pool"), "Debug should show pool index");
 }
 
 // -- Quantile estimation tests (require `boundary` feature) ----------------

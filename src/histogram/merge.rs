@@ -137,8 +137,15 @@ impl<const N: usize> Histogram<N> {
         if self.current.width.is_literal() {
             self.promote()?;
         }
-        for &bits in other.literal_values() {
-            self.update_buckets(f64::from_bits(bits), 1)?;
+        // Compute the number of entries in other's literal pool.
+        let r = other.stats.count as usize % M;
+        let entries = if r == 0 && other.stats.count > 0 { M } else { r };
+        for &bits in &other.data[..entries] {
+            let v = f64::from_bits(bits);
+            if v == 0.0 {
+                continue;
+            }
+            self.update_buckets(v, 1)?;
         }
         self.commit_stats(new_sum, new_count, other.min(), other.max());
         Ok(())

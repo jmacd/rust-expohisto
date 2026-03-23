@@ -1,72 +1,80 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Literal mode: stores raw f64 bit patterns instead of bucket counters
-//! until the data pool overflows, then promotes to bucket mode.
+//! Literal mode: stores raw f64 bit patterns (including zeros) in
+//! the data pool. The pool index is `count % N`, wrapping at batch
+//! boundaries. All-zero batches stay in literal mode; the first
+//! batch containing a non-zero value triggers promotion to buckets.
 
 use crate::mapping::Scale;
 
 use super::{Histogram, Overflow};
 
 impl<const N: usize> Histogram<N> {
-    /// Stores a single value in literal mode, promoting to bucket mode
-    /// when the data pool is full.
+    /// Stores a value (including zero) in the literal pool.
+    ///
+    /// When the pool fills and contains non-zero values, promotes to
+    /// bucket mode. All-zero batches wrap and stay in literal mode.
     pub(super) fn update_literal(&mut self, value: f64) -> Result<(), Overflow> {
         debug_assert!(self.current.width.is_literal());
 
-        let count = self.literal_count();
+        let used = self.stats.count as usize % N;
+        self.data[used] = value.to_bits();
 
-        if count < self.literal_capacity() {
-            self.data[count] = value.to_bits();
-            self.index_end += 1;
-            Ok(())
-        } else {
-            self.promote_with(value)
+        // Pool just filled? Promote if any non-zero values exist.
+        if used == N - 1 && self.stats.sum != 0.0 {
+            return self.promote_pool(N);
         }
+
+        Ok(())
     }
 
     /// Promotes from literal mode to bucket mode.
     ///
-    /// Inserts min and max first to establish the full index range,
-    /// minimizing intermediate downscale steps. Then replays remaining
-    /// values (skipping the already-inserted min and max).
-    fn promote_to_buckets(&mut self, trigger: Option<f64>) -> Result<(), Overflow> {
+    /// Reads `stats.min` / `stats.max` (already up-to-date) to insert
+    /// the extremes first, establishing the full index range and
+    /// minimizing intermediate downscale steps. Zeros are skipped
+    /// during replay since they have no bucket representation.
+    pub(super) fn promote(&mut self) -> Result<(), Overflow> {
         debug_assert!(self.current.width.is_literal());
 
-        let count = self.literal_count();
+        let r = self.stats.count as usize % N;
+        let entries = if r == 0 && self.stats.count > 0 { N } else { r };
+        self.promote_pool(entries)
+    }
 
-        if count == 0 && trigger.is_none() {
+    fn promote_pool(&mut self, entries: usize) -> Result<(), Overflow> {
+        if entries == 0 || self.stats.sum == 0.0 {
+            // Empty or all zeros — switch to bucket mode with no buckets.
             self.reset_bucket_state();
             return Ok(());
         }
 
-        // Collect stored literal values before we clobber the data pool.
+        // Collect stored values before we clobber the data pool.
         let mut literals = [0u64; N];
-        literals[..count].copy_from_slice(self.literal_values());
+        literals[..entries].copy_from_slice(&self.data[..entries]);
 
-        // Determine lo/hi across pool + trigger.
-        let mut lo = self.stats.min;
-        let mut hi = self.stats.max;
-        if let Some(tv) = trigger {
-            lo = lo.min(tv);
-            hi = hi.max(tv);
-        }
+        let lo = self.stats.min;
+        let hi = self.stats.max;
 
         // Reset to empty bucket mode at the initial scale.
         self.reset_bucket_state();
         self.current.scale = Scale::new(self.current.scale.scale()).map_err(|_| Overflow)?;
 
-        // Insert lo and hi first.
+        // Insert extremes first.
         self.update_buckets(lo, 1)?;
         if hi != lo {
             self.update_buckets(hi, 1)?;
         }
 
-        // Replay remaining values, skipping one lo and one hi.
+        // Replay remaining non-zero values, skipping one lo and one hi.
         let mut skip_lo = true;
         let mut skip_hi = lo != hi;
-        for &bits in &literals[..count] {
+        for &bits in &literals[..entries] {
             let v = f64::from_bits(bits);
+            if v == 0.0 {
+                continue;
+            }
             if skip_lo && v == lo {
                 skip_lo = false;
                 continue;
@@ -77,26 +85,7 @@ impl<const N: usize> Histogram<N> {
             }
             self.update_buckets(v, 1)?;
         }
-        if let Some(tv) = trigger {
-            if !(skip_lo && tv == lo || skip_hi && tv == hi) {
-                self.update_buckets(tv, 1)?;
-            }
-        }
 
         Ok(())
-    }
-
-    /// Promotes from literal mode to bucket mode, including a trigger
-    /// value that caused overflow of literal capacity.
-    #[inline]
-    pub(super) fn promote_with(&mut self, trigger: f64) -> Result<(), Overflow> {
-        self.promote_to_buckets(Some(trigger))
-    }
-
-    /// Promotes from literal mode to bucket mode without a trigger value.
-    /// Used when self is a merge destination and needs to accept bucket data.
-    #[inline]
-    pub(super) fn promote(&mut self) -> Result<(), Overflow> {
-        self.promote_to_buckets(None)
     }
 }
