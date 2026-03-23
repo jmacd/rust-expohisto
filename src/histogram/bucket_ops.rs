@@ -28,28 +28,18 @@ struct DownscaleCtx<'a, const N: usize> {
 }
 
 impl<const N: usize> DownscaleCtx<'_, N> {
-    /// Reads a counter from the old layout at bucket index `idx`.
-    #[inline]
-    fn read_old(&self, idx: i32) -> u64 {
-        let slot = Histogram::<N>::old_slot(idx, self.old_base, self.old_width);
-        Histogram::<N>::get_in(self.old_data, slot, self.old_width)
-    }
-
-    /// Old bucket indices that map to output group `grp` after
-    /// downscaling, clamped to the live range.
-    #[inline]
-    fn old_range(&self, grp: i32) -> core::ops::RangeInclusive<i32> {
-        let lo = grp << self.change;
-        let hi = lo + (1i32 << self.change) - 1;
-        lo.max(self.old_start)..=hi.min(self.old_end)
-    }
-
     /// Sum of old counters that map to output group `grp`, with
     /// checked addition for u64 overflow.
     fn group_sum(&self, grp: i32) -> Result<u64, super::Overflow> {
+        // Each output group covers 2^change consecutive old indices.
+        let group_size = 1i32 << self.change;
+        let lo = (grp * group_size).max(self.old_start);
+        let hi = (grp * group_size + group_size - 1).min(self.old_end);
         let mut acc: u64 = 0;
-        for idx in self.old_range(grp) {
-            acc = acc.checked_add(self.read_old(idx)).ok_or(super::Overflow)?;
+        for idx in lo..=hi {
+            let slot = Histogram::<N>::old_slot(idx, self.old_base, self.old_width);
+            let val = Histogram::<N>::get_in(self.old_data, slot, self.old_width);
+            acc = acc.checked_add(val).ok_or(super::Overflow)?;
         }
         Ok(acc)
     }
