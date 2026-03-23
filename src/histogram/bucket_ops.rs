@@ -43,6 +43,16 @@ impl<const N: usize> DownscaleCtx<'_, N> {
         let hi = lo + (1i32 << self.change) - 1;
         lo.max(self.old_start)..=hi.min(self.old_end)
     }
+
+    /// Sum of old counters that map to output group `grp`, with
+    /// checked addition for u64 overflow.
+    fn group_sum(&self, grp: i32) -> Result<u64, super::Overflow> {
+        let mut acc: u64 = 0;
+        for idx in self.old_range(grp) {
+            acc = acc.checked_add(self.read_old(idx)).ok_or(super::Overflow)?;
+        }
+        Ok(acc)
+    }
 }
 
 impl<const N: usize> Histogram<N> {
@@ -114,14 +124,10 @@ impl<const N: usize> Histogram<N> {
         self.init_output(w, base, ctx.new_start, ctx.new_end);
 
         for grp in ctx.new_start..=ctx.new_end {
-            let mut acc: u64 = 0;
-            for idx in ctx.old_range(grp) {
-                acc += ctx.read_old(idx);
-            }
+            // Safety: count ≤ counter_max guarantees no group overflows.
+            let acc = ctx.group_sum(grp).expect("safe path");
             Self::set_in(&mut self.data, (grp - base) as usize, w, acc);
         }
-
-        self.trim_bucket_range();
     }
 
     /// Speculative hybrid: begin writing at `spec_width`; on the
@@ -137,17 +143,13 @@ impl<const N: usize> Histogram<N> {
         self.init_output(w, base, ctx.new_start, ctx.new_end);
 
         for grp in ctx.new_start..=ctx.new_end {
-            let mut acc: u64 = 0;
-            for idx in ctx.old_range(grp) {
-                acc = acc.checked_add(ctx.read_old(idx)).ok_or(super::Overflow)?;
-            }
+            let acc = ctx.group_sum(grp)?;
             if acc > counter_max {
                 return self.downscale_repair(ctx, w, grp, acc);
             }
             Self::set_in(&mut self.data, (grp - base) as usize, w, acc);
         }
 
-        self.trim_bucket_range();
         Ok(())
     }
 
@@ -163,17 +165,10 @@ impl<const N: usize> Histogram<N> {
     ) -> Result<(), super::Overflow> {
         let spec_base = spec_width.word_start(ctx.new_start);
 
-        // Phase 1: scan remaining groups for the true max.
-        let mut max_acc = overflow_acc;
-        for grp in (overflow_group + 1)..=ctx.new_end {
-            let mut acc: u64 = 0;
-            for idx in ctx.old_range(grp) {
-                acc = acc.checked_add(ctx.read_old(idx)).ok_or(super::Overflow)?;
-            }
-            if acc > max_acc {
-                max_acc = acc;
-            }
-        }
+        // Phase 1: find the true max group sum from overflow onward.
+        let max_acc = (overflow_group..=ctx.new_end)
+            .map(|grp| ctx.group_sum(grp))
+            .try_fold(overflow_acc, |m, s| s.map(|v| m.max(v)))?;
 
         // Phase 2: compute exact target width.
         // max_acc > spec_width.counter_max() is guaranteed (that's
@@ -190,26 +185,16 @@ impl<const N: usize> Histogram<N> {
         self.init_output(tw, tbase, ctx.new_start, ctx.new_end);
 
         for grp in ctx.new_start..overflow_group {
-            let val = Self::get_in(
-                &prefix_data,
-                (grp - spec_base) as usize,
-                spec_width,
-            );
-            if val != 0 {
-                Self::set_in(&mut self.data, (grp - tbase) as usize, tw, val);
-            }
+            let val = Self::get_in(&prefix_data, (grp - spec_base) as usize, spec_width);
+            Self::set_in(&mut self.data, (grp - tbase) as usize, tw, val);
         }
 
         // Phase 4: re-sum from overflow_group onward at target width.
         for grp in overflow_group..=ctx.new_end {
-            let mut acc: u64 = 0;
-            for idx in ctx.old_range(grp) {
-                acc += ctx.read_old(idx);
-            }
+            let acc = ctx.group_sum(grp).expect("already validated");
             Self::set_in(&mut self.data, (grp - tbase) as usize, tw, acc);
         }
 
-        self.trim_bucket_range();
         Ok(())
     }
 
