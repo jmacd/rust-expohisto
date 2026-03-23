@@ -23,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `Histogram::merge_from()` — merge from any histogram (same or different `N`)
 - `Histogram::merge_from_raw()` — merge from raw bucket data
 - `Histogram::with_min_bucket_width()` — skip sub-byte widths for faster ops
-- `Histogram::with_literal_mode()` — disable literal mode when value range
+- `BucketWidth::B0` — literal mode represented as a width variant; disable via `with_min_bucket_width(BucketWidth::B1)` when value range
   is known upfront
 - `BucketView` — borrow-based read access to bucket data with iteration
 - OTel SDK specification compatibility (count, sum, min, max, positive buckets)

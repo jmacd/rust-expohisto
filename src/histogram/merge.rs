@@ -17,7 +17,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns [`Overflow`] if the combined total count would exceed
     /// `u64::MAX`. See [`record()`](Self::record) for details.
     pub fn merge_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
-        if other.literal {
+        if other.bucket_width.is_literal() {
             return self.merge_literal_from(other);
         }
         if !other.buckets_empty() && self.buckets_empty() {
@@ -82,7 +82,7 @@ impl<const N: usize> Histogram<N> {
         let new_sum = self.sum() + stats.sum;
 
         if buckets.len > 0 {
-            if self.literal {
+            if self.bucket_width.is_literal() {
                 self.promote()?;
             }
 
@@ -121,7 +121,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Merges literal values from another histogram into this one.
     fn merge_literal_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
-        debug_assert!(other.literal);
+        debug_assert!(other.bucket_width.is_literal());
         if other.count() == 0 {
             return Ok(());
         }
@@ -134,7 +134,7 @@ impl<const N: usize> Histogram<N> {
     ) -> Result<(), Overflow> {
         let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
         let new_sum = self.sum() + other.sum();
-        if self.literal {
+        if self.bucket_width.is_literal() {
             self.promote()?;
         }
         for &bits in other.literal_values() {

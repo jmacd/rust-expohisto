@@ -35,7 +35,7 @@ values refine the range. Literal mode eliminates all that incremental work — t
 scale and bucket width are determined from the full initial set in one shot.
 
 For `Histogram<16>`, literal capacity is 16 values (= `N`).
-Literal mode can be disabled via `.with_literal_mode(false)` for benchmarks or when the
+Literal mode can be disabled via `.with_min_bucket_width(BucketWidth::B1)` for benchmarks or when the
 caller already knows the value range.
 
 ## Sub-Byte Bucket Widths and Bit-Level Arithmetic
@@ -238,7 +238,7 @@ relative error) across the full range.
 |--------|--------|
 | `with_scale(s)` | Set exact starting scale (returns `Err` if invalid; does not clamp) |
 | `with_min_bucket_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
-| `with_literal_mode(false)` | Disable literal mode when the value range is already known |
+| `with_min_bucket_width(BucketWidth::B1)` | Disable literal mode when the value range is already known |
 
 Run `cargo run --example sizing` for an interactive capacity explorer.
 
@@ -329,7 +329,7 @@ All merge operations compute the minimum common scale, downscale as needed, and 
 | `new()` | Create at maximum scale (20) with default settings |
 | `with_scale(s)` | Create at exact scale (returns `Err` if invalid; does not clamp) |
 | `swap(&mut other)` | Exchange contents with another histogram (O(N) memswap) |
-| `is_literal()` | Check if in literal mode |
+| `bucket_width() == BucketWidth::B0` | Check if in literal mode |
 | `bucket_capacity()` | Number of logical buckets at the current width |
 | `bucket_width()` | Current counter width (`B1`..`U64`) |
 | `buckets_empty()` | Whether all bucket counters are zero |
@@ -342,7 +342,7 @@ use otel_expohisto::{Histogram, BucketWidth};
 let h: Histogram<16> = Histogram::new()
     .with_scale(8)?                                   // set starting scale
     .with_min_bucket_width(BucketWidth::U8)           // skip sub-byte widths
-    .with_literal_mode(false);                        // disable cold-start optimization
+    .with_min_bucket_width(BucketWidth::B1);    // disable cold-start optimization
 ```
 
 ### Standalone `Mapping` API

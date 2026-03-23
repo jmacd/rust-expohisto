@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::Histogram;
+use otel_expohisto::{BucketWidth, Histogram};
 
 #[path = "verify.rs"]
 mod verify;
@@ -121,7 +121,7 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 // ---------------------------------------------------------------------------
 
 fn build<const N: usize>(ops: &[Op], literal_mode: bool) -> (Histogram<N>, Vec<Op>) {
-    let mut h = Histogram::<N>::new().with_literal_mode(literal_mode);
+    let mut h = Histogram::<N>::new().with_min_bucket_width(if literal_mode { BucketWidth::B0 } else { BucketWidth::B1 });
     let mut ok = Vec::new();
     for &op in ops {
         if h.record(op.value, op.incr).is_ok() {

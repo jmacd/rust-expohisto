@@ -187,14 +187,15 @@ const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 /// crate implements the positive side only, which is sufficient for
 /// latency, size, and other non-negative metrics.
 ///
-/// # Literal Mode
+/// # Literal Mode (`B0`)
 ///
-/// New histograms start in **literal mode**, where the data pool stores
-/// raw `f64` bit patterns instead of bucket counters. This holds up to
-/// `N` values (e.g. 8 values for `Histogram<8>`).
+/// New histograms start in **literal mode** (`bucket_width == B0`),
+/// where the data pool stores raw `f64` bit patterns instead of bucket
+/// counters. This holds up to `N` values (e.g. 8 for `Histogram<8>`).
 /// When the next non-zero observation would exceed capacity, the
 /// histogram **promotes** to bucket mode: all stored literals are
 /// replayed through `update_buckets` at the configured max scale.
+/// Literal mode can be disabled via `with_min_bucket_width(BucketWidth::B1)`.
 ///
 /// Read operations are accessed through [`view()`](Self::view),
 /// which promotes from literal mode if needed and returns a
@@ -203,7 +204,7 @@ const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 /// # Counter Widening
 ///
 /// Bucket counters start at 1-bit and auto-widen in place
-/// (1→2→4 bits → u8 → u16 → u32 → u64) via combined downscale+widen
+/// (B0→B1→B2→B4→U8→U16→U32→U64) via combined downscale+widen
 /// when a counter saturates.
 ///
 /// At minimum, `N` should be 8 (64 bytes of pool), giving 8 bucket words
@@ -213,13 +214,6 @@ pub struct Histogram<const N: usize> {
     mapping: Mapping,
     min_bucket_width: BucketWidth,
     bucket_width: BucketWidth,
-    /// When true, `data[..]` holds raw f64 bit patterns (literals)
-    /// instead of bucket counters.  `index_end` is repurposed as the
-    /// literal count — this saves a struct field in a fixed-size type
-    /// where every byte matters.  Code that reads `index_end` must
-    /// check `self.literal` first; `literal_count()` provides the
-    /// safe accessor.
-    literal: bool,
     index_base: i32,
     index_start: i32,
     index_end: i32,
@@ -237,7 +231,6 @@ impl<const N: usize> Clone for Histogram<N> {
             mapping: self.mapping,
             min_bucket_width: self.min_bucket_width,
             bucket_width: self.bucket_width,
-            literal: self.literal,
             index_base: self.index_base,
             index_start: self.index_start,
             index_end: self.index_end,
@@ -255,11 +248,9 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
             .field("sum", &self.sum())
             .field("min", &self.min())
             .field("max", &self.max());
-        if self.literal {
-            s.field("mode", &"literal");
+        if self.bucket_width.is_literal() {
             s.field("literal_count", &self.literal_count());
         } else {
-            s.field("mode", &"bucket");
             s.field("scale", &self.mapping.scale());
             s.field("bucket_len", &self.range_len());
         }
@@ -370,10 +361,16 @@ impl<const N: usize> Histogram<N> {
         &mut self.data
     }
 
-    /// Number of logical buckets available at the current width.
+    /// Returns the number of counter slots available at the current width.
+    ///
+    /// In literal mode (`B0`), returns `N` (the number of raw f64 slots).
     #[inline]
     pub const fn bucket_capacity(&self) -> usize {
-        self.bucket_width.capacity(N)
+        if self.bucket_width.is_literal() {
+            N
+        } else {
+            self.bucket_width.capacity(N)
+        }
     }
 
     /// Eagerly promotes from literal mode to bucket mode.
@@ -386,7 +383,7 @@ impl<const N: usize> Histogram<N> {
     /// overflow.
     #[inline]
     fn ensure_promoted(&mut self) {
-        if self.literal {
+        if self.bucket_width.is_literal() {
             let _ = self.promote();
         }
     }
@@ -394,7 +391,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns true if no buckets have been used.
     #[inline]
     pub const fn buckets_empty(&self) -> bool {
-        if self.literal {
+        if self.bucket_width.is_literal() {
             return self.literal_count() == 0;
         }
         self.range_is_empty()
@@ -515,9 +512,8 @@ impl<const N: usize> Histogram<N> {
         const { assert!(N >= 1, "N must be >= 1 for at least 1 bucket word") };
         Ok(Self {
             mapping: Mapping::new(scale)?,
-            min_bucket_width: BucketWidth::B1,
-            bucket_width: BucketWidth::B1,
-            literal: true,
+            min_bucket_width: BucketWidth::B0,
+            bucket_width: BucketWidth::B0,
             index_base: 0,
             index_start: 0,
             index_end: 0,
@@ -552,32 +548,15 @@ impl<const N: usize> Histogram<N> {
 
     /// Sets the minimum (initial) bucket counter width.
     ///
-    /// By default, counters start at 1-bit (B1). Setting a higher floor
-    /// (e.g. `BucketWidth::U8`) trades bucket capacity for avoiding the
-    /// CPU cost of sub-byte bit-level indexing and SWAR widening.
+    /// The default is `B0` (literal mode). Set to `B1` or higher to
+    /// start directly in bucket mode, trading cold-start optimization
+    /// for immediate bucket indexing.
     #[inline]
     #[must_use]
     pub fn with_min_bucket_width(mut self, width: BucketWidth) -> Self {
         self.min_bucket_width = width;
         self.bucket_width = width;
         self
-    }
-
-    /// Disables literal mode — starts directly in bucket mode.
-    /// Available only for benchmarks and tests.
-    #[cfg(any(test, feature = "bench-internals"))]
-    #[doc(hidden)]
-    #[inline]
-    #[must_use]
-    pub fn with_literal_mode(mut self, enabled: bool) -> Self {
-        self.literal = enabled;
-        self
-    }
-
-    /// Returns true if the histogram is in literal mode.
-    #[inline]
-    pub const fn is_literal(&self) -> bool {
-        self.literal
     }
 
     /// Returns a read-only view of the histogram.
@@ -617,7 +596,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns the number of literal values stored (0 if not in literal mode).
     #[inline]
     const fn literal_count(&self) -> usize {
-        if self.literal {
+        if self.bucket_width.is_literal() {
             self.index_end as usize
         } else {
             0
@@ -646,10 +625,11 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Resets the bucket-related fields to empty state. Does not touch
-    /// stats, literal flag, or mapping.
+    /// stats or mapping. Sets bucket_width to at least B1 (never B0),
+    /// since this prepares for bucket-mode operation.
     fn reset_bucket_state(&mut self) {
         self.data.fill(0);
-        self.bucket_width = self.min_bucket_width;
+        self.bucket_width = self.min_bucket_width.max(BucketWidth::B1);
         self.index_start = 0;
         self.index_end = 0;
         self.index_base = 0;
@@ -733,7 +713,7 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
 
         if value != 0.0 {
-            if self.literal {
+            if self.bucket_width.is_literal() {
                 self.update_literal(value, incr)?;
             } else {
                 self.update_buckets(value, incr)?;

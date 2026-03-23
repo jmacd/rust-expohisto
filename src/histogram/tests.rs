@@ -91,8 +91,7 @@ fn test_buckets_at() {
 #[test]
 fn test_auto_widen_cascade() {
     let mut h: Histogram<16> = Histogram::new()
-        .with_min_bucket_width(BucketWidth::B4)
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B4);
 
     // B4 → U8 at threshold 15+1=16
     h.record(1.0, 15).unwrap();
@@ -126,8 +125,7 @@ fn test_auto_widen_cascade() {
 #[test]
 fn test_auto_widen_b4_to_u8_from_b4_start() {
     let mut h: Histogram<16> = Histogram::new()
-        .with_min_bucket_width(BucketWidth::B4)
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B4);
     h.record(1.0, 4).unwrap();
     assert_eq!(h.bucket_width(), BucketWidth::B4);
     h.record(1.0, 11).unwrap();
@@ -142,8 +140,7 @@ fn test_bucket_count_halves_on_widen() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_min_bucket_width(BucketWidth::B4)
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B4);
     let initial_cap = h.bucket_capacity();
     assert_eq!(initial_cap, 16 * 16); // 256
 
@@ -157,8 +154,7 @@ fn test_recreate_preserves_b4() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(3)
         .unwrap()
-        .with_min_bucket_width(BucketWidth::B4)
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B4);
     assert_eq!(h.bucket_width(), BucketWidth::B4);
     assert_eq!(h.view().count(), 0);
     // Record a value to verify it starts at scale 3.
@@ -447,8 +443,7 @@ fn test_successive_sub_byte_widening() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_min_bucket_width(BucketWidth::B4)
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B4);
 
     h.update(1.0).unwrap();
     assert_eq!(h.view().count(), 1);
@@ -615,13 +610,15 @@ mod flat_layout {
 
     #[test]
     fn test_capacity() {
-        let h: Histogram<16> = Histogram::new();
+        let h: Histogram<16> = Histogram::new()
+            .with_min_bucket_width(BucketWidth::B1);
         assert_eq!(h.bucket_capacity(), 1024); // 16 * 64 at B1
     }
 
     #[test]
     fn test_minimum_n() {
-        let h: Histogram<8> = Histogram::new();
+        let h: Histogram<8> = Histogram::new()
+            .with_min_bucket_width(BucketWidth::B1);
         assert_eq!(h.bucket_capacity(), 512); // 8 * 64 at B1
     }
 
@@ -746,7 +743,7 @@ fn assert_stats<const N: usize>(h: &mut Histogram<N>, count: u64, sum: f64, min:
 /// values and asserts they produce equivalent views.
 fn assert_literal_matches_bucket(values: &[f64]) {
     let mut lit: Histogram<8> = Histogram::new();
-    let mut bkt: Histogram<8> = Histogram::new().with_literal_mode(false);
+    let mut bkt: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
     for &v in values {
         lit.update(v).unwrap();
         bkt.update(v).unwrap();
@@ -1082,8 +1079,7 @@ fn test_downscale_many_indices_preserves_width() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_min_bucket_width(BucketWidth::B4)
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B4);
     for i in 0..8 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1185,7 +1181,7 @@ fn test_bucket_downscale_scalar_preserves_total_no_overflow() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B1);
     h.record(2.0, 3).unwrap(); // index 0
     h.record(4.0, 5).unwrap(); // index 1
 
@@ -1213,8 +1209,7 @@ fn test_downscale_multi_step_preserves_total() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_min_bucket_width(BucketWidth::B4)
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B4);
     for i in 0..4 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1237,7 +1232,7 @@ fn test_downscale_multi_step_through_alignment_boundary() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B1);
     for i in 0..8 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1258,7 +1253,7 @@ fn test_downscale_odd_base_preserves_total() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B1);
     for i in 0..4 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1312,8 +1307,7 @@ fn test_speculative_merge_width_behavior() {
         let mut h: Histogram<16> = Histogram::new()
             .with_scale(0)
             .unwrap()
-            .with_min_bucket_width(BucketWidth::B4)
-            .with_literal_mode(false);
+            .with_min_bucket_width(BucketWidth::B4);
         for i in 0..16 {
             h.update(2.0_f64.powi(i)).unwrap();
         }
@@ -1372,7 +1366,7 @@ fn test_sum_conservation_scalar_path() {
     let mut h: Histogram<16> = Histogram::new()
         .with_scale(0)
         .unwrap()
-        .with_literal_mode(false);
+        .with_min_bucket_width(BucketWidth::B1);
     for i in 0..10 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
@@ -1566,7 +1560,7 @@ fn build_from_values<const N: usize>(values: &[f64]) -> Histogram<N> {
 
 /// Helper: build a bucket-mode (non-literal) histogram from plain f64 values.
 fn build_bucket<const N: usize>(values: &[f64]) -> Histogram<N> {
-    let mut h = Histogram::<N>::new().with_literal_mode(false);
+    let mut h = Histogram::<N>::new().with_min_bucket_width(BucketWidth::B1);
     for &v in values {
         h.update(v).unwrap();
     }
@@ -1769,7 +1763,7 @@ fn test_merge_p32_bucket_len_after_merge_chain() {
 #[test]
 fn test_literal_mode_default() {
     let mut h: Histogram<8> = Histogram::new();
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     let v = h.view();
     assert_eq!(v.count(), 0);
     assert_eq!(v.sum(), 0.0);
@@ -1781,7 +1775,7 @@ fn test_literal_mode_stores_values() {
     h.update(1.0).unwrap();
     h.update(2.0).unwrap();
     h.update(4.0).unwrap();
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     let v = h.view();
     assert_eq!(v.count(), 3);
     assert_eq!(v.sum(), 7.0);
@@ -1796,21 +1790,21 @@ fn test_literal_mode_capacity() {
     for i in 0..8 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
-    assert!(h.is_literal(), "should still be literal with 8 values");
+    assert!(h.bucket_width() == BucketWidth::B0, "should still be literal with 8 values");
     assert_eq!(h.view().count(), 8);
 
     // 9th value should trigger promotion.
     h.update(256.0).unwrap();
-    assert!(!h.is_literal(), "should promote on 9th value");
+    assert!(h.bucket_width() != BucketWidth::B0, "should promote on 9th value");
     assert_eq!(h.view().count(), 9);
 }
 
 #[test]
 fn test_literal_mode_opt_out() {
-    let mut h: Histogram<8> = Histogram::new().with_literal_mode(false);
-    assert!(!h.is_literal());
+    let mut h: Histogram<8> = Histogram::new().with_min_bucket_width(BucketWidth::B1);
+    assert!(h.bucket_width() != BucketWidth::B0);
     h.update(1.0).unwrap();
-    assert!(!h.is_literal());
+    assert!(h.bucket_width() != BucketWidth::B0);
 }
 
 #[test]
@@ -1820,10 +1814,10 @@ fn test_literal_mode_recreate_resets() {
     for i in 0..9 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
-    assert!(!h.is_literal());
+    assert!(h.bucket_width() != BucketWidth::B0);
     // Re-creating the histogram resets to literal mode.
     h = Histogram::new();
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     assert_eq!(h.view().count(), 0);
 }
 
@@ -1834,7 +1828,7 @@ fn test_literal_mode_zero_values() {
     h.update(0.0).unwrap();
     h.update(0.0).unwrap();
     h.update(0.0).unwrap();
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     let v = h.view();
     assert_eq!(v.count(), 3);
     assert_eq!(v.sum(), 0.0);
@@ -1848,7 +1842,7 @@ fn test_literal_mode_identical_values() {
     for _ in 0..6 {
         h.update(42.0).unwrap();
     }
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     let v = h.view();
     let buckets = v.positive();
     assert_eq!(v.count(), 6);
@@ -1879,7 +1873,7 @@ fn test_literal_record() {
     let mut h: Histogram<8> = Histogram::new();
     // 3 copies of the same value.
     h.record(5.0, 3).unwrap();
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     assert_eq!(h.view().count(), 3);
     assert_eq!(h.view().sum(), 15.0);
 }
@@ -1889,7 +1883,7 @@ fn test_literal_record_overflow() {
     // Histogram<8>: 8 literal slots. incr=9 should promote.
     let mut h: Histogram<8> = Histogram::new();
     h.record(3.25, 9).unwrap();
-    assert!(!h.is_literal());
+    assert!(h.bucket_width() != BucketWidth::B0);
     assert_eq!(h.view().count(), 9);
 }
 
@@ -1905,7 +1899,7 @@ fn test_literal_merge_literal_into_literal() {
 fn test_literal_merge_literal_into_bucket() {
     let mut collector = build_bucket::<16>(&[1.0, 2.0]);
     let source = build_from_values::<16>(&[4.0, 8.0]);
-    assert!(source.is_literal());
+    assert!(source.bucket_width() == BucketWidth::B0);
     collector.merge_from(&source).unwrap();
     assert_stats(&mut collector, 4, 15.0, 1.0, 8.0);
 }
@@ -1913,10 +1907,10 @@ fn test_literal_merge_literal_into_bucket() {
 #[test]
 fn test_literal_merge_bucket_into_literal() {
     let mut collector = build_from_values::<16>(&[1.0]);
-    assert!(collector.is_literal());
+    assert!(collector.bucket_width() == BucketWidth::B0);
     let source = build_bucket::<16>(&[4.0, 8.0]);
     collector.merge_from(&source).unwrap();
-    assert!(!collector.is_literal());
+    assert!(collector.bucket_width() != BucketWidth::B0);
     assert_stats(&mut collector, 3, 13.0, 1.0, 8.0);
 }
 
@@ -1924,9 +1918,9 @@ fn test_literal_merge_bucket_into_literal() {
 fn test_literal_merge_preserves_source() {
     let mut collector = build_bucket::<16>(&[1.0]);
     let mut source = build_from_values::<16>(&[4.0]);
-    assert!(source.is_literal());
+    assert!(source.bucket_width() == BucketWidth::B0);
     collector.merge_from(&source).unwrap();
-    assert!(source.is_literal());
+    assert!(source.bucket_width() == BucketWidth::B0);
     assert_stats(&mut source, 1, 4.0, 4.0, 4.0);
 }
 
@@ -1934,7 +1928,7 @@ fn test_literal_merge_preserves_source() {
 fn test_literal_merge_cross_size() {
     let mut collector = build_bucket::<16>(&[1.0]);
     let source = build_from_values::<8>(&[4.0, 8.0]);
-    assert!(source.is_literal());
+    assert!(source.bucket_width() == BucketWidth::B0);
     collector.merge_from(&source).unwrap();
     assert_stats(&mut collector, 3, 13.0, 1.0, 8.0);
 }
@@ -1948,10 +1942,10 @@ fn test_merge_literal_source_not_promoted() {
     // Same-size merge: literal source into bucket dest.
     let mut dest = build_bucket::<16>(&[1.0, 2.0, 3.0]);
     let source = build_from_values::<16>(&[10.0, 20.0, 30.0]);
-    assert!(source.is_literal());
+    assert!(source.bucket_width() == BucketWidth::B0);
     dest.merge_from(&source).unwrap();
     assert!(
-        source.is_literal(),
+        source.bucket_width() == BucketWidth::B0,
         "same-size merge must not promote source"
     );
     assert_eq!(dest.view().count(), 6);
@@ -1959,10 +1953,10 @@ fn test_merge_literal_source_not_promoted() {
     // Cross-size merge: small literal source into large bucket dest.
     let mut big = build_bucket::<16>(&[1.0, 2.0, 3.0]);
     let small = build_from_values::<8>(&[100.0, 200.0]);
-    assert!(small.is_literal());
+    assert!(small.bucket_width() == BucketWidth::B0);
     big.merge_from(&small).unwrap();
     assert!(
-        small.is_literal(),
+        small.bucket_width() == BucketWidth::B0,
         "cross-size merge must not promote source"
     );
     assert_eq!(big.view().count(), 5);
@@ -1972,10 +1966,10 @@ fn test_merge_literal_source_not_promoted() {
     // correctly through incremental insertion.
     let mut dest2 = build_bucket::<16>(&[1.0]);
     let source2 = build_from_values::<16>(&[1e-200, 1e200]);
-    assert!(source2.is_literal());
+    assert!(source2.bucket_width() == BucketWidth::B0);
     dest2.merge_from(&source2).unwrap();
     assert!(
-        source2.is_literal(),
+        source2.bucket_width() == BucketWidth::B0,
         "wide-range merge must not promote source"
     );
     assert_eq!(dest2.view().count(), 3);
@@ -2000,7 +1994,7 @@ fn test_literal_subnormal_values() {
     let mut h: Histogram<8> = Histogram::new();
     h.update(subnormal).unwrap();
     h.update(subnormal).unwrap();
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     assert_eq!(h.view().count(), 2);
     // With f64 stats, subnormals are preserved exactly.
     // Check bucket view to verify data integrity.
@@ -2010,7 +2004,7 @@ fn test_literal_subnormal_values() {
 #[test]
 fn test_literal_empty_bucket_view() {
     let mut h: Histogram<8> = Histogram::new();
-    assert!(h.is_literal());
+    assert!(h.bucket_width() == BucketWidth::B0);
     let v = h.view();
     let buckets = v.positive();
     assert!(buckets.is_empty());
@@ -2342,7 +2336,7 @@ fn repro_fuzz_histogram_oracle_offset() {
 
     // Bucket mode and literal mode must agree.
     for literal in [true, false] {
-        let mut h = Histogram::<8>::new().with_literal_mode(literal);
+        let mut h = Histogram::<8>::new().with_min_bucket_width(if literal { BucketWidth::B0 } else { BucketWidth::B1 });
         h.update(subnormal).unwrap();
         h.update(normal).unwrap();
 
@@ -2369,12 +2363,12 @@ fn repro_fuzz_merge_oracle_offset() {
     let incrs: &[u64] = &[4194304, 16777216, 268435456, 4294967296];
 
     for literal in [true, false] {
-        let mut right = Histogram::<8>::new().with_literal_mode(literal);
+        let mut right = Histogram::<8>::new().with_min_bucket_width(if literal { BucketWidth::B0 } else { BucketWidth::B1 });
         for &incr in incrs {
             right.record(subnormal, incr).unwrap();
         }
 
-        let mut left = Histogram::<8>::new().with_literal_mode(literal);
+        let mut left = Histogram::<8>::new().with_min_bucket_width(if literal { BucketWidth::B0 } else { BucketWidth::B1 });
         left.merge_from(&right).unwrap();
 
         let v = left.view();
@@ -2405,12 +2399,12 @@ fn repro_fuzz_stateful_bucket_total() {
     let v2: f64 = f64::from_bits(0x004b000000000000);
     let v3: f64 = f64::from_bits(0x56562c0000000000);
 
-    let mut pool0 = Histogram::<8>::new().with_literal_mode(false);
+    let mut pool0 = Histogram::<8>::new().with_min_bucket_width(BucketWidth::B1);
     pool0.record(v1, 12).unwrap();
     pool0.record(v2, 1).unwrap();
     pool0.record(v3, 1).unwrap();
 
-    let mut big = Histogram::<16>::new().with_literal_mode(false);
+    let mut big = Histogram::<16>::new().with_min_bucket_width(BucketWidth::B1);
     big.merge_from(&pool0).unwrap();
 
     // Second merge may succeed or fail; either way, exercise the path.

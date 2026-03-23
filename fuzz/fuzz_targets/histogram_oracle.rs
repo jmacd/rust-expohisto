@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::{Histogram, Mapping, max_scale};
+use otel_expohisto::{BucketWidth, Histogram, Mapping, max_scale};
 
 #[path = "verify.rs"]
 mod verify;
@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
 /// Reference-oracle test: insert every value, then verify the histogram
 /// state matches an independently-computed expectation.
 fn check_histogram<const N: usize>(values: &[f64], literal_mode: bool) {
-    let mut hist = Histogram::<N>::new().with_literal_mode(literal_mode);
+    let mut hist = Histogram::<N>::new().with_min_bucket_width(if literal_mode { BucketWidth::B0 } else { BucketWidth::B1 });
     let mut inserted: Vec<f64> = Vec::new();
 
     for &v in values {

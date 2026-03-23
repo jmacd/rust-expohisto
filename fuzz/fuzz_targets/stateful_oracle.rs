@@ -14,7 +14,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::Histogram;
+use otel_expohisto::{BucketWidth, Histogram};
 
 #[path = "verify.rs"]
 mod verify;
@@ -181,13 +181,16 @@ fuzz_target!(|data: &[u8]| {
     let lit_ctl: u8 = u.arbitrary().unwrap_or(0xFF);
 
     // Pool of histograms — small N to maximize pressure on downscale/widen.
+    let lit_width = |bit: u8| -> BucketWidth {
+        if lit_ctl & bit != 0 { BucketWidth::B0 } else { BucketWidth::B1 }
+    };
     let mut pool: [Histogram<8>; POOL] = core::array::from_fn(|i| {
-        Histogram::new().with_literal_mode(lit_ctl & (1 << i) != 0)
+        Histogram::new().with_min_bucket_width(lit_width(1 << i))
     });
     let mut shadows: [Shadow; POOL] = core::array::from_fn(|_| Shadow::default());
 
     // Also keep one Histogram<16> for cross-size merges.
-    let mut big: Histogram<16> = Histogram::new().with_literal_mode(lit_ctl & 0x80 != 0);
+    let mut big: Histogram<16> = Histogram::new().with_min_bucket_width(lit_width(0x80));
     let mut big_shadow: Shadow = Shadow::default();
 
     // Cap operations to keep memory bounded.
@@ -240,7 +243,7 @@ fuzz_target!(|data: &[u8]| {
 
             Op::Clear { idx } => {
                 let i = idx as usize % POOL;
-                pool[i] = Histogram::new().with_literal_mode(lit_ctl & (1 << i) != 0);
+                pool[i] = Histogram::new().with_min_bucket_width(lit_width(1 << i));
                 shadows[i].clear();
             }
 

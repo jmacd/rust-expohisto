@@ -11,7 +11,7 @@ use super::{Histogram, Overflow};
 impl<const N: usize> Histogram<N> {
     /// Stores a value in literal mode, promoting to bucket mode on overflow.
     pub(super) fn update_literal(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
-        debug_assert!(self.literal);
+        debug_assert!(self.bucket_width.is_literal());
 
         let count = self.literal_count();
         let remaining = self.literal_capacity() - count;
@@ -29,12 +29,12 @@ impl<const N: usize> Histogram<N> {
     /// Promotes from literal mode to bucket mode, optionally including
     /// a trigger value that caused overflow of literal capacity.
     fn promote_to_buckets(&mut self, trigger: Option<(f64, u64)>) -> Result<(), Overflow> {
-        debug_assert!(self.literal);
+        debug_assert!(self.bucket_width.is_literal());
 
         let count = self.literal_count();
 
         if count == 0 && trigger.is_none() {
-            self.literal = false;
+            self.reset_bucket_state();
             return Ok(());
         }
 
@@ -45,7 +45,6 @@ impl<const N: usize> Histogram<N> {
         // Reset to empty bucket mode at the initial scale and replay values
         // through the normal update path, which handles widening and
         // downscaling incrementally.
-        self.literal = false;
         self.reset_bucket_state();
         self.mapping = Mapping::new(self.mapping.scale()).map_err(|_| Overflow)?;
 
