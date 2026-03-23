@@ -8,9 +8,8 @@
 //! This is the simplest and fastest algorithm, always used for non-positive scales.
 
 use crate::float64::{
-    MAX_NORMAL_EXPONENT, MIN_NORMAL_EXPONENT, MIN_VALUE, get_normal_base2, get_significand,
+    MIN_NORMAL_EXPONENT, MIN_VALUE, get_normal_base2, get_significand,
 };
-use crate::mapping::MappingError;
 
 /// Maps a positive f64 value to a bucket index at a non-positive scale.
 ///
@@ -39,26 +38,6 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     (raw_exp + correction) >> shift
 }
 
-/// Returns the lower boundary of a bucket at the given index.
-#[inline]
-pub fn lower_boundary(index: i32, scale: i32) -> Result<f64, MappingError> {
-    debug_assert!(scale <= 0);
-
-    let shift = (-scale) as u32;
-
-    if index < min_normal_lower_boundary_index(scale) {
-        return Err(MappingError::Underflow);
-    }
-
-    if index > max_normal_lower_boundary_index(scale) {
-        return Err(MappingError::Overflow);
-    }
-
-    // 2^(index << shift)
-    let exp = index << shift;
-    Ok(crate::float64::pow2(exp))
-}
-
 #[inline]
 pub const fn min_normal_lower_boundary_index(scale: i32) -> i32 {
     let shift = (-scale) as u32;
@@ -68,12 +47,6 @@ pub const fn min_normal_lower_boundary_index(scale: i32) -> i32 {
         idx -= 1;
     }
     idx
-}
-
-#[inline]
-pub const fn max_normal_lower_boundary_index(scale: i32) -> i32 {
-    let shift = (-scale) as u32;
-    MAX_NORMAL_EXPONENT >> shift
 }
 
 #[cfg(test)]
@@ -109,14 +82,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn test_lower_boundary_scale_0() {
-        assert_eq!(lower_boundary(0, 0).unwrap(), 1.0);
-        assert_eq!(lower_boundary(1, 0).unwrap(), 2.0);
-        assert_eq!(lower_boundary(-1, 0).unwrap(), 0.5);
-        assert_eq!(lower_boundary(2, 0).unwrap(), 4.0);
     }
 
     #[test]

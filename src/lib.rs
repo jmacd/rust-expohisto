@@ -9,6 +9,9 @@ pub(crate) mod float64;
 pub mod histogram;
 pub mod mapping;
 
+#[cfg(feature = "boundary")]
+mod boundary;
+
 // Algorithm modules - conditionally compiled.
 // These are public for benchmark access but hidden from docs since users
 // should go through `Mapping` rather than calling algorithms directly.

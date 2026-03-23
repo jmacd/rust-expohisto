@@ -25,6 +25,7 @@ pub const EXPONENT_MASK: u64 = ((1u64 << EXPONENT_WIDTH) - 1) << SIGNIFICAND_WID
 pub const MIN_NORMAL_EXPONENT: i32 = -EXPONENT_BIAS + 1;
 
 /// Maximum exponent of a normalized floating point: 1023.
+#[cfg_attr(not(feature = "boundary"), allow(dead_code))]
 pub const MAX_NORMAL_EXPONENT: i32 = EXPONENT_BIAS;
 
 /// Smallest normal f64 value: 2^-1022 (same as `f64::MIN_POSITIVE`).
@@ -48,6 +49,7 @@ pub const fn get_significand(value: f64) -> u64 {
 ///
 /// Valid for k in \[`MIN_NORMAL_EXPONENT`, `MAX_NORMAL_EXPONENT`\] (i.e. −1022..=1023).
 /// Panics in debug mode if k is out of range.
+#[cfg_attr(not(feature = "boundary"), allow(dead_code))]
 #[inline]
 pub const fn pow2(k: i32) -> f64 {
     debug_assert!(

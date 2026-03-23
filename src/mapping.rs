@@ -8,11 +8,7 @@
 //! scale > 0, it uses the compile-time generated lookup table algorithm.
 //! Scales above the compiled table scale are rejected by [`Mapping::new`].
 
-use crate::float64::{
-    MIN_NORMAL_EXPONENT, MIN_VALUE,
-};
-#[cfg(feature = "boundary")]
-use crate::float64::MAX_NORMAL_EXPONENT;
+use crate::float64::{MIN_NORMAL_EXPONENT, MIN_VALUE};
 use core::fmt;
 
 /// Minimum scale for the exponent mapping.
@@ -32,8 +28,6 @@ pub enum MappingError {
     Overflow,
     /// Invalid scale parameter.
     InvalidScale,
-    /// Operation requires the `boundary` feature at this scale.
-    Unsupported,
 }
 
 impl fmt::Display for MappingError {
@@ -42,7 +36,6 @@ impl fmt::Display for MappingError {
             Self::Underflow => f.write_str("bucket index corresponds to a subnormal value"),
             Self::Overflow => f.write_str("bucket index corresponds to +Inf"),
             Self::InvalidScale => f.write_str("invalid scale parameter"),
-            Self::Unsupported => f.write_str("operation requires the `boundary` feature at this scale"),
         }
     }
 }
@@ -66,9 +59,6 @@ pub const fn max_scale() -> i32 {
 #[derive(Debug, Clone, Copy)]
 pub struct Mapping {
     scale: i32,
-    /// Pre-computed inverse factor for boundary computation (boundary feature only).
-    #[cfg(feature = "boundary")]
-    inverse_factor: f64,
 }
 
 impl Mapping {
@@ -83,12 +73,6 @@ impl Mapping {
 
         Ok(Self {
             scale,
-            #[cfg(feature = "boundary")]
-            inverse_factor: if scale > 0 {
-                core::f64::consts::LN_2 / (1u64 << scale) as f64
-            } else {
-                0.0
-            },
         })
     }
 
@@ -129,75 +113,6 @@ impl Mapping {
             let _ = (value, scale);
             0
         }
-    }
-
-    /// Returns the lower boundary of a bucket at the given index.
-    ///
-    /// For scale ≤ 0 this is an exact power of two (no libm needed).
-    /// For positive scales, this requires the `boundary` feature which
-    /// provides the `exp()` function via std or libm.
-    #[cfg(feature = "boundary")]
-    #[inline]
-    pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
-        if self.scale <= 0 {
-            crate::exponent::lower_boundary(index, self.scale)
-        } else {
-            self.lower_boundary_logarithm(index)
-        }
-    }
-
-    /// Returns the lower boundary of a bucket at the given index.
-    ///
-    /// Available without the `boundary` feature only for scale ≤ 0
-    /// (exact powers of two).
-    #[cfg(not(feature = "boundary"))]
-    #[inline]
-    pub fn lower_boundary(&self, index: i32) -> Result<f64, MappingError> {
-        if self.scale <= 0 {
-            crate::exponent::lower_boundary(index, self.scale)
-        } else {
-            Err(MappingError::Unsupported)
-        }
-    }
-
-    #[cfg(feature = "boundary")]
-    fn lower_boundary_logarithm(&self, index: i32) -> Result<f64, MappingError> {
-        let scale = self.scale;
-        let max_idx = self.max_normal_lower_boundary_index_log();
-        let min_idx = self.min_normal_lower_boundary_index_log();
-
-        if index >= max_idx {
-            if index == max_idx {
-                // Use alternate equation to avoid overflow
-                return Ok(2.0 * crate::float64::exp((index - (1 << scale)) as f64 * self.inverse_factor));
-            }
-            return Err(MappingError::Overflow);
-        }
-
-        if index <= min_idx {
-            if index == min_idx {
-                return Ok(MIN_VALUE);
-            } else if index == min_idx - 1 {
-                return Ok(crate::float64::exp((index + (1 << scale)) as f64 * self.inverse_factor) / 2.0);
-            }
-            return Err(MappingError::Underflow);
-        }
-
-        Ok(crate::float64::exp(index as f64 * self.inverse_factor))
-    }
-
-    // Helper functions for boundary indices
-
-    #[cfg(feature = "boundary")]
-    #[inline]
-    const fn min_normal_lower_boundary_index_log(&self) -> i32 {
-        MIN_NORMAL_EXPONENT << (self.scale)
-    }
-
-    #[cfg(feature = "boundary")]
-    #[inline]
-    const fn max_normal_lower_boundary_index_log(&self) -> i32 {
-        ((MAX_NORMAL_EXPONENT + 1) << (self.scale)) - 1
     }
 }
 
@@ -245,10 +160,6 @@ mod tests {
         assert_eq!(m.map_to_index(2.0), 0);
         assert_eq!(m.map_to_index(1e100), 0);
         assert_eq!(m.map_to_index(1e308), 0);
-
-        // Boundaries
-        assert_eq!(m.lower_boundary(0).unwrap(), 1.0);
-        assert!(m.lower_boundary(1).is_err()); // Overflow
     }
 
     #[test]
@@ -281,17 +192,6 @@ mod tests {
         assert_eq!(m.map_to_index(1.0), -1);
         assert_eq!(m.map_to_index(2.0), 1);
         assert_eq!(m.map_to_index(4.0), 3);
-    }
-
-    #[test]
-    fn test_lower_boundary_scale_0() {
-        let m = Mapping::new(0).unwrap();
-
-        // At scale 0, lower_boundary(index) = 2^index
-        assert_eq!(m.lower_boundary(0).unwrap(), 1.0); // 2^0 = 1
-        assert_eq!(m.lower_boundary(1).unwrap(), 2.0); // 2^1 = 2
-        assert_eq!(m.lower_boundary(-1).unwrap(), 0.5); // 2^-1 = 0.5
-        assert_eq!(m.lower_boundary(2).unwrap(), 4.0); // 2^2 = 4
     }
 
     #[test]
