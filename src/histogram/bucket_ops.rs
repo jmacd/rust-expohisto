@@ -34,6 +34,15 @@ impl<const N: usize> DownscaleCtx<'_, N> {
         let slot = Histogram::<N>::old_slot(idx, self.old_base, self.old_width);
         Histogram::<N>::get_in(self.old_data, slot, self.old_width)
     }
+
+    /// Old bucket indices that map to output group `grp` after
+    /// downscaling, clamped to the live range.
+    #[inline]
+    fn old_range(&self, grp: i32) -> core::ops::RangeInclusive<i32> {
+        let lo = grp << self.change;
+        let hi = lo + (1i32 << self.change) - 1;
+        lo.max(self.old_start)..=hi.min(self.old_end)
+    }
 }
 
 impl<const N: usize> Histogram<N> {
@@ -104,19 +113,13 @@ impl<const N: usize> Histogram<N> {
         let base = w.word_start(ctx.new_start);
         self.init_output(w, base, ctx.new_start, ctx.new_end);
 
-        let mut cur_group = ctx.old_start >> ctx.change;
-        let mut group_acc: u64 = 0;
-
-        for idx in ctx.old_start..=ctx.old_end {
-            let new_idx = idx >> ctx.change;
-            if new_idx != cur_group {
-                Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
-                group_acc = 0;
-                cur_group = new_idx;
+        for grp in ctx.new_start..=ctx.new_end {
+            let mut acc: u64 = 0;
+            for idx in ctx.old_range(grp) {
+                acc += ctx.read_old(idx);
             }
-            group_acc += ctx.read_old(idx);
+            Self::set_in(&mut self.data, (grp - base) as usize, w, acc);
         }
-        Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
 
         self.trim_bucket_range();
     }
@@ -133,31 +136,17 @@ impl<const N: usize> Histogram<N> {
         let counter_max = w.counter_max();
         self.init_output(w, base, ctx.new_start, ctx.new_end);
 
-        let mut cur_group = ctx.old_start >> ctx.change;
-        let mut group_acc: u64 = 0;
-
-        for idx in ctx.old_start..=ctx.old_end {
-            let new_idx = idx >> ctx.change;
-            if new_idx != cur_group {
-                if group_acc > counter_max {
-                    return self.downscale_repair(
-                        ctx, w, idx, cur_group, group_acc,
-                    );
-                }
-                Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
-                group_acc = 0;
-                cur_group = new_idx;
+        for grp in ctx.new_start..=ctx.new_end {
+            let mut acc: u64 = 0;
+            for idx in ctx.old_range(grp) {
+                acc = acc.checked_add(ctx.read_old(idx)).ok_or(super::Overflow)?;
             }
-            group_acc = group_acc.checked_add(ctx.read_old(idx)).ok_or(super::Overflow)?;
+            if acc > counter_max {
+                return self.downscale_repair(ctx, w, grp, acc);
+            }
+            Self::set_in(&mut self.data, (grp - base) as usize, w, acc);
         }
 
-        if group_acc > counter_max {
-            return self.downscale_repair(
-                ctx, w, ctx.old_end + 1, cur_group, group_acc,
-            );
-        }
-
-        Self::set_in(&mut self.data, (cur_group - base) as usize, w, group_acc);
         self.trim_bucket_range();
         Ok(())
     }
@@ -169,33 +158,21 @@ impl<const N: usize> Histogram<N> {
         &mut self,
         ctx: &DownscaleCtx<'_, N>,
         spec_width: BucketWidth,
-        resume_idx: i32,
         overflow_group: i32,
         overflow_acc: u64,
     ) -> Result<(), super::Overflow> {
         let spec_base = spec_width.word_start(ctx.new_start);
 
-        // Phase 1: scan remaining old indices for the true max
-        // group sum across all groups from overflow_group onward.
+        // Phase 1: scan remaining groups for the true max.
         let mut max_acc = overflow_acc;
-        let mut cur_group = overflow_group;
-        let mut group_acc = overflow_acc;
-
-        for idx in resume_idx..=ctx.old_end {
-            let new_idx = idx >> ctx.change;
-            if new_idx != cur_group {
-                if group_acc > max_acc {
-                    max_acc = group_acc;
-                }
-                group_acc = 0;
-                cur_group = new_idx;
+        for grp in (overflow_group + 1)..=ctx.new_end {
+            let mut acc: u64 = 0;
+            for idx in ctx.old_range(grp) {
+                acc = acc.checked_add(ctx.read_old(idx)).ok_or(super::Overflow)?;
             }
-            group_acc = group_acc
-                .checked_add(ctx.read_old(idx))
-                .ok_or(super::Overflow)?;
-        }
-        if group_acc > max_acc {
-            max_acc = group_acc;
+            if acc > max_acc {
+                max_acc = acc;
+            }
         }
 
         // Phase 2: compute exact target width.
@@ -219,42 +196,18 @@ impl<const N: usize> Histogram<N> {
                 spec_width,
             );
             if val != 0 {
-                Self::set_in(
-                    &mut self.data,
-                    (grp - tbase) as usize,
-                    tw,
-                    val,
-                );
+                Self::set_in(&mut self.data, (grp - tbase) as usize, tw, val);
             }
         }
 
-        // Phase 4: re-scan old indices from overflow_group onward
-        // and write at the target width (guaranteed to fit).
-        let first_idx =
-            (overflow_group << ctx.change).max(ctx.old_start);
-        cur_group = first_idx >> ctx.change;
-        group_acc = 0;
-
-        for idx in first_idx..=ctx.old_end {
-            let new_idx = idx >> ctx.change;
-            if new_idx != cur_group {
-                Self::set_in(
-                    &mut self.data,
-                    (cur_group - tbase) as usize,
-                    tw,
-                    group_acc,
-                );
-                group_acc = 0;
-                cur_group = new_idx;
+        // Phase 4: re-sum from overflow_group onward at target width.
+        for grp in overflow_group..=ctx.new_end {
+            let mut acc: u64 = 0;
+            for idx in ctx.old_range(grp) {
+                acc += ctx.read_old(idx);
             }
-            group_acc += ctx.read_old(idx);
+            Self::set_in(&mut self.data, (grp - tbase) as usize, tw, acc);
         }
-        Self::set_in(
-            &mut self.data,
-            (cur_group - tbase) as usize,
-            tw,
-            group_acc,
-        );
 
         self.trim_bucket_range();
         Ok(())
