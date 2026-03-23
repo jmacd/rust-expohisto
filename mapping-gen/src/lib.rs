@@ -21,6 +21,74 @@ pub use table::*;
 
 use std::io::Write;
 
+/// Maximum scale for inverse factor table (matches `mapping::MAX_SCALE`).
+pub const MAX_SCALE: u32 = 20;
+
+/// Computes `ln(2) / 2^scale` for scales 1..=`MAX_SCALE` as correctly
+/// rounded f64 values using 256-bit precision via `rug`.
+pub fn generate_inverse_factors() -> Vec<f64> {
+    use rug::Float;
+
+    const PRECISION: u32 = 256;
+
+    let ln2 = Float::with_val(PRECISION, rug::float::Constant::Log2);
+
+    (1..=MAX_SCALE)
+        .map(|scale| {
+            let divisor = Float::with_val(PRECISION, Float::i_pow_u(2, scale));
+            let exact = Float::with_val(PRECISION, &ln2 / &divisor);
+            // to_f64() rounds to nearest (default rug rounding mode)
+            exact.to_f64()
+        })
+        .collect()
+}
+
+/// Writes the `INVERSE_FACTOR` array as Rust source.
+///
+/// `factors` must have `MAX_SCALE` entries as returned by
+/// [`generate_inverse_factors`].
+pub fn write_inverse_factors<W: Write>(
+    w: &mut W,
+    factors: &[f64],
+) -> std::io::Result<()> {
+    debug_assert_eq!(factors.len(), MAX_SCALE as usize);
+
+    writeln!(
+        w,
+        "// Auto-generated inverse factor table: ln(2) / 2^scale"
+    )?;
+    writeln!(
+        w,
+        "// for scales 1..={}. Indexed as INVERSE_FACTOR[scale - 1].",
+        MAX_SCALE
+    )?;
+    writeln!(w)?;
+    writeln!(
+        w,
+        "/// `ln(2) / 2^scale` for scales 1..={}, indexed as `[scale - 1]`.",
+        MAX_SCALE
+    )?;
+    writeln!(
+        w,
+        "/// Generated from 256-bit precision arithmetic, correctly rounded to f64."
+    )?;
+    writeln!(w, "const INVERSE_FACTOR: [f64; {}] = [", MAX_SCALE)?;
+    for (i, &f) in factors.iter().enumerate() {
+        let scale = i + 1;
+        // Emit as f64::from_bits for exact round-trip without precision lint issues
+        writeln!(
+            w,
+            "    f64::from_bits(0x{:016X}), // scale {} ≈ {:.6e}",
+            f.to_bits(),
+            scale,
+            f
+        )?;
+    }
+    writeln!(w, "];")?;
+
+    Ok(())
+}
+
 /// Computes the sentinel-wrapped boundary array for a given scale.
 ///
 /// Returns `N + 3` entries with layout:
@@ -170,4 +238,53 @@ pub fn write_index_table<W: Write>(
     writeln!(w, "];")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::Float;
+
+    /// Verifies that every generated inverse factor is the correctly
+    /// rounded f64 of `ln(2) / 2^scale`, by comparing the generated
+    /// value against a 256-bit precision computation.
+    #[test]
+    fn test_inverse_factors_correctly_rounded() {
+        let factors = generate_inverse_factors();
+        assert_eq!(factors.len(), MAX_SCALE as usize);
+
+        let ln2 = Float::with_val(256, rug::float::Constant::Log2);
+
+        for (i, &f) in factors.iter().enumerate() {
+            let scale = (i + 1) as u32;
+            let divisor = Float::with_val(256, Float::i_pow_u(2, scale));
+            let exact = Float::with_val(256, &ln2 / &divisor);
+            let expected = exact.to_f64();
+
+            assert_eq!(
+                f.to_bits(),
+                expected.to_bits(),
+                "inverse factor at scale {} not correctly rounded",
+                scale
+            );
+        }
+    }
+
+    /// Verifies that the significand bits of ln(2)/2^scale are all
+    /// identical (only the exponent changes when dividing by 2).
+    #[test]
+    fn test_inverse_factors_share_significand() {
+        let factors = generate_inverse_factors();
+        let sig_mask = (1u64 << 52) - 1;
+        let first_sig = factors[0].to_bits() & sig_mask;
+
+        for (i, &f) in factors.iter().enumerate() {
+            assert_eq!(
+                f.to_bits() & sig_mask,
+                first_sig,
+                "significand differs at scale {}",
+                i + 1
+            );
+        }
+    }
 }

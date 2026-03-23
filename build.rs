@@ -31,6 +31,12 @@ fn main() {
     expohisto_mapping_gen::write_index_table(&mut file, scale, &boundaries)
         .unwrap();
 
+    // Generate inverse factor table for boundary computation.
+    let inv_path = Path::new(&out_dir).join("inverse_factors.rs");
+    let mut inv_file = File::create(&inv_path).unwrap();
+    let factors = expohisto_mapping_gen::generate_inverse_factors();
+    expohisto_mapping_gen::write_inverse_factors(&mut inv_file, &factors).unwrap();
+
     println!("cargo:rerun-if-changed=build.rs");
 }
 
