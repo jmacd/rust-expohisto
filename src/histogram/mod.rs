@@ -528,12 +528,6 @@ impl<const N: usize> Histogram<N> {
     }
 }
 
-// (BucketView and BucketsIter are in bucket_view.rs)
-
-// (Bucket operations — widen/downscale — are in bucket_ops.rs)
-
-// (SWAR free functions are in swar.rs)
-
 // ---------------------------------------------------------------------------
 // Histogram<N> — construction and public API
 // ---------------------------------------------------------------------------

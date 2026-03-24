@@ -19,7 +19,8 @@ Exponential histograms provide a compact, high-resolution representation of valu
 - **Sub-byte counters**: 1-bit bucket counters (B1) maximize resolution; auto-widen on overflow
 - **Configurable table size**: Trade static memory for lookup acceleration at higher scales
 - **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
-- **Literal mode**: Cold-start optimization defers bucket allocation until the value range is known
+- **Literal mode**: Cold-start pool defers bucketing until the value range is known, minimizing downscales
+- **Compact configuration**: 2-byte `Settings` struct pairs `Scale` + `Width`; histograms track both initial and current settings
 - **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature
 - **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate
 - **Zero runtime dependencies**: Only a build dependency (`expohisto-mapping-gen`) for compile-time table generation
@@ -85,7 +86,7 @@ are rejected by `Scale::new()`. Selected examples:
 
 | Feature | Default | Effect |
 |---------|---------|--------|
-| `std` | ✓ | Enables `std::error::Error` impls for `Overflow` and `MappingError`. Disable for `#![no_std]` builds. |
+| `std` | ✓ | Enables `std::error::Error` impls for `Overflow` and `ScaleError`. Disable for `#![no_std]` builds. |
 | `logarithm` | | Pure `ln()`-based mapper for testing and benchmarking. Requires `std`. |
 | `boundary` | | Enables `lower_boundary()` at positive scales. Requires `std`. |
 | `quantile` | | Quantile estimation (`QuantileIter`). Requires `boundary`. |
