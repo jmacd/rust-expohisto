@@ -8,7 +8,6 @@
 //! scale > 0, it uses the compile-time generated lookup table algorithm.
 //! Scales above the compiled table scale are rejected by [`Scale::new`].
 
-use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
 use core::fmt;
 
 /// Minimum scale for the exponent mapping.
@@ -86,41 +85,29 @@ impl Scale {
 
     /// Maps a f64 value to a bucket index. Ignores sign.
     #[inline]
-    pub fn map_to_index(&self, value: f64) -> Option<i32> {
+    pub fn map_decomposed(&self, significand: u64, base2_exp: i32) -> i32 {
         let scale = self.scale();
 
-        // Extract the raw exponent.
-        let mut biased_exp = get_biased_exponent(value);
-        let mut significand = get_significand(value);
-
-        // Handle the extreme cases.
-        match biased_exp {
-            0 => {
-                if significand == 0 {
-                    // Zero case.
-                    return None;
-                } else {
-                    // Round up to MIN_VALUE.
-                    biased_exp = 1;
-                    significand = 0;
-                }
-            }
-            NAN_INF_BIASED => {
-                // Inf and NaN cases.
-                return None;
-            }
-            _ => {
-                // Normal exponents
-            }
-        }
-
-        let base2_exp = unbias_exponent(biased_exp);
-
-        Some(if scale <= 0 {
+        if scale <= 0 {
             crate::exponent::map_decomposed(significand, base2_exp, scale)
         } else {
             crate::lookup::map_decomposed(significand, base2_exp, scale)
-        })
+        }
+    }
+
+    /// Test version
+    #[cfg(test)]
+    pub fn map_to_index(&self, mut value: f64) -> i32 {
+        debug_assert!(!value.is_infinite());
+        debug_assert!(!value.is_nan());
+        if value < crate::float64::MIN_VALUE {
+            // Subnormal case is ordinarily handled in histogram/mod.rs
+            value = crate::float64::MIN_VALUE;
+        }
+        self.map_decomposed(
+            crate::float64::get_significand(value),
+            crate::float64::get_unbiased_exponent(value),
+        )
     }
 }
 
@@ -128,8 +115,10 @@ impl Scale {
 mod tests {
     use super::*;
 
+    use super::super::float64::{get_significand, get_unbiased_exponent};
+
     fn test_map(scale: Scale, value: f64) -> i32 {
-        scale.map_to_index(value).expect("test inputs are valid")
+        scale.map_decomposed(get_significand(value), get_unbiased_exponent(value))
     }
 
     #[test]

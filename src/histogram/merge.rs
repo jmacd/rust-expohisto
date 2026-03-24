@@ -17,9 +17,6 @@ impl<const N: usize> Histogram<N> {
     /// Returns [`Error`] if the combined total count would exceed
     /// `u64::MAX`. See [`record()`](Self::record) for details.
     pub fn merge_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
-        if other.current.width.is_literal() {
-            return self.merge_literal_from(other);
-        }
         if !other.buckets_empty() && self.buckets_empty() {
             self.current.width = self.current.width.max(other.current.width);
         }
@@ -82,10 +79,6 @@ impl<const N: usize> Histogram<N> {
         let new_sum = self.sum() + stats.sum;
 
         if buckets.len > 0 {
-            if self.current.width.is_literal() {
-                self.promote();
-            }
-
             let other_end = buckets.offset + buckets.len as i32 - 1;
             let cap = self.bucket_count() as i32;
             let min_scale = self.current.scale.scale().min(buckets.scale);
@@ -110,47 +103,12 @@ impl<const N: usize> Histogram<N> {
                 }
                 self.retry_increment(count, |h| {
                     let shift = buckets.scale - h.current.scale.scale();
-                    Some((buckets.offset + i as i32) >> shift)
+                    (buckets.offset + i as i32) >> shift
                 })?;
             }
         }
 
         self.commit_stats(new_sum, new_count, stats.min, stats.max);
-        Ok(())
-    }
-
-    /// Merges literal values from another histogram into this one.
-    fn merge_literal_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
-        debug_assert!(other.current.width.is_literal());
-        if other.count() == 0 {
-            return Ok(());
-        }
-        self.merge_literal_values(other)
-    }
-
-    fn merge_literal_values<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
-        let new_count = self
-            .checked_add_count(other.count())
-            .ok_or(Error::Overflow)?;
-        let new_sum = self.sum() + other.sum();
-        if self.current.width.is_literal() {
-            self.promote();
-        }
-        // Compute the number of entries in other's literal pool.
-        let r = other.stats.count as usize % M;
-        let entries = if r == 0 && other.stats.count > 0 {
-            M
-        } else {
-            r
-        };
-        for &bits in &other.data[..entries] {
-            let v = f64::from_bits(bits);
-            if v == 0.0 {
-                continue;
-            }
-            self.update_buckets(v, 1)?;
-        }
-        self.commit_stats(new_sum, new_count, other.min(), other.max());
         Ok(())
     }
 

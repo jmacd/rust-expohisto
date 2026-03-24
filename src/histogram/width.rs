@@ -7,14 +7,9 @@
 ///
 /// Counters start at 1-bit (maximizing initial bucket count) and widen
 /// in place through the chain: 1→2→4→8→16→32→64 bits.
-///
-/// The special `B0` variant represents **literal mode**, where the data
-/// pool stores raw `f64` bit patterns instead of bucket counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Width {
-    /// Literal mode: data pool stores raw f64 bit patterns, not counters.
-    B0 = 0,
     /// 1-bit counters (max 1 per bucket — presence bitmap).
     B1 = 1,
     /// 2-bit counters (max 3 per bucket).
@@ -43,17 +38,9 @@ pub(crate) const ALL_WIDTHS: [Width; 7] = [
 ];
 
 impl Width {
-    /// Returns true if this is `B0`.
-    #[inline]
-    pub const fn is_literal(self) -> bool {
-        // This is const.
-        self as u8 == 0
-    }
-
     /// Returns the bit width of one counter.
     #[inline]
     pub(crate) const fn bits(self) -> usize {
-        debug_assert!(!self.is_literal(), "B0 has no counter width");
         self as usize
     }
 
@@ -83,13 +70,8 @@ impl Width {
     }
 
     /// Returns the next wider counter width, or `None` if already at U64.
-    ///
-    /// For `B0`, returns `B1` (promotion from literal to bucket mode).
     #[inline]
     pub(crate) const fn wider(self) -> Option<Width> {
-        if self.is_literal() {
-            return Some(Width::B1);
-        }
         let l = self.level();
         if l < 6 {
             Some(ALL_WIDTHS[l + 1])

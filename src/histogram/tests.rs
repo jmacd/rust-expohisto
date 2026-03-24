@@ -67,7 +67,7 @@ fn test_histogram_merge() {
 
 #[test]
 fn test_histogram_recreate() {
-    let mut h: Histogram<16> = Histogram::new();
+    let h: Histogram<16> = Histogram::new();
     assert_eq!(h.view().count(), 0);
     assert_eq!(h.view().sum(), 0.0);
     assert_eq!(h.view().scale(), 0);
@@ -345,34 +345,6 @@ fn test_merge_regression_bucket_total() {
         bucket_total(&mut single),
         "bucket total mismatch: merged vs single"
     );
-}
-
-#[test]
-fn test_edge_values_inf() {
-    let max_f64: f64 = f64::MAX;
-    let inf: f64 = f64::INFINITY;
-    let minf: f64 = f64::NEG_INFINITY;
-
-    let m0 = Scale::new(0).unwrap();
-    let idx_max = m0.map_to_index(max_f64).unwrap();
-    assert_eq!(idx_max, crate::float64::MAX_NORMAL_EXPONENT);
-
-    let idx_inf = m0.map_to_index(inf);
-    assert_eq!(idx_inf, None);
-
-    let idx_minf = m0.map_to_index(minf);
-    assert_eq!(idx_minf, None);
-
-    let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap();
-    h.update(1.0).unwrap();
-    h.update(max_f64).unwrap();
-    // f64::MAX fits in f64 sum, but after adding infinity the sum
-    // is infinite.
-    h.update(inf).unwrap();
-    assert_eq!(h.view().count(), 3);
-    assert_eq!(h.view().max(), f64::INFINITY);
-    assert!(h.view().sum().is_infinite());
-    assert_eq!(h.view().min(), 1.0);
 }
 
 #[test]
@@ -701,36 +673,6 @@ fn assert_stats<const N: usize>(h: &mut Histogram<N>, count: u64, sum: f64, min:
     assert_eq!(v.sum(), sum, "sum");
     assert_eq!(v.min(), min, "min");
     assert_eq!(v.max(), max, "max");
-}
-
-/// Builds a literal-mode and a bucket-mode histogram from the same
-/// values and asserts they produce equivalent aggregate stats.
-///
-/// The literal path's min-first/max-first promotion may retain a
-/// higher scale than sequential bucket insertion, so we compare
-/// count, sum, min, max (not individual buckets).
-fn assert_literal_matches_bucket(values: &[f64]) {
-    let mut lit: Histogram<8> = Histogram::new();
-    let mut bkt: Histogram<8> = Histogram::new().with_min_width(Width::B1);
-    for &v in values {
-        lit.update(v).unwrap();
-        bkt.update(v).unwrap();
-    }
-
-    let lit_view = lit.view();
-    let bkt_view = bkt.view();
-
-    assert_eq!(lit_view.count(), bkt_view.count(), "count mismatch");
-    assert_eq!(lit_view.sum(), bkt_view.sum(), "sum mismatch");
-    assert_eq!(lit_view.min(), bkt_view.min(), "min mismatch");
-    assert_eq!(lit_view.max(), bkt_view.max(), "max mismatch");
-    // Literal promotion may achieve a higher (better) scale.
-    assert!(
-        lit_view.scale() >= bkt_view.scale(),
-        "literal scale {} should be >= bucket scale {}",
-        lit_view.scale(),
-        bkt_view.scale()
-    );
 }
 
 #[test]
@@ -1511,15 +1453,6 @@ fn build_from_values<const N: usize>(values: &[f64]) -> Histogram<N> {
     h
 }
 
-/// Helper: build a bucket-mode (non-literal) histogram from plain f64 values.
-fn build_bucket<const N: usize>(values: &[f64]) -> Histogram<N> {
-    let mut h = Histogram::<N>::new().with_min_width(Width::B1);
-    for &v in values {
-        h.update(v).unwrap();
-    }
-    h
-}
-
 fn assert_merge_result<const N: usize>(
     h: &mut Histogram<N>,
     left: &[(f64, u64)],
@@ -1674,8 +1607,8 @@ fn test_merge_p32_bucket_len_after_merge_chain() {
     let mapping = Scale::new(scale).unwrap();
 
     // All non-zero values should map to indices at the current scale
-    let idx0 = mapping.map_to_index(v0).unwrap();
-    let idx1 = mapping.map_to_index(v1).unwrap();
+    let idx0 = mapping.map_to_index(v0);
+    let idx1 = mapping.map_to_index(v1);
     let exp_min = idx0.min(idx1);
     let exp_max = idx0.max(idx1);
     let exp_len = (exp_max - exp_min + 1) as u32;
@@ -1706,277 +1639,6 @@ fn test_merge_p32_bucket_len_after_merge_chain() {
         assert!(b.at(b.len() - 1) > 0, "trailing zero bucket");
     }
 }
-
-// -----------------------------------------------------------------------
-// Literal mode tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_literal_mode_default() {
-    let mut h: Histogram<8> = Histogram::new();
-    assert!(h.width() == Width::B0);
-    let v = h.view();
-    assert_eq!(v.count(), 0);
-    assert_eq!(v.sum(), 0.0);
-}
-
-#[test]
-fn test_literal_mode_stores_values() {
-    let mut h: Histogram<8> = Histogram::new();
-    h.update(1.0).unwrap();
-    h.update(2.0).unwrap();
-    h.update(4.0).unwrap();
-    assert!(h.width() == Width::B0);
-    let v = h.view();
-    assert_eq!(v.count(), 3);
-    assert_eq!(v.sum(), 7.0);
-    assert_eq!(v.min(), 1.0);
-    assert_eq!(v.max(), 4.0);
-}
-
-#[test]
-fn test_literal_mode_capacity() {
-    // Histogram<8>: 8 literal slots. Pool fills on the 8th value.
-    let mut h: Histogram<8> = Histogram::new();
-    for i in 0..7 {
-        h.update(2.0_f64.powi(i)).unwrap();
-    }
-    assert!(
-        h.width() == Width::B0,
-        "should still be literal with 7 values"
-    );
-
-    // 8th non-zero value fills the pool and triggers promotion.
-    h.update(128.0).unwrap();
-    assert!(h.width() != Width::B0, "should promote when pool fills");
-    assert_eq!(h.view().count(), 8);
-}
-
-#[test]
-fn test_literal_mode_opt_out() {
-    let mut h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
-    assert!(h.width() != Width::B0);
-    h.update(1.0).unwrap();
-    assert!(h.width() != Width::B0);
-}
-
-#[test]
-fn test_literal_mode_recreate_resets() {
-    let mut h: Histogram<8> = Histogram::new();
-    // Fill beyond literal capacity (8 slots) to trigger promotion.
-    for i in 0..9 {
-        h.update(2.0_f64.powi(i)).unwrap();
-    }
-    assert!(h.width() != Width::B0);
-    // Re-creating the histogram resets to literal mode.
-    h = Histogram::new();
-    assert!(h.width() == Width::B0);
-    assert_eq!(h.view().count(), 0);
-}
-
-#[test]
-fn test_literal_mode_zero_values() {
-    // Zero values don't consume literal slots.
-    let mut h: Histogram<8> = Histogram::new();
-    h.update(0.0).unwrap();
-    h.update(0.0).unwrap();
-    h.update(0.0).unwrap();
-    assert!(h.width() == Width::B0);
-    let v = h.view();
-    assert_eq!(v.count(), 3);
-    assert_eq!(v.sum(), 0.0);
-    // Bucket view should be empty (zeros are tracked in MMSC only).
-    assert!(v.positive().is_empty());
-}
-
-#[test]
-fn test_literal_mode_identical_values() {
-    let mut h: Histogram<8> = Histogram::new();
-    for _ in 0..6 {
-        h.update(42.0).unwrap();
-    }
-    assert!(h.width() == Width::B0);
-    let v = h.view();
-    let buckets = v.positive();
-    assert_eq!(v.count(), 6);
-    assert_eq!(v.sum(), 252.0);
-    assert_eq!(v.min(), 42.0);
-    assert_eq!(v.max(), 42.0);
-    // All map to the same bucket → len should be 1.
-    assert_eq!(buckets.len(), 1);
-    assert_eq!(buckets.at(0), 6);
-}
-
-#[test]
-fn test_literal_mode_bucket_view() {
-    // Compare literal-mode virtual view to bucket-mode actual view.
-    assert_literal_matches_bucket(&[1.0, 2.0, 4.0]);
-}
-
-#[test]
-fn test_literal_promotion_optimal_scale() {
-    // Verify that promotion picks the optimal scale (matching what
-    // bucket mode would choose given the same values).
-    let values = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
-    assert_literal_matches_bucket(&values);
-}
-
-#[test]
-fn test_literal_record() {
-    let mut h: Histogram<8> = Histogram::new();
-    // incr > 1 promotes from literal to bucket mode.
-    h.record_incr(5.0, 3).unwrap();
-    assert!(h.width() != Width::B0);
-    assert_eq!(h.view().count(), 3);
-    assert_eq!(h.view().sum(), 15.0);
-}
-
-#[test]
-fn test_literal_record_overflow() {
-    // Histogram<8>: 8 literal slots. incr=9 should promote.
-    let mut h: Histogram<8> = Histogram::new();
-    h.record_incr(3.25, 9).unwrap();
-    assert!(h.width() != Width::B0);
-    assert_eq!(h.view().count(), 9);
-}
-
-#[test]
-fn test_literal_merge_literal_into_literal() {
-    let mut a = build_from_values::<8>(&[1.0, 2.0]);
-    let b = build_from_values::<8>(&[4.0, 8.0]);
-    a.merge_from(&b).unwrap();
-    assert_stats(&mut a, 4, 15.0, 1.0, 8.0);
-}
-
-#[test]
-fn test_literal_merge_literal_into_bucket() {
-    let mut collector = build_bucket::<16>(&[1.0, 2.0]);
-    let source = build_from_values::<16>(&[4.0, 8.0]);
-    assert!(source.width() == Width::B0);
-    collector.merge_from(&source).unwrap();
-    assert_stats(&mut collector, 4, 15.0, 1.0, 8.0);
-}
-
-#[test]
-fn test_literal_merge_bucket_into_literal() {
-    let mut collector = build_from_values::<16>(&[1.0]);
-    assert!(collector.width() == Width::B0);
-    let source = build_bucket::<16>(&[4.0, 8.0]);
-    collector.merge_from(&source).unwrap();
-    assert!(collector.width() != Width::B0);
-    assert_stats(&mut collector, 3, 13.0, 1.0, 8.0);
-}
-
-#[test]
-fn test_literal_merge_preserves_source() {
-    let mut collector = build_bucket::<16>(&[1.0]);
-    let mut source = build_from_values::<16>(&[4.0]);
-    assert!(source.width() == Width::B0);
-    collector.merge_from(&source).unwrap();
-    assert!(source.width() == Width::B0);
-    assert_stats(&mut source, 1, 4.0, 4.0, 4.0);
-}
-
-#[test]
-fn test_literal_merge_cross_size() {
-    let mut collector = build_bucket::<16>(&[1.0]);
-    let source = build_from_values::<8>(&[4.0, 8.0]);
-    assert!(source.width() == Width::B0);
-    collector.merge_from(&source).unwrap();
-    assert_stats(&mut collector, 3, 13.0, 1.0, 8.0);
-}
-
-#[test]
-fn test_merge_literal_source_not_promoted() {
-    // Verify that merging a literal source into a bucket destination
-    // inserts literal values one by one without promoting the source.
-    // The source must remain in literal mode after merge.
-
-    // Same-size merge: literal source into bucket dest.
-    let mut dest = build_bucket::<16>(&[1.0, 2.0, 3.0]);
-    let source = build_from_values::<16>(&[10.0, 20.0, 30.0]);
-    assert!(source.width() == Width::B0);
-    dest.merge_from(&source).unwrap();
-    assert!(
-        source.width() == Width::B0,
-        "same-size merge must not promote source"
-    );
-    assert_eq!(dest.view().count(), 6);
-
-    // Cross-size merge: small literal source into large bucket dest.
-    let mut big = build_bucket::<16>(&[1.0, 2.0, 3.0]);
-    let small = build_from_values::<8>(&[100.0, 200.0]);
-    assert!(small.width() == Width::B0);
-    big.merge_from(&small).unwrap();
-    assert!(
-        small.width() == Width::B0,
-        "cross-size merge must not promote source"
-    );
-    assert_eq!(big.view().count(), 5);
-
-    // Wide-range literal values: ensure even with values spanning
-    // many scales, the source stays literal and dest absorbs them
-    // correctly through incremental insertion.
-    let mut dest2 = build_bucket::<16>(&[1.0]);
-    let source2 = build_from_values::<16>(&[1e-200, 1e200]);
-    assert!(source2.width() == Width::B0);
-    dest2.merge_from(&source2).unwrap();
-    assert!(
-        source2.width() == Width::B0,
-        "wide-range merge must not promote source"
-    );
-    assert_eq!(dest2.view().count(), 3);
-    assert_eq!(
-        bucket_total(&mut dest2),
-        3,
-        "all three non-zero values should be in buckets"
-    );
-}
-
-#[test]
-fn test_literal_equivalence_with_bucket_mode() {
-    // Verify that a promoted literal histogram and a bucket-mode
-    // histogram produce the same bucket totals for the same inputs.
-    let values = [1.5, 2.7, 0.3, 100.0, 42.0, 7.7, 13.0, 55.5, 999.0];
-    assert_literal_matches_bucket(&values);
-}
-
-#[test]
-fn test_literal_subnormal_values() {
-    let subnormal = 5.0e-324_f64; // smallest subnormal
-    let mut h: Histogram<8> = Histogram::new();
-    h.update(subnormal).unwrap();
-    h.update(subnormal).unwrap();
-    assert!(h.width() == Width::B0);
-    assert_eq!(h.view().count(), 2);
-    // With f64 stats, subnormals are preserved exactly.
-    // Check bucket view to verify data integrity.
-    assert_eq!(h.view().positive().at(0), 2);
-}
-
-#[test]
-fn test_literal_empty_bucket_view() {
-    let mut h: Histogram<8> = Histogram::new();
-    assert!(h.width() == Width::B0);
-    let v = h.view();
-    let buckets = v.positive();
-    assert!(buckets.is_empty());
-    assert_eq!(buckets.len(), 0);
-}
-
-#[test]
-fn test_literal_scale_matches_bucket() {
-    assert_literal_matches_bucket(&[1.0, 1024.0]);
-}
-
-#[test]
-fn test_literal_debug_format() {
-    let mut h: Histogram<8> = Histogram::new();
-    h.update(1.0).unwrap();
-    let debug = format!("{:?}", h);
-    assert!(debug.contains("pool"), "Debug should show pool index");
-}
-
 #[test]
 fn repro_fuzz_histogram_oracle_offset() {
     // Regression: subnormals must map to the same bucket as MIN_VALUE
@@ -1997,27 +1659,22 @@ fn repro_fuzz_histogram_oracle_offset() {
         );
     }
 
-    // Bucket mode and literal mode must agree.
-    for literal in [true, false] {
-        let mut h =
-            Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
-        h.update(subnormal).unwrap();
-        h.update(normal).unwrap();
+    let mut h = Histogram::<8>::new();
+    h.update(subnormal).unwrap();
+    h.update(normal).unwrap();
 
-        let v = h.view();
-        let mapping = Scale::new(v.scale()).unwrap();
-        let exp_offset = mapping
-            .map_to_index(min_value)
-            .unwrap()
-            .min(mapping.map_to_index(normal).unwrap());
+    let v = h.view();
+    let mapping = Scale::new(v.scale()).unwrap();
+    let exp_offset = mapping
+        .map_to_index(min_value)
+        .min(mapping.map_to_index(normal));
 
-        assert_eq!(
-            v.positive().offset(),
-            exp_offset,
-            "literal={literal}: offset mismatch at scale={}",
-            v.scale()
-        );
-    }
+    assert_eq!(
+        v.positive().offset(),
+        exp_offset,
+        "offset mismatch at scale={}",
+        v.scale()
+    );
 }
 
 #[test]
@@ -2027,35 +1684,31 @@ fn repro_fuzz_merge_oracle_offset() {
     let subnormal = 5.580682928875e-312f64;
     let incrs: &[u64] = &[4194304, 16777216, 268435456, 4294967296];
 
-    for literal in [true, false] {
-        let mut right =
-            Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
-        for &incr in incrs {
-            right.record_incr(subnormal, incr).unwrap();
-        }
-
-        let mut left =
-            Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
-        left.merge_from(&right).unwrap();
-
-        let v = left.view();
-        let buckets = v.positive();
-        let mapping = Scale::new(v.scale()).unwrap();
-        let exp_idx = mapping.map_to_index(crate::float64::MIN_VALUE).unwrap();
-
-        assert_eq!(
-            buckets.offset(),
-            exp_idx,
-            "literal={literal}: offset mismatch at scale={}",
-            v.scale()
-        );
-        let bt: u64 = buckets.iter().sum();
-        assert!(
-            bt <= v.count(),
-            "literal={literal}: bucket total ({bt}) > count ({})",
-            v.count()
-        );
+    let mut right = Histogram::<8>::new();
+    for &incr in incrs {
+        right.record_incr(subnormal, incr).unwrap();
     }
+
+    let mut left = Histogram::<8>::new();
+    left.merge_from(&right).unwrap();
+
+    let v = left.view();
+    let buckets = v.positive();
+    let mapping = Scale::new(v.scale()).unwrap();
+    let exp_idx = mapping.map_to_index(crate::float64::MIN_VALUE);
+
+    assert_eq!(
+        buckets.offset(),
+        exp_idx,
+        "offset mismatch at scale={}",
+        v.scale()
+    );
+    let bt: u64 = buckets.iter().sum();
+    assert!(
+        bt <= v.count(),
+        "bucket total ({bt}) > count ({})",
+        v.count()
+    );
 }
 
 #[test]

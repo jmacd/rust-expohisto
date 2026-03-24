@@ -4,21 +4,14 @@
 //! Allocation-free exponential histogram with a unified flat memory layout.
 //!
 //! `Histogram<N>` stores everything in fixed struct fields plus a `[u64; N]`
-//! data pool used for bucket counters (or raw literal values before
-//! promotion).
-//!
-//! Bucket counters start at 1-bit and widen through the chain
-//! 1→2→4→8→16→32→64 bits.  Both downscale and counter-overflow use SWAR
-//! (SIMD-within-a-register) pairwise-merge steps at sub-U64 widths, then
-//! scatter-write at U64.  Each merge step is self-contained: any value
-//! displaced by an odd-base alignment shift is fixed up immediately.
+//! data pool used for bucket counters.
 
 use core::fmt;
 
+use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
 use crate::mapping::{max_scale, Scale, ScaleError};
 
 mod bucket_ops;
-mod literal;
 mod merge;
 mod swar;
 pub mod width;
@@ -35,10 +28,6 @@ mod view;
 pub use view::HistogramView;
 
 pub use width::Width;
-
-// ---------------------------------------------------------------------------
-// Settings — compact (scale, width) pair
-// ---------------------------------------------------------------------------
 
 /// Compact histogram configuration: scale + counter width in 2 bytes.
 ///
@@ -72,10 +61,6 @@ impl Settings {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
 /// Error returned when the total count would exceed `u64::MAX`.
 ///
 /// The total count is checked before any bucket mutation.  Because the
@@ -88,14 +73,14 @@ pub enum Error {
     /// Overflow of a u64 counter.
     Overflow,
     /// Extreme values like Inf, NaN, and zero values.
-    Extreme(f64),
+    Extreme,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Overflow => "histogram total count overflow",
-            Self::Extreme(_) => "extreme value received",
+            Self::Extreme => "extreme value received",
         })
     }
 }
@@ -216,10 +201,9 @@ const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 
 /// An allocation-free exponential histogram for non-negative values.
 ///
-/// `N` is the number of `u64` words in the data pool. The entire pool is
-/// used for bucket counter data (or literal values before promotion).
-/// Aggregate statistics (count, sum, min, max) are stored in separate
-/// struct fields.
+/// `N` is the number of `u64` words in the data pool. The entire pool
+/// is used for bucket counter data.  Aggregate statistics (count,
+/// sum, min, max) are stored in separate struct fields.
 ///
 /// # Positive Buckets Only
 ///
@@ -228,20 +212,6 @@ const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
 /// data model defines both positive and negative bucket arrays; this
 /// crate implements the positive side only, which is sufficient for
 /// latency, size, and other non-negative metrics.
-///
-/// # Literal Mode (`B0`)
-///
-/// New histograms start in **literal mode** (`width == B0`),
-/// where the data pool stores raw `f64` bit patterns instead of bucket
-/// counters. This holds up to `N` values (e.g. 8 for `Histogram<8>`).
-/// When the next non-zero observation would exceed capacity, the
-/// histogram **promotes** to bucket mode: all stored literals are
-/// replayed through `update_buckets` at the configured max scale.
-/// Literal mode can be disabled via `with_min_width(Width::B1)`.
-///
-/// Read operations are accessed through [`view()`](Self::view),
-/// which promotes from literal mode if needed and returns a
-/// [`HistogramView`] with `&self` accessors.
 ///
 /// # Counter Widening
 ///
@@ -264,7 +234,7 @@ pub struct Histogram<const N: usize> {
     // -- Aggregate statistics (min/max/sum/count) --
     stats: Stats,
 
-    // -- Data pool: bucket counters or literal values --
+    // -- Data pool: bucket counters --
     data: [u64; N],
 }
 
@@ -289,13 +259,9 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
             .field("count", &self.count())
             .field("sum", &self.sum())
             .field("min", &self.min())
-            .field("max", &self.max());
-        if self.current.width.is_literal() {
-            s.field("pool", &(self.stats.count as usize % N));
-        } else {
-            s.field("scale", &self.current.scale.scale());
-            s.field("bucket_len", &self.range_len());
-        }
+            .field("max", &self.max())
+            .field("scale", &self.current.scale.scale())
+            .field("bucket_len", &self.range_len());
         s.finish()
     }
 }
@@ -404,31 +370,14 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Returns the number of counter slots available at the current width.
-    ///
-    /// In literal mode (`B0`), returns 0 (no counter slots).
     #[inline]
     pub const fn bucket_count(&self) -> usize {
-        if self.current.width.is_literal() {
-            0
-        } else {
-            self.current.width.capacity(N)
-        }
-    }
-
-    /// Eagerly promotes from literal mode to bucket mode.
-    #[inline]
-    fn ensure_promoted(&mut self) {
-        if self.current.width.is_literal() {
-            self.promote();
-        }
+        self.current.width.capacity(N)
     }
 
     /// Returns true if no non-zero values have been recorded.
     #[inline]
     pub fn buckets_empty(&self) -> bool {
-        if self.current.width.is_literal() {
-            return self.stats.sum == 0.0;
-        }
         self.range_is_empty()
     }
 
@@ -544,7 +493,7 @@ impl<const N: usize> Histogram<N> {
     // Shared constructor — all public constructors delegate here.
     fn new_at_scale(scale: i32) -> Result<Self, ScaleError> {
         const { assert!(N >= 1, "N must be >= 1 for at least 1 bucket word") };
-        let settings = Settings::new(Scale::new(scale)?, Width::B0);
+        let settings = Settings::new(Scale::new(scale)?, Width::B1);
         Ok(Self {
             initial: settings,
             current: settings,
@@ -583,10 +532,6 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Sets the minimum (initial) bucket counter width.
-    ///
-    /// The default is `B0` (literal mode). Set to `B1` or higher to
-    /// start directly in bucket mode, trading cold-start optimization
-    /// for immediate bucket indexing.
     #[inline]
     #[must_use]
     pub fn with_min_width(mut self, width: Width) -> Self {
@@ -597,35 +542,8 @@ impl<const N: usize> Histogram<N> {
 
     /// Returns a read-only view of the histogram.
     ///
-    /// Takes `&mut self` because it may need to promote from literal
-    /// mode to bucket mode internally.  The returned [`HistogramView`]
-    /// provides access to scale, stats, positive buckets, and quantile
-    /// estimation — all via `&self`.
-    ///
-    /// # Why `&mut self` and not `&self`?
-    ///
-    /// Shared-read access (via `&self`) is intentionally not supported.
-    /// In the OTel aggregation pattern, each collector owns its
-    /// histogram exclusively: record into it, then [`swap`](Self::swap)
-    /// or [`merge_from`](Self::merge_from) to hand off data.  Shared
-    /// access is unnecessary and the internal-mutability machinery
-    /// required to support it (`Cell`/`OnceCell`) would add complexity
-    /// and runtime cost to every read path for no practical benefit.
-    ///
-    /// ```
-    /// use otel_expohisto::Histogram;
-    ///
-    /// let mut h: Histogram<16> = Histogram::new();
-    /// h.update(1.5).unwrap();
-    /// h.update(2.7).unwrap();
-    ///
-    /// let v = h.view();
-    /// assert_eq!(v.count(), 2);
-    /// println!("scale = {}", v.scale());
-    /// ```
     #[inline]
-    pub fn view(&mut self) -> HistogramView<'_, N> {
-        self.ensure_promoted();
+    pub fn view(&self) -> HistogramView<'_, N> {
         HistogramView { hist: self }
     }
 
@@ -633,19 +551,6 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     pub const fn width(&self) -> Width {
         self.current.width
-    }
-
-    /// Resets the bucket-related fields to empty state. Does not
-    /// touch stats or scale. Sets width B1.
-    fn switch_to_b1(&mut self) {
-        // TODO: replace the fill with@@@
-        // self.data[0] = 0;
-        self.data.fill(0);
-
-        self.current.width = Width::B1;
-        self.index_start = 0;
-        self.index_end = 0;
-        self.index_base = 0;
     }
 
     /// Swaps contents with another histogram.
@@ -706,94 +611,60 @@ impl<const N: usize> Histogram<N> {
     /// but in practice histograms should be flushed and reset long
     /// before `u64` exhaustion.
     pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Error> {
-        debug_assert!(!value.is_nan(), "NaN is not a valid histogram value");
-        debug_assert!(value >= 0.0, "negative values are not supported");
+        // Extract the raw exponent.
+        let mut biased_exp = get_biased_exponent(value);
+        let mut significand = get_significand(value);
 
-        let new_count = self.checked_add_count(incr).ok_or(Error::Overflow)?;
-        let non_zero = value != 0.0;
-        let literal = self.current.width.is_literal();
+        let new_count = self.checked_add_count(1).ok_or(Error::Overflow)?;
 
-        match (non_zero, literal) {
-            (true, false) => {
-                // Non-zero, not literal.
-                self.stats.min = self.stats.min.min(value);
-                self.stats.max = self.stats.max.max(value);
-                self.update_buckets(value, incr)?;
-            }
-            (true, true) => {
-                // Non-zero, literal encoding.
-                self.stats.min = self.stats.min.min(value);
-                self.stats.max = self.stats.max.max(value);
-                if incr == 1 {
-                    self.update_literal(value);
+        // Handle the extreme cases.
+        match biased_exp {
+            0 => {
+                if significand == 0 {
+                    // Zero case.
+                    self.stats.count = new_count;
+                    return Ok(());
                 } else {
-                    self.promote();
-                    self.update_buckets(value, incr)?;
+                    // Round up to MIN_VALUE.
+                    biased_exp = 1;
+                    significand = 0;
                 }
             }
-            (false, true) => {
-                // Zero, literal. Convert to buckets, where zeros
-                // are not counted.
-                self.promote();
+            NAN_INF_BIASED => {
+                // Inf and NaN cases.
+                return Err(Error::Extreme);
             }
-            (false, false) => {}
+            _ => {
+                // Normal exponents
+            }
         }
-        self.stats.sum += value;
+
+        let base2_exp = unbias_exponent(biased_exp);
+
+        self.stats.min = self.stats.min.min(value);
+        self.stats.max = self.stats.max.max(value);
+        self.update_decomposed(significand, base2_exp, incr)?;
+        self.stats.sum += value * incr as f64;
         self.stats.count = new_count;
         Ok(())
     }
 
     /// Records a single value.
-    ///
-    /// The value must be non-negative and not NaN.  See
-    /// [`record`](Self::record) for why this is not checked at runtime.
-    ///
-    /// Positive infinity (`f64::INFINITY`) is accepted and mapped to
-    /// the same bucket as `f64::MAX`, consistent with the Prometheus
-    /// exponential histogram specification.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error`] if the total count would exceed `u64::MAX`.
-    /// This is the only fallible check — because the total count is
-    /// always ≥ any individual bucket count, a bucket counter at `u64`
-    /// width cannot overflow when the total count fits. In practice,
-    /// callers should flush and reset histograms periodically long
-    /// before `u64` exhaustion.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Error> {
-        debug_assert!(!value.is_nan(), "NaN is not a valid histogram value");
-        debug_assert!(value >= 0.0, "negative values are not supported");
-
-        let new_count = self.checked_add_count(1).ok_or(Error::Overflow)?;
-        let non_zero = value != 0.0;
-        let literal = self.current.width.is_literal();
-
-        match (non_zero, literal) {
-            (true, false) => {
-                self.stats.min = self.stats.min.min(value);
-                self.stats.max = self.stats.max.max(value);
-                self.update_buckets(value, 1)?;
-            }
-            (true, true) => {
-                self.stats.min = self.stats.min.min(value);
-                self.stats.max = self.stats.max.max(value);
-                self.update_literal(value);
-            }
-            (false, true) => {
-                self.update_literal(value);
-            }
-            (false, false) => {}
-        }
-        self.stats.sum += value;
-        self.stats.count = new_count;
-        Ok(())
+        self.record_incr(value, 1)
     }
 
-    /// Updates buckets for a positive value.
-    fn update_buckets(&mut self, value: f64, incr: u64) -> Result<(), Error> {
-        debug_assert!(value > 0.0);
-        self.retry_increment(incr, |h| h.current.scale.map_to_index(value))
+    /// Updates buckets for a decomposed value.
+    fn update_decomposed(
+        &mut self,
+        significand: u64,
+        base2_exp: i32,
+        incr: u64,
+    ) -> Result<(), Error> {
+        self.retry_increment(incr, |h| {
+            h.current.scale.map_decomposed(significand, base2_exp)
+        })
     }
 
     /// Retries an increment until it succeeds, performing downscale or
@@ -802,13 +673,13 @@ impl<const N: usize> Histogram<N> {
     fn retry_increment(
         &mut self,
         incr: u64,
-        mut index_fn: impl FnMut(&Self) -> Option<i32>,
+        mut index_fn: impl FnMut(&Self) -> i32,
     ) -> Result<(), Error> {
         loop {
             // This ? will catch 0, Inf and NaN cases. Sign is ignored.
             // so if the user manages to pass negatives they are counted
             // as positive.
-            let index = index_fn(self).ok_or(Error::Overflow)?;
+            let index = index_fn(self);
             let result = self.try_increment(index, incr);
             if self.resolve_increment(result)? {
                 return Ok(());
