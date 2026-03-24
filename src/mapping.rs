@@ -85,15 +85,14 @@ impl Scale {
     }
 
     /// Maps a positive f64 value to a bucket index.
-    ///
-    /// Subnormal values (below `0x1p-1022`) are mapped to the same
-    /// bucket as `MIN_VALUE` at every scale.
     #[inline]
     pub fn map_to_index(&self, value: f64) -> i32 {
         let scale = self.scale();
         if scale <= 0 {
             crate::exponent::map_to_index(value, scale)
         } else if value < MIN_VALUE {
+            // Subnormal values (below `0x1p-1022`) are mapped to the
+            // same bucket as `MIN_VALUE` at every scale.
             (MIN_NORMAL_EXPONENT << scale) - 1
         } else {
             self.map_to_index_positive_scale(value)
