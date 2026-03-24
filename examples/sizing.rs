@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run --example sizing`
 
-use otel_expohisto::{Width, Histogram};
+use otel_expohisto::{Histogram, Width};
 
 fn show_capacity<const N: usize>(label: &str) {
     let bucket_words = N;
@@ -83,14 +83,14 @@ fn main() {
         "  scale: {}, width: {:?}, capacity: {}",
         v.scale(),
         bw,
-        v.positive().capacity()
+        v.positive().bucket_capacity()
     );
     let b = v.positive();
     println!(
         "  using {} of {} buckets ({:.0}% utilization)",
         b.len(),
-        b.capacity(),
-        b.len() as f64 / b.capacity() as f64 * 100.0
+        b.bucket_capacity(),
+        b.len() as f64 / b.bucket_capacity() as f64 * 100.0
     );
 
     println!("\n--- Minimum Bucket Width ---\n");
@@ -103,7 +103,7 @@ fn main() {
 
     println!(
         "with_min_width(U8): {} buckets at {:?}",
-        fast.view().positive().capacity(),
+        fast.view().positive().bucket_capacity(),
         fast.view().positive().width()
     );
 
@@ -113,7 +113,7 @@ fn main() {
     }
     println!(
         "default (B1 start):        {} buckets at {:?}",
-        dense.view().positive().capacity(),
+        dense.view().positive().bucket_capacity(),
         dense.view().positive().width()
     );
 }

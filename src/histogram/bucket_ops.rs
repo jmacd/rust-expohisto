@@ -9,8 +9,8 @@
 //! This linear read→fold→write pattern avoids in-place alignment
 //! fixups and is SIMD-friendly.
 
-use super::width::Width;
 use super::Histogram;
+use super::width::Width;
 
 /// Captured old-layout state for a downscale operation.
 ///
@@ -71,7 +71,7 @@ impl<const N: usize> Histogram<N> {
     ) -> Result<(), super::Overflow> {
         debug_assert!(change >= 1);
 
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.shift_indices(change);
             return Ok(());
         }
@@ -201,7 +201,7 @@ impl<const N: usize> Histogram<N> {
     pub(super) fn widen_by_one(&mut self) -> Result<(), super::Overflow> {
         let min = self.current.width.wider().ok_or(super::Overflow)?;
 
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.current.width = min;
             self.shift_indices(1);
             return Ok(());

@@ -333,7 +333,7 @@ impl<const N: usize> Histogram<N> {
         self.stats.count.checked_add(incr)
     }
 
-    /// Commits sum, count, min, and max from incoming values.
+    /// Commits sum, count, min, and max from incoming values. Used in merge.
     fn commit_stats(&mut self, sum: f64, count: u64, min: f64, max: f64) {
         self.stats.sum = sum;
         self.stats.min = self.stats.min.min(min);
@@ -346,7 +346,7 @@ impl<const N: usize> Histogram<N> {
     /// Number of logical buckets in the live range, or 0 if empty.
     #[inline]
     const fn range_len(&self) -> u32 {
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             0
         } else {
             (self.index_end - self.index_start + 1) as u32
@@ -401,47 +401,25 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     pub const fn bucket_capacity(&self) -> usize {
         if self.current.width.is_literal() {
-            N
+            0
         } else {
             self.current.width.capacity(N)
         }
     }
 
     /// Eagerly promotes from literal mode to bucket mode.
-    /// No-op if already in bucket mode.
-    ///
-    /// The error from `promote()` is intentionally discarded: literal
-    /// mode stores at most `N` values, each replayed with `incr = 1`.
-    /// Even at the narrowest counter width (B1 = 1-bit), the data pool
-    /// holds `64 * N` counters — far more than `N` — so replay cannot
-    /// overflow.
     #[inline]
     fn ensure_promoted(&mut self) {
         if self.current.width.is_literal() {
-            let _ = self.promote();
+            // Safety: impossible because N is usize fits u64.
+            self.promote().expect("no overflow");
         }
     }
 
     /// Returns true if no buckets have been used.
-    ///
-    /// In literal mode, returns true when sum is zero (no positive
-    /// values recorded; zeros don't create buckets).
     #[inline]
-    pub fn buckets_empty(&self) -> bool {
-        if self.current.width.is_literal() {
-            return self.stats.sum == 0.0;
-        }
-        self.range_is_empty()
-    }
-
-    /// Checks if the bucket range represents no data.
-    #[inline]
-    const fn range_is_empty(&self) -> bool {
-        if self.index_end != self.index_start {
-            return false;
-        }
-        let slot = self.slot_for(self.index_start);
-        self.bucket_get(slot) == 0
+    pub const fn buckets_empty(&self) -> bool {
+        return self.stats.sum == 0.0;
     }
 
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
@@ -791,7 +769,7 @@ impl<const N: usize> Histogram<N> {
     /// Widens bucket counters by one step, adjusting the scale
     /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Overflow> {
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.current.width = self.current.width.wider().ok_or(Overflow)?;
             self.shift_indices(1);
             return self.decrease_scale(1);
@@ -815,7 +793,7 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.shift_indices(change);
             return self.decrease_scale(change);
         }

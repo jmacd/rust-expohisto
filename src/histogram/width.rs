@@ -43,15 +43,14 @@ pub(crate) const ALL_WIDTHS: [Width; 7] = [
 ];
 
 impl Width {
-    /// Returns true if this is `B0` (literal mode).
+    /// Returns true if this is `B0`.
     #[inline]
     pub const fn is_literal(self) -> bool {
+        // This is const.
         self as u8 == 0
     }
 
     /// Returns the bit width of one counter.
-    ///
-    /// Panics on `B0` in debug mode (literal mode has no counter width).
     #[inline]
     pub(crate) const fn bits(self) -> usize {
         debug_assert!(!self.is_literal(), "B0 has no counter width");
@@ -92,11 +91,7 @@ impl Width {
             return Some(Width::B1);
         }
         let l = self.level();
-        if l < 6 {
-            Some(ALL_WIDTHS[l + 1])
-        } else {
-            None
-        }
+        if l < 6 { Some(ALL_WIDTHS[l + 1]) } else { None }
     }
 
     /// Returns the maximum value storable in one counter at this width.
@@ -116,7 +111,7 @@ impl Width {
         // Round up to the next valid width (power-of-two bit count).
         let raw_bits = 64 - value.leading_zeros(); // u32, 1..=64
         let width_bits = raw_bits.next_power_of_two(); // 1,2,4,8,16,32,64
-                                                       // width_bits is already a valid Width discriminant.
+        // width_bits is already a valid Width discriminant.
         Some(ALL_WIDTHS[width_bits.trailing_zeros() as usize])
     }
 }

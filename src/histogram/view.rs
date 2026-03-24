@@ -6,10 +6,10 @@
 #[cfg(feature = "boundary")]
 use crate::mapping::Scale;
 
+use super::Histogram;
 use super::bucket_view::BucketView;
 #[cfg(feature = "boundary")]
 use super::quantile::QuantileIter;
-use super::Histogram;
 
 /// Read-only view of a histogram's data.
 ///
@@ -48,6 +48,7 @@ impl<const N: usize> HistogramView<'_, N> {
     }
 
     /// Returns the count of all recorded values.
+    /// This includes zeros.
     #[inline]
     pub const fn count(&self) -> u64 {
         self.hist.stats.count

@@ -3,8 +3,8 @@
 
 //! Read-only view of bucket data in a histogram.
 
-use super::width::Width;
 use super::Histogram;
+use super::width::Width;
 
 /// Read-only view of bucket data in a histogram.
 ///
@@ -43,7 +43,7 @@ impl<const N: usize> BucketView<'_, N> {
 
     /// Number of logical buckets available at the current width.
     #[inline]
-    pub fn capacity(&self) -> usize {
+    pub fn bucket_capacity(&self) -> usize {
         self.hist.bucket_capacity()
     }
 
