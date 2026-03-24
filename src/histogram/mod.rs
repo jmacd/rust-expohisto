@@ -8,8 +8,8 @@
 
 use core::fmt;
 
-use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
-use crate::mapping::{max_scale, Scale, ScaleError};
+use crate::float64::{NAN_INF_BIASED, get_biased_exponent, get_significand, unbias_exponent};
+use crate::mapping::{Scale, ScaleError, max_scale};
 
 mod bucket_ops;
 mod merge;
@@ -580,9 +580,7 @@ impl<const N: usize> Histogram<N> {
         self.index_start = 0;
         self.index_end = 0;
         self.stats = Stats::EMPTY;
-
-        // TODO: @@@ Fill not required
-        self.data.fill(0);
+        self.data.fill(0); // TODO: is this required?
     }
 
     /// Records a value with a specified increment.
