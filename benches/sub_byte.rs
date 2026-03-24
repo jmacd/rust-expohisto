@@ -16,7 +16,7 @@
 //!    including the benefit of starting wider (skip sub-byte entirely).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{Width, Histogram};
+use otel_expohisto::{Histogram, Width};
 
 mod common;
 

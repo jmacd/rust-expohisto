@@ -26,7 +26,7 @@
 //!    literal-start vs bucket-start.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{Width, Histogram};
+use otel_expohisto::{Histogram, Width};
 
 mod common;
 

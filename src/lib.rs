@@ -5,7 +5,6 @@
 #![doc = include_str!("../README.md")]
 
 pub(crate) mod exponent;
-pub(crate) mod float64;
 pub mod histogram;
 pub mod mapping;
 
@@ -23,9 +22,12 @@ pub mod logarithm;
 pub mod lookup;
 
 pub use histogram::{
-    BucketDescriptor, BucketView, Width, BucketsIter, Histogram, HistogramView, Overflow,
-    Settings, Stats,
+    BucketDescriptor, BucketView, BucketsIter, Error, Histogram, HistogramView, Settings, Stats,
+    Width,
 };
 #[cfg(feature = "quantile")]
 pub use histogram::{QuantileIter, QuantileValue};
 pub use mapping::{max_scale, Scale, ScaleError, MAX_SCALE, MIN_SCALE};
+
+// Note: public because mapping-gen uses it from another crate
+pub mod float64;

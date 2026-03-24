@@ -8,10 +8,7 @@
 //! scale > 0, it uses the compile-time generated lookup table algorithm.
 //! Scales above the compiled table scale are rejected by [`Scale::new`].
 
-use crate::float64::{
-    MIN_NORMAL_EXPONENT, MIN_VALUE, NAN_INF_BIASED, get_biased_exponent, get_significand,
-    unbias_exponent,
-};
+use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
 use core::fmt;
 
 /// Minimum scale for the exponent mapping.
@@ -112,21 +109,28 @@ impl Scale {
                 // Inf and NaN cases.
                 return None;
             }
+            _ => {
+                // Normal exponents
+            }
         }
 
         let base2_exp = unbias_exponent(biased_exp);
 
-        if scale <= 0 {
-            Some(crate::exponent::map_to_index(significand, base2_exp, scale))
+        Some(if scale <= 0 {
+            crate::exponent::map_decomposed(significand, base2_exp, scale)
         } else {
-            Some(crate::lookup::map_to_index(value, scale))
-        }
+            crate::lookup::map_decomposed(significand, base2_exp, scale)
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_map(scale: Scale, value: f64) -> i32 {
+        scale.map_to_index(value).expect("test inputs are valid")
+    }
 
     #[test]
     fn test_new_mapping() {
@@ -159,15 +163,15 @@ mod tests {
 
         // At scale -10, shift = 10, so indices are exponent >> 10
         // Values in (0, 1] map to bucket -1
-        assert_eq!(m.map_to_index(0.001), -1);
-        assert_eq!(m.map_to_index(0.5), -1);
-        assert_eq!(m.map_to_index(1.0), -1);
+        assert_eq!(test_map(m, 0.001), -1);
+        assert_eq!(test_map(m, 0.5), -1);
+        assert_eq!(test_map(m, 1.0), -1);
 
         // Values in (1, MAX) map to bucket 0
-        assert_eq!(m.map_to_index(1.0001), 0);
-        assert_eq!(m.map_to_index(2.0), 0);
-        assert_eq!(m.map_to_index(1e100), 0);
-        assert_eq!(m.map_to_index(1e308), 0);
+        assert_eq!(test_map(m, 1.0001), 0);
+        assert_eq!(test_map(m, 2.0), 0);
+        assert_eq!(test_map(m, 1e100), 0);
+        assert_eq!(test_map(m, 1e308), 0);
     }
 
     #[test]
@@ -175,18 +179,18 @@ mod tests {
         let m = Scale::new(0).unwrap();
         assert_eq!(m.scale(), 0, "scale should be 0");
 
-        let idx_1 = m.map_to_index(1.0);
+        let idx_1 = test_map(m, 1.0);
 
         // Powers of 2 map to exponent - 1
         assert_eq!(idx_1, -1, "1.0 should map to -1"); // 2^0 -> -1
-        assert_eq!(m.map_to_index(2.0), 0, "2.0 should map to 0"); // 2^1 -> 0
-        assert_eq!(m.map_to_index(4.0), 1, "4.0 should map to 1"); // 2^2 -> 1
-        assert_eq!(m.map_to_index(0.5), -2, "0.5 should map to -2"); // 2^-1 -> -2
+        assert_eq!(test_map(m, 2.0), 0, "2.0 should map to 0"); // 2^1 -> 0
+        assert_eq!(test_map(m, 4.0), 1, "4.0 should map to 1"); // 2^2 -> 1
+        assert_eq!(test_map(m, 0.5), -2, "0.5 should map to -2"); // 2^-1 -> -2
 
         // Non-powers of 2 map to floor(log2(value))
-        assert_eq!(m.map_to_index(1.5), 0, "1.5 should map to 0"); // 1.5 in (1, 2] -> 0
-        assert_eq!(m.map_to_index(3.0), 1, "3.0 should map to 1"); // 3.0 in (2, 4] -> 1
-        assert_eq!(m.map_to_index(0.75), -1, "0.75 should map to -1"); // 0.75 in (0.5, 1] -> -1
+        assert_eq!(test_map(m, 1.5), 0, "1.5 should map to 0"); // 1.5 in (1, 2] -> 0
+        assert_eq!(test_map(m, 3.0), 1, "3.0 should map to 1"); // 3.0 in (2, 4] -> 1
+        assert_eq!(test_map(m, 0.75), -1, "0.75 should map to -1"); // 0.75 in (0.5, 1] -> -1
     }
 
     #[test]
@@ -194,9 +198,9 @@ mod tests {
         let m = Scale::new(1).unwrap();
 
         // At scale 1, each power-of-2 bucket is split in two
-        assert_eq!(m.map_to_index(1.0), -1);
-        assert_eq!(m.map_to_index(2.0), 1);
-        assert_eq!(m.map_to_index(4.0), 3);
+        assert_eq!(test_map(m, 1.0), -1);
+        assert_eq!(test_map(m, 2.0), 1);
+        assert_eq!(test_map(m, 4.0), 3);
     }
 
     #[test]
@@ -207,7 +211,7 @@ mod tests {
             for exp in -10..=10 {
                 let value = 2.0_f64.powi(exp);
                 let expected = (exp << scale) - 1;
-                let actual = m.map_to_index(value);
+                let actual = test_map(m, value);
                 assert_eq!(
                     actual, expected,
                     "power of two mismatch at scale={}, exp={}: got {}, expected {}",

@@ -3,7 +3,7 @@
 
 //! Merge logic for combining histograms.
 
-use super::{BucketDescriptor, HighLow, Histogram, Overflow, Stats, scale_reduction};
+use super::{scale_reduction, BucketDescriptor, Error, HighLow, Histogram, Stats};
 
 impl<const N: usize> Histogram<N> {
     /// Merges another histogram into this one.
@@ -14,9 +14,9 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`Overflow`] if the combined total count would exceed
+    /// Returns [`Error`] if the combined total count would exceed
     /// `u64::MAX`. See [`record()`](Self::record) for details.
-    pub fn merge_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
+    pub fn merge_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
         if other.current.width.is_literal() {
             return self.merge_literal_from(other);
         }
@@ -28,7 +28,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Extracts stats and bucket data from `other` and delegates to
     /// [`merge_from_raw`](Self::merge_from_raw).
-    fn merge_as_raw<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
+    fn merge_as_raw<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
         self.merge_from_raw(
             &Stats {
                 count: other.count(),
@@ -58,14 +58,14 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`Overflow`] if the combined total count would exceed
+    /// Returns [`Error`] if the combined total count would exceed
     /// `u64::MAX`. See [`record()`](Self::record) for details.
     pub fn merge_from_raw(
         &mut self,
         stats: &Stats,
         buckets: &BucketDescriptor,
         at: impl Fn(u32) -> u64,
-    ) -> Result<(), Overflow> {
+    ) -> Result<(), Error> {
         if stats.count == 0 {
             return Ok(());
         }
@@ -77,8 +77,8 @@ impl<const N: usize> Histogram<N> {
         stats: &Stats,
         buckets: &BucketDescriptor,
         at: &impl Fn(u32) -> u64,
-    ) -> Result<(), Overflow> {
-        let new_count = self.checked_add_count(stats.count).ok_or(Overflow)?;
+    ) -> Result<(), Error> {
+        let new_count = self.checked_add_count(stats.count).ok_or(Error::Overflow)?;
         let new_sum = self.sum() + stats.sum;
 
         if buckets.len > 0 {
@@ -110,7 +110,7 @@ impl<const N: usize> Histogram<N> {
                 }
                 self.retry_increment(count, |h| {
                     let shift = buckets.scale - h.current.scale.scale();
-                    (buckets.offset + i as i32) >> shift
+                    Some((buckets.offset + i as i32) >> shift)
                 })?;
             }
         }
@@ -120,7 +120,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Merges literal values from another histogram into this one.
-    fn merge_literal_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Overflow> {
+    fn merge_literal_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
         debug_assert!(other.current.width.is_literal());
         if other.count() == 0 {
             return Ok(());
@@ -128,11 +128,10 @@ impl<const N: usize> Histogram<N> {
         self.merge_literal_values(other)
     }
 
-    fn merge_literal_values<const M: usize>(
-        &mut self,
-        other: &Histogram<M>,
-    ) -> Result<(), Overflow> {
-        let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
+    fn merge_literal_values<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
+        let new_count = self
+            .checked_add_count(other.count())
+            .ok_or(Error::Overflow)?;
         let new_sum = self.sum() + other.sum();
         if self.current.width.is_literal() {
             self.promote();

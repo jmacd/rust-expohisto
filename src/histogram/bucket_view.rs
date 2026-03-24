@@ -3,8 +3,8 @@
 
 //! Read-only view of bucket data in a histogram.
 
-use super::Histogram;
 use super::width::Width;
+use super::Histogram;
 
 /// Read-only view of bucket data in a histogram.
 ///

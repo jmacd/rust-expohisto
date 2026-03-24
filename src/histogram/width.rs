@@ -91,7 +91,11 @@ impl Width {
             return Some(Width::B1);
         }
         let l = self.level();
-        if l < 6 { Some(ALL_WIDTHS[l + 1]) } else { None }
+        if l < 6 {
+            Some(ALL_WIDTHS[l + 1])
+        } else {
+            None
+        }
     }
 
     /// Returns the maximum value storable in one counter at this width.
@@ -111,7 +115,7 @@ impl Width {
         // Round up to the next valid width (power-of-two bit count).
         let raw_bits = 64 - value.leading_zeros(); // u32, 1..=64
         let width_bits = raw_bits.next_power_of_two(); // 1,2,4,8,16,32,64
-        // width_bits is already a valid Width discriminant.
+                                                       // width_bits is already a valid Width discriminant.
         Some(ALL_WIDTHS[width_bits.trailing_zeros() as usize])
     }
 }

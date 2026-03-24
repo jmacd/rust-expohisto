@@ -6,9 +6,7 @@
 //! boundaries. All-zero batches stay in literal mode; the first
 //! batch containing a non-zero value triggers promotion to buckets.
 
-use crate::mapping::Scale;
-
-use super::{Histogram, Overflow};
+use super::Histogram;
 
 impl<const N: usize> Histogram<N> {
     /// Stores a value (including zero) in the literal pool.

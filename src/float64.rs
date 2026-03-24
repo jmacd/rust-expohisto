@@ -19,7 +19,7 @@ pub const SIGNIFICAND_MASK: u64 = (1 << SIGNIFICAND_WIDTH) - 1;
 pub const EXPONENT_BIAS: i32 = f64::MAX_EXP - 1;
 
 /// Exponent value for IEEE 754 NaN and Inf values: 2047.
-pub const NAN_INF_BIASED: i32 = 2 * f64::MAX_EXP - 1;
+pub const NAN_INF_BIASED: u32 = 2 * f64::MAX_EXP as u32 - 1;
 
 /// Mask for the exponent bits: 0x7FF0000000000000.
 pub const EXPONENT_MASK: u64 = ((1u64 << EXPONENT_WIDTH) - 1) << SIGNIFICAND_WIDTH;
@@ -42,17 +42,17 @@ pub const fn get_unbiased_exponent(value: f64) -> i32 {
 
 /// Removes the bias from the f64 exponent value.
 #[inline]
-pub const fn unbias_exponent(biased: i32) -> i32 {
-    biased - EXPONENT_BIAS
+pub const fn unbias_exponent(biased: u32) -> i32 {
+    biased as i32 - EXPONENT_BIAS
 }
 
 /// Extracts the biased base-2 exponent from an f64. Ignores sign bit.
 /// Return value 0 indicates +/-0 or subnormal. Return value 2047 indicates
 /// Inf or NaN.
 #[inline]
-pub const fn get_biased_exponent(value: f64) -> i32 {
+pub const fn get_biased_exponent(value: f64) -> u32 {
     let raw_bits = value.to_bits();
-    let raw_exponent = ((raw_bits & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as i32;
+    let raw_exponent = ((raw_bits & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as u32;
     raw_exponent
 }
 
@@ -106,13 +106,13 @@ mod tests {
 
     #[test]
     fn test_get_normal_base2() {
-        assert_eq!(get_normal_base2(1.0), 0);
-        assert_eq!(get_normal_base2(2.0), 1);
-        assert_eq!(get_normal_base2(4.0), 2);
-        assert_eq!(get_normal_base2(0.5), -1);
-        assert_eq!(get_normal_base2(0.25), -2);
-        assert_eq!(get_normal_base2(1.5), 0);
-        assert_eq!(get_normal_base2(3.0), 1);
+        assert_eq!(get_unbiased_exponent(1.0), 0);
+        assert_eq!(get_unbiased_exponent(2.0), 1);
+        assert_eq!(get_unbiased_exponent(4.0), 2);
+        assert_eq!(get_unbiased_exponent(0.5), -1);
+        assert_eq!(get_unbiased_exponent(0.25), -2);
+        assert_eq!(get_unbiased_exponent(1.5), 0);
+        assert_eq!(get_unbiased_exponent(3.0), 1);
     }
 
     #[test]
@@ -158,7 +158,11 @@ mod tests {
                 0,
                 "pow2({k}) should have zero significand"
             );
-            assert_eq!(get_normal_base2(v), k, "pow2({k}) should have exponent {k}");
+            assert_eq!(
+                get_unbiased_exponent(v),
+                k,
+                "pow2({k}) should have exponent {k}"
+            );
         }
     }
 }

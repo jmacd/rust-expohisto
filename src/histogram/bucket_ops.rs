@@ -9,8 +9,8 @@
 //! This linear read→fold→write pattern avoids in-place alignment
 //! fixups and is SIMD-friendly.
 
-use super::Histogram;
 use super::width::Width;
+use super::Histogram;
 
 /// Captured old-layout state for a downscale operation.
 ///
@@ -30,7 +30,7 @@ struct DownscaleCtx<'a, const N: usize> {
 impl<const N: usize> DownscaleCtx<'_, N> {
     /// Sum of old counters that map to output group `grp`, with
     /// checked addition for u64 overflow.
-    fn group_sum(&self, grp: i32) -> Result<u64, super::Overflow> {
+    fn group_sum(&self, grp: i32) -> Result<u64, super::Error> {
         // Each output group covers 2^change consecutive old indices.
         let group_size = 1i32 << self.change;
         let lo = (grp * group_size).max(self.old_start);
@@ -39,7 +39,7 @@ impl<const N: usize> DownscaleCtx<'_, N> {
         for idx in lo..=hi {
             let slot = Histogram::<N>::old_slot(idx, self.old_base, self.old_width);
             let val = Histogram::<N>::get_in(self.old_data, slot, self.old_width);
-            acc = acc.checked_add(val).ok_or(super::Overflow)?;
+            acc = acc.checked_add(val).ok_or(super::Error::Overflow)?;
         }
         Ok(acc)
     }
@@ -63,12 +63,12 @@ impl<const N: usize> Histogram<N> {
     ///   true max group sum, computes the exact target width, then
     ///   repairs the already-written prefix.
     ///
-    /// Returns `Err(Overflow)` if any group sum exceeds `u64::MAX`.
+    /// Returns `Err(Error)` if any group sum exceeds `u64::MAX`.
     pub(super) fn do_downscale(
         &mut self,
         change: i32,
         min_width: Width,
-    ) -> Result<(), super::Overflow> {
+    ) -> Result<(), super::Error> {
         debug_assert!(change >= 1);
 
         if self.range_is_empty() {
@@ -123,7 +123,7 @@ impl<const N: usize> Histogram<N> {
         &mut self,
         ctx: &DownscaleCtx<'_, N>,
         w: Width,
-    ) -> Result<(), super::Overflow> {
+    ) -> Result<(), super::Error> {
         let base = w.word_start(ctx.new_start);
         let counter_max = w.counter_max();
         self.init_output(w, base, ctx.new_start, ctx.new_end);
@@ -139,7 +139,7 @@ impl<const N: usize> Histogram<N> {
         Ok(())
     }
 
-    /// Overflow recovery: scan remaining groups for the true max,
+    /// Error recovery: scan remaining groups for the true max,
     /// compute exact target width, re-read the prefix from the
     /// speculative output, and write everything at the new width.
     fn downscale_repair(
@@ -148,7 +148,7 @@ impl<const N: usize> Histogram<N> {
         spec_width: Width,
         overflow_group: i32,
         overflow_acc: u64,
-    ) -> Result<(), super::Overflow> {
+    ) -> Result<(), super::Error> {
         let spec_base = spec_width.word_start(ctx.new_start);
 
         // Phase 1: find the true max group sum from overflow onward.
@@ -161,7 +161,7 @@ impl<const N: usize> Histogram<N> {
         // why we're here).  Since counter_max = (1 << bits) - 1 and
         // bits is a power of two, max_acc ≥ 1 << bits, which always
         // maps to a strictly wider Width via from_max_value.
-        let tw = Width::from_max_value(max_acc).ok_or(super::Overflow)?;
+        let tw = Width::from_max_value(max_acc).ok_or(super::Error::Overflow)?;
         debug_assert!(tw > spec_width);
 
         // Phase 3: repair prefix — re-read groups already written
@@ -198,8 +198,8 @@ impl<const N: usize> Histogram<N> {
     ///
     /// Used when a counter overflows: the width must increase by at
     /// least one level.
-    pub(super) fn widen_by_one(&mut self) -> Result<(), super::Overflow> {
-        let min = self.current.width.wider().ok_or(super::Overflow)?;
+    pub(super) fn widen_by_one(&mut self) -> Result<(), super::Error> {
+        let min = self.current.width.wider().ok_or(super::Error::Overflow)?;
 
         if self.range_is_empty() {
             self.current.width = min;

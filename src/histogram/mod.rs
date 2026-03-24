@@ -15,7 +15,7 @@
 
 use core::fmt;
 
-use crate::mapping::{Scale, ScaleError, max_scale};
+use crate::mapping::{max_scale, Scale, ScaleError};
 
 mod bucket_ops;
 mod literal;
@@ -83,17 +83,25 @@ impl Settings {
 /// counter cannot overflow once the total-count check passes.  In
 /// practice, callers should flush and reset histograms periodically
 /// long before `u64` exhaustion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Overflow;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Error {
+    /// Overflow of a u64 counter.
+    Overflow,
+    /// Extreme values like Inf, NaN, and zero values.
+    Extreme(f64),
+}
 
-impl fmt::Display for Overflow {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("histogram total count overflow")
+        f.write_str(match self {
+            Self::Overflow => "histogram total count overflow",
+            Self::Extreme(_) => "extreme value received",
+        })
     }
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for Overflow {}
+impl std::error::Error for Error {}
 
 // ---------------------------------------------------------------------------
 // Aggregate stats and bucket descriptor — used by merge_from_raw
@@ -697,11 +705,11 @@ impl<const N: usize> Histogram<N> {
     /// Callers that need rollback semantics can `clone()` beforehand,
     /// but in practice histograms should be flushed and reset long
     /// before `u64` exhaustion.
-    pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
+    pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Error> {
         debug_assert!(!value.is_nan(), "NaN is not a valid histogram value");
         debug_assert!(value >= 0.0, "negative values are not supported");
 
-        let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
+        let new_count = self.checked_add_count(incr).ok_or(Error::Overflow)?;
         let non_zero = value != 0.0;
         let literal = self.current.width.is_literal();
 
@@ -732,6 +740,7 @@ impl<const N: usize> Histogram<N> {
         }
         self.stats.sum += value;
         self.stats.count = new_count;
+        Ok(())
     }
 
     /// Records a single value.
@@ -745,18 +754,18 @@ impl<const N: usize> Histogram<N> {
     ///
     /// # Errors
     ///
-    /// Returns [`Overflow`] if the total count would exceed `u64::MAX`.
+    /// Returns [`Error`] if the total count would exceed `u64::MAX`.
     /// This is the only fallible check — because the total count is
     /// always ≥ any individual bucket count, a bucket counter at `u64`
     /// width cannot overflow when the total count fits. In practice,
     /// callers should flush and reset histograms periodically long
     /// before `u64` exhaustion.
     #[inline]
-    pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
+    pub fn update(&mut self, value: f64) -> Result<(), Error> {
         debug_assert!(!value.is_nan(), "NaN is not a valid histogram value");
         debug_assert!(value >= 0.0, "negative values are not supported");
 
-        let new_count = self.checked_add_count(1).ok_or(Overflow)?;
+        let new_count = self.checked_add_count(1).ok_or(Error::Overflow)?;
         let non_zero = value != 0.0;
         let literal = self.current.width.is_literal();
 
@@ -782,7 +791,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Updates buckets for a positive value.
-    fn update_buckets(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
+    fn update_buckets(&mut self, value: f64, incr: u64) -> Result<(), Error> {
         debug_assert!(value > 0.0);
         self.retry_increment(incr, |h| h.current.scale.map_to_index(value))
     }
@@ -793,10 +802,13 @@ impl<const N: usize> Histogram<N> {
     fn retry_increment(
         &mut self,
         incr: u64,
-        mut index_fn: impl FnMut(&Self) -> i32,
-    ) -> Result<(), Overflow> {
+        mut index_fn: impl FnMut(&Self) -> Option<i32>,
+    ) -> Result<(), Error> {
         loop {
-            let index = index_fn(self);
+            // This ? will catch 0, Inf and NaN cases. Sign is ignored.
+            // so if the user manages to pass negatives they are counted
+            // as positive.
+            let index = index_fn(self).ok_or(Error::Overflow)?;
             let result = self.try_increment(index, incr);
             if self.resolve_increment(result)? {
                 return Ok(());
@@ -805,17 +817,17 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Decreases the scale by `decrease` steps.
-    fn decrease_scale(&mut self, decrease: i32) -> Result<(), Overflow> {
+    fn decrease_scale(&mut self, decrease: i32) -> Result<(), Error> {
         let new_scale = self.current.scale.scale() - decrease;
-        self.current.scale = Scale::new(new_scale).map_err(|_| Overflow)?;
+        self.current.scale = Scale::new(new_scale).map_err(|_| Error::Overflow)?;
         Ok(())
     }
 
     /// Widens bucket counters by one step, adjusting the scale
     /// to account for the implicit 1-step downscale.
-    fn widen_one_step(&mut self) -> Result<(), Overflow> {
+    fn widen_one_step(&mut self) -> Result<(), Error> {
         if self.range_is_empty() {
-            self.current.width = self.current.width.wider().ok_or(Overflow)?;
+            self.current.width = self.current.width.wider().ok_or(Error::Overflow)?;
             self.shift_indices(1);
             return self.decrease_scale(1);
         }
@@ -829,11 +841,11 @@ impl<const N: usize> Histogram<N> {
     /// adjacent counters into a fresh, aligned output buffer.  The
     /// output width is the minimum that holds all group sums.
     #[cfg(any(test, feature = "bench-internals"))]
-    pub fn downscale(&mut self, change: i32) -> Result<(), Overflow> {
+    pub fn downscale(&mut self, change: i32) -> Result<(), Error> {
         self.downscale_by(change)
     }
 
-    fn downscale_by(&mut self, change: i32) -> Result<(), Overflow> {
+    fn downscale_by(&mut self, change: i32) -> Result<(), Error> {
         if change <= 0 {
             return Ok(());
         }
@@ -847,7 +859,7 @@ impl<const N: usize> Histogram<N> {
         self.decrease_scale(change)
     }
 
-    fn downscale_to(&mut self, target_scale: i32) -> Result<(), Overflow> {
+    fn downscale_to(&mut self, target_scale: i32) -> Result<(), Error> {
         let change = self.current.scale.scale() - target_scale;
         if change <= 0 {
             return Ok(());
@@ -858,7 +870,7 @@ impl<const N: usize> Histogram<N> {
     /// Attempts to place `incr` into the bucket at `index`.
     ///
     /// Returns `NeedsDownscale` if the index doesn't fit in the current
-    /// range, or `CounterOverflow` if the counter at `index` can't hold
+    /// range, or `CounterError` if the counter at `index` can't hold
     /// the addition.  The caller retries after adjusting scale or width.
     fn try_increment(&mut self, index: i32, incr: u64) -> IncrResult {
         if incr == 0 {
@@ -915,7 +927,7 @@ impl<const N: usize> Histogram<N> {
     /// Handles the result of `try_increment`, performing downscale
     /// or widen as needed.  Returns `Ok(true)` when the increment
     /// succeeded, `Ok(false)` when the caller should retry.
-    fn resolve_increment(&mut self, result: IncrResult) -> Result<bool, Overflow> {
+    fn resolve_increment(&mut self, result: IncrResult) -> Result<bool, Error> {
         match result {
             IncrResult::Ok => Ok(true),
             IncrResult::CounterOverflow => {

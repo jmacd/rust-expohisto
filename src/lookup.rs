@@ -7,8 +7,6 @@
 //! at the highest compiled-in scale. The algorithm uses 2N linear buckets
 //! per scale with one boundary correction.
 
-use crate::float64::{get_significand, get_unbiased_exponent};
-
 include!(concat!(env!("OUT_DIR"), "/lookup_tables.rs"));
 
 /// Maps a positive f64 value to a bucket index using a compiled lookup table.
@@ -16,12 +14,10 @@ include!(concat!(env!("OUT_DIR"), "/lookup_tables.rs"));
 /// Always computes at `TABLE_SCALE` using the full boundary and index
 /// tables, then shifts down to the requested scale.
 #[inline]
-pub fn map_to_index(value: f64, scale: i32) -> i32 {
+pub(crate) fn map_decomposed(significand: u64, base2_exp: i32, scale: i32) -> i32 {
     debug_assert!(scale > 0);
     debug_assert!(scale <= TABLE_SCALE);
-
-    let significand = get_significand(value);
-    let exponent = get_normal_base2(value);
+    debug_assert_eq!(51, TABLE_SCALE as u32 + INDEX_SHIFT);
 
     let linear_idx = (significand >> INDEX_SHIFT) as usize;
     let approx = INDEX_TABLE[linear_idx] as usize;
@@ -32,7 +28,7 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
         bucket += 1;
     }
 
-    let fine = (exponent << TABLE_SCALE) + bucket - 1;
+    let fine = (base2_exp << TABLE_SCALE) + bucket - 1;
     fine >> (TABLE_SCALE - scale)
 }
 
@@ -45,7 +41,12 @@ pub const fn table_scale() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::float64::{get_significand, get_unbiased_exponent};
+    use super::TABLE_SCALE;
+
+    fn map_to_index(value: f64, scale: i32) -> i32 {
+        super::map_decomposed(get_significand(value), get_unbiased_exponent(value), scale)
+    }
 
     #[test]
     fn test_powers_of_two() {

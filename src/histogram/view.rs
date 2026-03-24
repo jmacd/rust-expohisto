@@ -6,10 +6,10 @@
 #[cfg(feature = "quantile")]
 use crate::mapping::Scale;
 
-use super::Histogram;
 use super::bucket_view::BucketView;
 #[cfg(feature = "quantile")]
 use super::quantile::QuantileIter;
+use super::Histogram;
 
 /// Read-only view of a histogram's data.
 ///

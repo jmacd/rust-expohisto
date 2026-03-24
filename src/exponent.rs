@@ -7,40 +7,26 @@
 //! mapping reduces to extracting the IEEE 754 exponent with a right-shift.
 //! This is the simplest and fastest algorithm, always used for non-positive scales.
 
-use crate::float64::{
-    MIN_NORMAL_EXPONENT, MIN_VALUE, NAN_INF_BIASED, bias_exponent, get_biased_exponent,
-    get_significand,
-};
-
 /// Maps a positive f64 value to a bucket index at a non-positive scale.
 #[inline]
-pub fn map_to_index(significand: u64, base2_exp: i32, scale: i32) -> i32 {
+pub(crate) fn map_decomposed(significand: u64, base2_exp: i32, scale: i32) -> i32 {
     debug_assert!(scale <= 0);
-
-    let shift = (-scale) as u32;
 
     // Upper-inclusive correction: exact powers of two (significand == 0)
     // must map one bucket lower.
     let correction = if significand == 0 { -1 } else { 0 };
 
     // Arithmetic right shift handles negative exponents correctly
-    (base2_exp + correction) >> shift
-}
-
-#[inline]
-pub const fn min_normal_lower_boundary_index(scale: i32) -> i32 {
-    let shift = (-scale) as u32;
-    let mut idx = MIN_NORMAL_EXPONENT >> shift;
-    if shift < 2 {
-        // For scales -1 and 0, 2^-1022 is a power-of-two multiple
-        idx -= 1;
-    }
-    idx
+    (base2_exp + correction) >> -scale
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::float64::{get_significand, get_unbiased_exponent};
+
+    fn map_to_index(value: f64, scale: i32) -> i32 {
+        super::map_decomposed(get_significand(value), get_unbiased_exponent(value), scale)
+    }
 
     #[test]
     fn test_scale_0() {
