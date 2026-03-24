@@ -83,7 +83,7 @@ impl<const N: usize> Histogram<N> {
 
         if buckets.len > 0 {
             if self.current.width.is_literal() {
-                self.promote()?;
+                self.promote();
             }
 
             let other_end = buckets.offset + buckets.len as i32 - 1;
@@ -135,7 +135,7 @@ impl<const N: usize> Histogram<N> {
         let new_count = self.checked_add_count(other.count()).ok_or(Overflow)?;
         let new_sum = self.sum() + other.sum();
         if self.current.width.is_literal() {
-            self.promote()?;
+            self.promote();
         }
         // Compute the number of entries in other's literal pool.
         let r = other.stats.count as usize % M;

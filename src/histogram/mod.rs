@@ -411,7 +411,7 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     fn ensure_promoted(&mut self) {
         if self.current.width.is_literal() {
-            self.promote().expect("literal replay cannot overflow");
+            self.promote();
         }
     }
 
@@ -627,12 +627,14 @@ impl<const N: usize> Histogram<N> {
         self.current.width
     }
 
-    /// Resets the bucket-related fields to empty state. Does not touch
-    /// stats or scale. Sets width to at least B1 (never B0), since
-    /// this prepares for bucket-mode operation. @@@ Should reset original settings.
-    fn reset_bucket_state(&mut self) {
+    /// Resets the bucket-related fields to empty state. Does not
+    /// touch stats or scale. Sets width B1.
+    fn switch_to_b1(&mut self) {
+        // TODO: replace the fill with@@@
+        // self.data[0] = 0;
         self.data.fill(0);
-        self.current.width = self.initial.width.max(Width::B1);
+
+        self.current.width = Width::B1;
         self.index_start = 0;
         self.index_end = 0;
         self.index_base = 0;
@@ -665,29 +667,9 @@ impl<const N: usize> Histogram<N> {
         self.index_start = 0;
         self.index_end = 0;
         self.stats = Stats::EMPTY;
-        self.data.fill(0);
-    }
 
-    /// Records a single value.
-    ///
-    /// The value must be non-negative and not NaN.  See
-    /// [`record`](Self::record) for why this is not checked at runtime.
-    ///
-    /// Positive infinity (`f64::INFINITY`) is accepted and mapped to
-    /// the same bucket as `f64::MAX`, consistent with the Prometheus
-    /// exponential histogram specification.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Overflow`] if the total count would exceed `u64::MAX`.
-    /// This is the only fallible check — because the total count is
-    /// always ≥ any individual bucket count, a bucket counter at `u64`
-    /// width cannot overflow when the total count fits. In practice,
-    /// callers should flush and reset histograms periodically long
-    /// before `u64` exhaustion.
-    #[inline]
-    pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
-        self.record(value, 1)
+        // TODO: @@@ Fill not required
+        self.data.fill(0);
     }
 
     /// Records a value with a specified increment.
@@ -715,41 +697,93 @@ impl<const N: usize> Histogram<N> {
     /// Callers that need rollback semantics can `clone()` beforehand,
     /// but in practice histograms should be flushed and reset long
     /// before `u64` exhaustion.
-    pub fn record(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
+    pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
         debug_assert!(!value.is_nan(), "NaN is not a valid histogram value");
         debug_assert!(value >= 0.0, "negative values are not supported");
 
-        if incr == 0 {
-            return Ok(());
-        }
-
         let new_count = self.checked_add_count(incr).ok_or(Overflow)?;
+        let non_zero = value != 0.0;
+        let literal = self.current.width.is_literal();
 
-        // Update min/max early — promotion reads them.
-        if value != 0.0 {
-            self.stats.min = self.stats.min.min(value);
-            self.stats.max = self.stats.max.max(value);
+        match (non_zero, literal) {
+            (true, false) => {
+                // Non-zero, not literal.
+                self.stats.min = self.stats.min.min(value);
+                self.stats.max = self.stats.max.max(value);
+                self.update_buckets(value, incr)?;
+            }
+            (true, true) => {
+                // Non-zero, literal encoding.
+                self.stats.min = self.stats.min.min(value);
+                self.stats.max = self.stats.max.max(value);
+                if incr == 1 {
+                    self.update_literal(value);
+                } else {
+                    self.promote();
+                    self.update_buckets(value, incr)?;
+                }
+            }
+            (false, true) => {
+                // Zero, literal. Convert to buckets, where zeros
+                // are not counted.
+                self.promote();
+            }
+            (false, false) => {}
         }
+        self.stats.sum += value;
+        self.stats.count = new_count;
+    }
 
-        // Literal mode only stores individual observations.
-        if self.current.width.is_literal() && incr != 1 {
-            self.promote()?;
+    /// Records a single value.
+    ///
+    /// The value must be non-negative and not NaN.  See
+    /// [`record`](Self::record) for why this is not checked at runtime.
+    ///
+    /// Positive infinity (`f64::INFINITY`) is accepted and mapped to
+    /// the same bucket as `f64::MAX`, consistent with the Prometheus
+    /// exponential histogram specification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Overflow`] if the total count would exceed `u64::MAX`.
+    /// This is the only fallible check — because the total count is
+    /// always ≥ any individual bucket count, a bucket counter at `u64`
+    /// width cannot overflow when the total count fits. In practice,
+    /// callers should flush and reset histograms periodically long
+    /// before `u64` exhaustion.
+    #[inline]
+    pub fn update(&mut self, value: f64) -> Result<(), Overflow> {
+        debug_assert!(!value.is_nan(), "NaN is not a valid histogram value");
+        debug_assert!(value >= 0.0, "negative values are not supported");
+
+        let new_count = self.checked_add_count(1).ok_or(Overflow)?;
+        let non_zero = value != 0.0;
+        let literal = self.current.width.is_literal();
+
+        match (non_zero, literal) {
+            (true, false) => {
+                self.stats.min = self.stats.min.min(value);
+                self.stats.max = self.stats.max.max(value);
+                self.update_buckets(value, 1)?;
+            }
+            (true, true) => {
+                self.stats.min = self.stats.min.min(value);
+                self.stats.max = self.stats.max.max(value);
+                self.update_literal(value);
+            }
+            (false, true) => {
+                self.update_literal(value);
+            }
+            (false, false) => {}
         }
-
-        if self.current.width.is_literal() {
-            // Literal pool stores all values including zeros.
-            self.update_literal(value)?;
-        } else if value != 0.0 {
-            self.update_buckets(value, incr)?;
-        }
-
-        self.stats.sum += value * incr as f64;
+        self.stats.sum += value;
         self.stats.count = new_count;
         Ok(())
     }
 
     /// Updates buckets for a positive value.
     fn update_buckets(&mut self, value: f64, incr: u64) -> Result<(), Overflow> {
+        debug_assert!(value > 0.0);
         self.retry_increment(incr, |h| h.current.scale.map_to_index(value))
     }
 

@@ -224,7 +224,7 @@ pub fn compute_boundaries_exact(n: usize, index_bits: u32) -> Vec<u64> {
 /// Computes the exact bucket index for a value at a given scale.
 pub fn map_to_index_exact(value: f64, scale: i32) -> i32 {
     let significand = crate::float64::get_significand(value);
-    let exponent = crate::float64::get_normal_base2(value);
+    let exponent = crate::float64::get_unbiased_exponent(value);
 
     // Power of two: significand is 0, index is (exp << scale) - 1
     // This handles the upper-inclusive case: value 2^exp is in bucket (exp << scale) - 1

@@ -8,7 +8,10 @@
 //! scale > 0, it uses the compile-time generated lookup table algorithm.
 //! Scales above the compiled table scale are rejected by [`Scale::new`].
 
-use crate::float64::{MIN_NORMAL_EXPONENT, MIN_VALUE};
+use crate::float64::{
+    MIN_NORMAL_EXPONENT, MIN_VALUE, NAN_INF_BIASED, get_biased_exponent, get_significand,
+    unbias_exponent,
+};
 use core::fmt;
 
 /// Minimum scale for the exponent mapping.
@@ -84,25 +87,40 @@ impl Scale {
         self.0 as i32
     }
 
-    /// Maps a positive f64 value to a bucket index.
+    /// Maps a f64 value to a bucket index. Ignores sign.
     #[inline]
-    pub fn map_to_index(&self, value: f64) -> i32 {
+    pub fn map_to_index(&self, value: f64) -> Option<i32> {
         let scale = self.scale();
-        if scale <= 0 {
-            crate::exponent::map_to_index(value, scale)
-        } else if value < MIN_VALUE {
-            // Subnormal values (below `0x1p-1022`) are mapped to the
-            // same bucket as `MIN_VALUE` at every scale.
-            (MIN_NORMAL_EXPONENT << scale) - 1
-        } else {
-            self.map_to_index_positive_scale(value)
-        }
-    }
 
-    /// Scale for positive scales — delegates to the compiled lookup table.
-    #[inline]
-    fn map_to_index_positive_scale(&self, value: f64) -> i32 {
-        crate::lookup::map_to_index(value, self.scale())
+        // Extract the raw exponent.
+        let mut biased_exp = get_biased_exponent(value);
+        let mut significand = get_significand(value);
+
+        // Handle the extreme cases.
+        match biased_exp {
+            0 => {
+                if significand == 0 {
+                    // Zero case.
+                    return None;
+                } else {
+                    // Round up to MIN_VALUE.
+                    biased_exp = 1;
+                    significand = 0;
+                }
+            }
+            NAN_INF_BIASED => {
+                // Inf and NaN cases.
+                return None;
+            }
+        }
+
+        let base2_exp = unbias_exponent(biased_exp);
+
+        if scale <= 0 {
+            Some(crate::exponent::map_to_index(significand, base2_exp, scale))
+        } else {
+            Some(crate::lookup::map_to_index(value, scale))
+        }
     }
 }
 

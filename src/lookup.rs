@@ -1,13 +1,13 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::float64::{get_normal_base2, get_significand};
-
 //! Lookup table-based mapping for exponential histograms.
 //!
 //! This module provides compile-time generated boundary and index tables
 //! at the highest compiled-in scale. The algorithm uses 2N linear buckets
 //! per scale with one boundary correction.
+
+use crate::float64::{get_significand, get_unbiased_exponent};
 
 include!(concat!(env!("OUT_DIR"), "/lookup_tables.rs"));
 
@@ -27,6 +27,7 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     let approx = INDEX_TABLE[linear_idx] as usize;
 
     let mut bucket = approx as i32;
+    // A sentinel case at 0 implements upper-inclusivity.
     if significand >= BOUNDARIES[approx + 1] {
         bucket += 1;
     }

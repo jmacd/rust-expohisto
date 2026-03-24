@@ -7,24 +7,24 @@
 //! mapping reduces to extracting the IEEE 754 exponent with a right-shift.
 //! This is the simplest and fastest algorithm, always used for non-positive scales.
 
-use crate::float64::{MIN_NORMAL_EXPONENT, MIN_VALUE, get_normal_base2, get_significand};
+use crate::float64::{
+    MIN_NORMAL_EXPONENT, MIN_VALUE, NAN_INF_BIASED, bias_exponent, get_biased_exponent,
+    get_significand,
+};
 
 /// Maps a positive f64 value to a bucket index at a non-positive scale.
-/// Caller has tested for subnormal values.
 #[inline]
-pub fn map_to_index(value: f64, scale: i32) -> i32 {
+pub fn map_to_index(significand: u64, base2_exp: i32, scale: i32) -> i32 {
     debug_assert!(scale <= 0);
 
     let shift = (-scale) as u32;
 
-    // Extract the raw exponent
-    let raw_exp = get_normal_base2(value);
-
     // Upper-inclusive correction: exact powers of two (significand == 0)
-    let correction = if get_significand(value) == 0 { -1 } else { 0 };
+    // must map one bucket lower.
+    let correction = if significand == 0 { -1 } else { 0 };
 
     // Arithmetic right shift handles negative exponents correctly
-    (raw_exp + correction) >> shift
+    (base2_exp + correction) >> shift
 }
 
 #[inline]

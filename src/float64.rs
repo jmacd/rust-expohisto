@@ -18,6 +18,9 @@ pub const SIGNIFICAND_MASK: u64 = (1 << SIGNIFICAND_WIDTH) - 1;
 /// Exponent bias for IEEE 754 double-precision: 1023.
 pub const EXPONENT_BIAS: i32 = f64::MAX_EXP - 1;
 
+/// Exponent value for IEEE 754 NaN and Inf values: 2047.
+pub const NAN_INF_BIASED: i32 = 2 * f64::MAX_EXP - 1;
+
 /// Mask for the exponent bits: 0x7FF0000000000000.
 pub const EXPONENT_MASK: u64 = ((1u64 << EXPONENT_WIDTH) - 1) << SIGNIFICAND_WIDTH;
 
@@ -31,12 +34,26 @@ pub const MAX_NORMAL_EXPONENT: i32 = EXPONENT_BIAS;
 /// Smallest normal f64 value: 2^-1022 (same as `f64::MIN_POSITIVE`).
 pub const MIN_VALUE: f64 = f64::MIN_POSITIVE;
 
-/// Extracts the normalized base-2 exponent from an f64.
+/// Extracts the unbiased base-2 exponent from an f64.
 #[inline]
-pub const fn get_normal_base2(value: f64) -> i32 {
+pub const fn get_unbiased_exponent(value: f64) -> i32 {
+    unbias_exponent(get_biased_exponent(value))
+}
+
+/// Removes the bias from the f64 exponent value.
+#[inline]
+pub const fn unbias_exponent(biased: i32) -> i32 {
+    biased - EXPONENT_BIAS
+}
+
+/// Extracts the biased base-2 exponent from an f64. Ignores sign bit.
+/// Return value 0 indicates +/-0 or subnormal. Return value 2047 indicates
+/// Inf or NaN.
+#[inline]
+pub const fn get_biased_exponent(value: f64) -> i32 {
     let raw_bits = value.to_bits();
     let raw_exponent = ((raw_bits & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as i32;
-    raw_exponent - EXPONENT_BIAS
+    raw_exponent
 }
 
 /// Returns the 52-bit significand as an unsigned value.
