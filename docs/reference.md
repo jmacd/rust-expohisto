@@ -34,7 +34,7 @@ The crate contains **zero `unsafe` code**. All bit-level manipulation (sub-byte 
 
 ## `no_std` Support
 
-The crate is `#![no_std]` compatible. The `std` feature (enabled by default) only gates `std::error::Error` implementations for `Overflow` and `ScaleError`. All core functionality — recording, merging, downscaling, quantile estimation — works without `std`. Math operations (`ln`, `exp`, `floor`, `powi`) delegate to `libm` when `std` is disabled.
+The crate is `#![no_std]` compatible. The `std` feature (enabled by default) only gates `std::error::Error` implementations for `Overflow` and `ScaleError`. All core functionality — recording, merging, downscaling — works without `std`. Quantile estimation requires the `quantile` feature (which depends on `boundary`). Math operations (`ln`, `exp`, `floor`, `powi`) delegate to `libm` when `std` is disabled.
 
 To use in a `no_std` environment, disable default features and re-enable the ones you need:
 

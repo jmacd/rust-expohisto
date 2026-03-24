@@ -26,6 +26,6 @@ pub use histogram::{
     BucketDescriptor, BucketView, Width, BucketsIter, Histogram, HistogramView, Overflow,
     Settings, Stats,
 };
-#[cfg(feature = "boundary")]
+#[cfg(feature = "quantile")]
 pub use histogram::{QuantileIter, QuantileValue};
 pub use mapping::{max_scale, Scale, ScaleError, MAX_SCALE, MIN_SCALE};

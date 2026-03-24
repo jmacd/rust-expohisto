@@ -44,12 +44,15 @@ scale-20 = []
 # Uses ln() and floor() from std.
 logarithm = ["std"]
 
-# Boundary computation (lower_boundary, quantile estimation).
+# Boundary computation (lower_boundary).
 # Uses exp() from std.
 boundary = ["std"]
 
+# Quantile estimation over histogram buckets.
+quantile = ["boundary"]
+
 # For benchmarking all algorithms together
-bench-all = ["logarithm", "boundary", "scale-8", "bench-internals"]
+bench-all = ["logarithm", "quantile", "scale-8", "bench-internals"]
 
 # Expose internal methods for benchmarking
 bench-internals = []

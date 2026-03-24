@@ -2010,9 +2010,9 @@ fn test_literal_debug_format() {
     assert!(debug.contains("pool"), "Debug should show pool index");
 }
 
-// -- Quantile estimation tests (require `boundary` feature) ----------------
+// -- Quantile estimation tests (require `quantile` feature) ----------------
 
-#[cfg(feature = "boundary")]
+#[cfg(feature = "quantile")]
 mod quantile_tests {
     use super::*;
     use std::eprintln;

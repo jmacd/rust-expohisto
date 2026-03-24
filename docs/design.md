@@ -216,7 +216,7 @@ otel-expohisto/
 │   │   ├── width.rs#  Width enum (B0..U64)
 │   │   ├── bucket_ops.rs #   Sub-byte get/set/increment
 │   │   ├── swar.rs       #   SWAR pairwise merge, shift, narrow-compact
-│   │   ├── quantile.rs   #   QuantileIter: CDF-walk quantile estimation
+│   │   ├── quantile.rs   #   QuantileIter: CDF-walk quantile estimation (feature = "quantile")
 │   │   └── tests.rs      #   106 unit tests
 │   ├── mapping.rs        # Scale-to-index dispatch (Scale struct)
 │   ├── exponent.rs       # Scale ≤ 0: IEEE 754 exponent extraction

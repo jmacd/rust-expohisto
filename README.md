@@ -87,9 +87,10 @@ are rejected by `Scale::new()`. Selected examples:
 |---------|---------|--------|
 | `std` | ✓ | Enables `std::error::Error` impls for `Overflow` and `MappingError`. Disable for `#![no_std]` builds. |
 | `logarithm` | | Pure `ln()`-based mapper for testing and benchmarking. Requires `std`. |
-| `boundary` | | Enables `lower_boundary()` at positive scales and quantile estimation (`QuantileIter`). Requires `std`. |
+| `boundary` | | Enables `lower_boundary()` at positive scales. Requires `std`. |
+| `quantile` | | Quantile estimation (`QuantileIter`). Requires `boundary`. |
 | `bench-internals` | | Exposes internal methods (e.g., `downscale()`) for benchmarking |
-| `bench-all` | | Enables `logarithm` + `boundary` + `scale-8` + `bench-internals` for comprehensive testing |
+| `bench-all` | | Enables `logarithm` + `quantile` + `scale-8` + `bench-internals` for comprehensive testing |
 
 ## Documentation
 

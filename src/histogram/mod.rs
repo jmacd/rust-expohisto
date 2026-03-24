@@ -26,9 +26,9 @@ pub mod width;
 mod bucket_view;
 pub use bucket_view::{BucketView, BucketsIter};
 
-#[cfg(feature = "boundary")]
+#[cfg(feature = "quantile")]
 mod quantile;
-#[cfg(feature = "boundary")]
+#[cfg(feature = "quantile")]
 pub use quantile::{QuantileIter, QuantileValue};
 
 mod view;
