@@ -87,7 +87,7 @@ impl<const N: usize> Histogram<N> {
             }
 
             let other_end = buckets.offset + buckets.len as i32 - 1;
-            let cap = self.bucket_capacity() as i32;
+            let cap = self.bucket_count() as i32;
             let min_scale = self.current.scale.scale().min(buckets.scale);
 
             let self_hl = self.index_range_at_scale(min_scale);
@@ -139,7 +139,11 @@ impl<const N: usize> Histogram<N> {
         }
         // Compute the number of entries in other's literal pool.
         let r = other.stats.count as usize % M;
-        let entries = if r == 0 && other.stats.count > 0 { M } else { r };
+        let entries = if r == 0 && other.stats.count > 0 {
+            M
+        } else {
+            r
+        };
         for &bits in &other.data[..entries] {
             let v = f64::from_bits(bits);
             if v == 0.0 {

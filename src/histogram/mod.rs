@@ -346,7 +346,7 @@ impl<const N: usize> Histogram<N> {
     /// Number of logical buckets in the live range, or 0 if empty.
     #[inline]
     const fn range_len(&self) -> u32 {
-        if self.buckets_empty() {
+        if self.range_is_empty() {
             0
         } else {
             (self.index_end - self.index_start + 1) as u32
@@ -356,7 +356,7 @@ impl<const N: usize> Histogram<N> {
     /// Ring-buffer slot index for a given bucket index.
     #[inline]
     const fn slot_for(&self, index: i32) -> usize {
-        let cap = self.bucket_capacity() as i32;
+        let cap = self.bucket_count() as i32;
         (index - self.index_base).rem_euclid(cap) as usize
     }
 
@@ -374,7 +374,7 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     const fn swar_would_wrap(&self, index: i32) -> bool {
         !matches!(self.current.width, Width::U64)
-            && (index < self.index_base || index >= self.index_base + self.bucket_capacity() as i32)
+            && (index < self.index_base || index >= self.index_base + self.bucket_count() as i32)
     }
 }
 
@@ -397,9 +397,9 @@ impl<const N: usize> Histogram<N> {
 
     /// Returns the number of counter slots available at the current width.
     ///
-    /// In literal mode (`B0`), returns `N` (the number of raw f64 slots).
+    /// In literal mode (`B0`), returns 0 (no counter slots).
     #[inline]
-    pub const fn bucket_capacity(&self) -> usize {
+    pub const fn bucket_count(&self) -> usize {
         if self.current.width.is_literal() {
             0
         } else {
@@ -411,15 +411,32 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     fn ensure_promoted(&mut self) {
         if self.current.width.is_literal() {
-            // Safety: impossible because N is usize fits u64.
-            self.promote().expect("no overflow");
+            self.promote().expect("literal replay cannot overflow");
         }
     }
 
-    /// Returns true if no buckets have been used.
+    /// Returns true if no non-zero values have been recorded.
     #[inline]
-    pub const fn buckets_empty(&self) -> bool {
-        return self.stats.sum == 0.0;
+    pub fn buckets_empty(&self) -> bool {
+        if self.current.width.is_literal() {
+            return self.stats.sum == 0.0;
+        }
+        self.range_is_empty()
+    }
+
+    /// Checks if the bucket index range is empty (bucket-mode only).
+    /// Structural check: are the bucket index pointers empty?
+    ///
+    /// Distinct from `buckets_empty()` because during reconstruction
+    /// (promotion, downscale) the indices are reset while stats.sum
+    /// remains non-zero.
+    #[inline]
+    const fn range_is_empty(&self) -> bool {
+        if self.index_end != self.index_start {
+            return false;
+        }
+        let slot = self.slot_for(self.index_start);
+        self.bucket_get(slot) == 0
     }
 
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
@@ -769,7 +786,7 @@ impl<const N: usize> Histogram<N> {
     /// Widens bucket counters by one step, adjusting the scale
     /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Overflow> {
-        if self.buckets_empty() {
+        if self.range_is_empty() {
             self.current.width = self.current.width.wider().ok_or(Overflow)?;
             self.shift_indices(1);
             return self.decrease_scale(1);
@@ -793,7 +810,7 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        if self.buckets_empty() {
+        if self.range_is_empty() {
             self.shift_indices(change);
             return self.decrease_scale(change);
         }
@@ -820,9 +837,9 @@ impl<const N: usize> Histogram<N> {
             return IncrResult::Ok;
         }
 
-        let cap = self.bucket_capacity() as i32;
+        let cap = self.bucket_count() as i32;
 
-        if self.buckets_empty() {
+        if self.range_is_empty() {
             self.index_start = index;
             self.index_end = index;
             // Align base to a word boundary so that SWAR pairwise ops
@@ -878,7 +895,7 @@ impl<const N: usize> Histogram<N> {
                 Ok(false)
             }
             IncrResult::NeedsDownscale(hl) => {
-                let change = scale_reduction(hl, self.bucket_capacity() as i32);
+                let change = scale_reduction(hl, self.bucket_count() as i32);
                 if change > 0 {
                     self.downscale_by(change)?;
                 } else if self.swar_would_wrap(hl.low) || self.swar_would_wrap(hl.high) {

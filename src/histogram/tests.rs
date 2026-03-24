@@ -90,8 +90,7 @@ fn test_buckets_at() {
 
 #[test]
 fn test_auto_widen_cascade() {
-    let mut h: Histogram<16> = Histogram::new()
-        .with_min_width(Width::B4);
+    let mut h: Histogram<16> = Histogram::new().with_min_width(Width::B4);
 
     // B4 → U8 at threshold 15+1=16
     h.record(1.0, 15).unwrap();
@@ -124,8 +123,7 @@ fn test_auto_widen_cascade() {
 
 #[test]
 fn test_auto_widen_b4_to_u8_from_b4_start() {
-    let mut h: Histogram<16> = Histogram::new()
-        .with_min_width(Width::B4);
+    let mut h: Histogram<16> = Histogram::new().with_min_width(Width::B4);
     h.record(1.0, 4).unwrap();
     assert_eq!(h.width(), Width::B4);
     h.record(1.0, 11).unwrap();
@@ -141,12 +139,12 @@ fn test_bucket_count_halves_on_widen() {
         .with_scale(0)
         .unwrap()
         .with_min_width(Width::B4);
-    let initial_cap = h.bucket_capacity();
+    let initial_cap = h.bucket_count();
     assert_eq!(initial_cap, 16 * 16); // 256
 
     h.record(1.0, 16).unwrap();
     assert_eq!(h.width(), Width::U8);
-    assert_eq!(h.bucket_capacity(), 16 * 8); // 128
+    assert_eq!(h.bucket_count(), 16 * 8); // 128
 }
 
 #[test]
@@ -266,7 +264,10 @@ fn test_merge_equivalence_for_size<const K: usize>(test_sets: &[Vec<f64>]) {
             let mut merged = build_from_values::<K>(set_a);
             let other = build_from_values::<K>(set_b);
             if let Err(e) = merged.merge_from(&other) {
-                panic!("merge_from failed for size={K} sets {i} x {j}: {e}\n  set_a: {set_a:?}\n  set_b: {set_b:?}\n  merged: {:?}\n  other: {:?}", merged, other);
+                panic!(
+                    "merge_from failed for size={K} sets {i} x {j}: {e}\n  set_a: {set_a:?}\n  set_b: {set_b:?}\n  merged: {:?}\n  other: {:?}",
+                    merged, other
+                );
             }
 
             let mut single = build_from_values::<K>(set_a);
@@ -452,11 +453,7 @@ fn test_successive_sub_byte_widening() {
     for count in 2..=15u64 {
         h.update(1.0).unwrap();
         assert_eq!(h.view().count(), count);
-        assert_eq!(
-            h.width(),
-            Width::B4,
-            "expected B4 at count {count}"
-        );
+        assert_eq!(h.width(), Width::B4, "expected B4 at count {count}");
     }
 
     h.update(1.0).unwrap();
@@ -610,16 +607,14 @@ mod flat_layout {
 
     #[test]
     fn test_capacity() {
-        let h: Histogram<16> = Histogram::new()
-            .with_min_width(Width::B1);
-        assert_eq!(h.bucket_capacity(), 1024); // 16 * 64 at B1
+        let h: Histogram<16> = Histogram::new().with_min_width(Width::B1);
+        assert_eq!(h.bucket_count(), 1024); // 16 * 64 at B1
     }
 
     #[test]
     fn test_minimum_n() {
-        let h: Histogram<8> = Histogram::new()
-            .with_min_width(Width::B1);
-        assert_eq!(h.bucket_capacity(), 512); // 8 * 64 at B1
+        let h: Histogram<8> = Histogram::new().with_min_width(Width::B1);
+        assert_eq!(h.bucket_count(), 512); // 8 * 64 at B1
     }
 
     #[test]
@@ -867,11 +862,7 @@ fn test_swar_narrow_compact_two_words() {
         &[pack_u16x4([100, 200, 300, 400])],
     );
     // U32: 2 words of U64 → 1 word of U32
-    assert_compact(
-        Width::U32,
-        &[1000u64, 2000u64],
-        &[pack_u32x2(1000, 2000)],
-    );
+    assert_compact(Width::U32, &[1000u64, 2000u64], &[pack_u32x2(1000, 2000)]);
 }
 
 #[test]
@@ -929,17 +920,9 @@ fn test_swar_narrow_compact_odd_word_counts() {
 fn test_swar_has_overflow() {
     let cases: &[(&[u64], Width, bool)] = &[
         // B4: at-max → no overflow
-        (
-            &[pack_u8x8([15, 0, 8, 3, 1, 14, 7, 0])],
-            Width::B4,
-            false,
-        ),
+        (&[pack_u8x8([15, 0, 8, 3, 1, 14, 7, 0])], Width::B4, false),
         // B4: one slot at 16 → overflow
-        (
-            &[pack_u8x8([15, 0, 16, 0, 0, 0, 0, 0])],
-            Width::B4,
-            true,
-        ),
+        (&[pack_u8x8([15, 0, 16, 0, 0, 0, 0, 0])], Width::B4, true),
         // B4 boundary: all at max
         (
             &[pack_u8x8([15, 15, 15, 15, 15, 15, 15, 15])],
@@ -1066,11 +1049,7 @@ fn test_downscale_width_behavior() {
     };
 
     check(&[(2.0, 5), (4.0, 7)], Width::B4, "small sums stay B4");
-    check(
-        &[(2.0, 10), (4.0, 10)],
-        Width::U8,
-        "overflow widens to U8",
-    );
+    check(&[(2.0, 10), (4.0, 10)], Width::U8, "overflow widens to U8");
     check(
         &[(2.0, 15), (4.0, 15)],
         Width::U8,
@@ -1795,7 +1774,10 @@ fn test_literal_mode_capacity() {
     for i in 0..7 {
         h.update(2.0_f64.powi(i)).unwrap();
     }
-    assert!(h.width() == Width::B0, "should still be literal with 7 values");
+    assert!(
+        h.width() == Width::B0,
+        "should still be literal with 7 values"
+    );
 
     // 8th non-zero value fills the pool and triggers promotion.
     h.update(128.0).unwrap();
@@ -2188,11 +2170,7 @@ mod quantile_tests {
             * (0.254829592
                 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
         let result = 1.0 - poly * (-a * a).exp();
-        if x < 0.0 {
-            -result
-        } else {
-            result
-        }
+        if x < 0.0 { -result } else { result }
     }
 
     /// Computes reduced χ²/df of histogram bucket counts vs a theoretical
@@ -2337,7 +2315,8 @@ fn repro_fuzz_histogram_oracle_offset() {
 
     // Bucket mode and literal mode must agree.
     for literal in [true, false] {
-        let mut h = Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
+        let mut h =
+            Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
         h.update(subnormal).unwrap();
         h.update(normal).unwrap();
 
@@ -2364,12 +2343,14 @@ fn repro_fuzz_merge_oracle_offset() {
     let incrs: &[u64] = &[4194304, 16777216, 268435456, 4294967296];
 
     for literal in [true, false] {
-        let mut right = Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
+        let mut right =
+            Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
         for &incr in incrs {
             right.record(subnormal, incr).unwrap();
         }
 
-        let mut left = Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
+        let mut left =
+            Histogram::<8>::new().with_min_width(if literal { Width::B0 } else { Width::B1 });
         left.merge_from(&right).unwrap();
 
         let v = left.view();

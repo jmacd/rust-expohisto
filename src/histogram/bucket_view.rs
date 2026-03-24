@@ -43,8 +43,8 @@ impl<const N: usize> BucketView<'_, N> {
 
     /// Number of logical buckets available at the current width.
     #[inline]
-    pub fn bucket_capacity(&self) -> usize {
-        self.hist.bucket_capacity()
+    pub fn bucket_count(&self) -> usize {
+        self.hist.bucket_count()
     }
 
     /// Returns the count at position `pos` (0-indexed from offset).
