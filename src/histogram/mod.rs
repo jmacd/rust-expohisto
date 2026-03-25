@@ -290,12 +290,14 @@ impl<const N: usize> Histogram<N> {
         self.stats.count.checked_add(incr)
     }
 
-    /// Commits sum, count, min, and max from incoming values. Used in merge.
-    fn commit_stats(&mut self, sum: f64, count: u64, min: f64, max: f64) {
-        self.stats.sum = sum;
-        self.stats.min = self.stats.min.min(min);
-        self.stats.max = self.stats.max.max(max);
-        self.stats.count = count;
+    /// Commits merged statistics. The incoming `stats` carry the
+    /// already-computed `sum` and `count` (self + other) and the
+    /// other side's `min`/`max` which are merged via `f64::min`/`max`.
+    fn commit_stats(&mut self, stats: &Stats) {
+        self.stats.sum = stats.sum;
+        self.stats.min = self.stats.min.min(stats.min);
+        self.stats.max = self.stats.max.max(stats.max);
+        self.stats.count = stats.count;
     }
 
     // -- Index arithmetic helpers --

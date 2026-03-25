@@ -109,7 +109,12 @@ impl<const N: usize> Histogram<N> {
             }
         }
 
-        self.commit_stats(new_sum, new_count, stats.min, stats.max);
+        self.commit_stats(&Stats {
+            count: new_count,
+            sum: new_sum,
+            min: stats.min,
+            max: stats.max,
+        });
         Ok(())
     }
 
