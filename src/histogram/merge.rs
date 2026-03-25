@@ -96,6 +96,12 @@ impl<const N: usize> Histogram<N> {
 
             self.downscale_to(target_scale)?;
 
+            // Set count early so that any downscale triggered inside
+            // retry_increment sees the true total.  This maintains the
+            // invariant count ≥ any_bucket_value that do_downscale
+            // relies on for its safe-path decision.
+            self.stats.count = new_count;
+
             for i in 0..buckets.len {
                 let count = at(i);
                 if count == 0 {
