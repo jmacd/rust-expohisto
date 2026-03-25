@@ -3,11 +3,13 @@
 
 //! SWAR (SIMD Within A Register) — per-word parallel pairwise summation.
 //!
-//! These primitives are no longer used by the production downscale path
-//! (which uses a clone + scatter-add approach), but are retained for
-//! unit tests that verify SWAR correctness in isolation.
-
-#![allow(dead_code)]
+//! [`swar_step`] sums adjacent packed counters within each u64 word,
+//! doubling the lane width.  [`swar_shift_up`] rotates slot data to
+//! align group boundaries before reduction.
+//!
+//! Additional primitives ([`swar_has_overflow`], [`narrow_word`],
+//! [`swar_narrow_compact`]) are available for testing but are not
+//! used by the current downscale implementation.
 
 use super::width::Width;
 
@@ -42,6 +44,7 @@ pub(crate) fn swar_step(data: &mut [u64], width: Width) {
 
 /// Checks whether any widened pair-sum overflows the original width.
 /// Called after `swar_step` has already written the wider sums.
+#[cfg(test)]
 #[inline]
 pub(crate) fn swar_has_overflow(data: &[u64], original_width: Width) -> bool {
     if original_width == Width::U64 {
@@ -53,6 +56,7 @@ pub(crate) fn swar_has_overflow(data: &[u64], original_width: Width) -> bool {
 
 /// Compacts narrowed half-words into full words, pairing two source
 /// words into one destination word and zeroing the freed tail.
+#[cfg(test)]
 #[inline]
 fn compact_with<F: Fn(u64) -> u64>(data: &mut [u64], narrow: F) {
     let n = data.len();
@@ -123,6 +127,7 @@ pub(crate) fn swar_shift_up(data: &mut [u64], width: Width, count: usize) {
 
 /// Progressive bit-compaction: at each stage, merge adjacent groups by
 /// OR-shifting, then mask to keep only the compacted result.
+#[cfg(test)]
 #[inline]
 fn compact_lanes(mut x: u64, stages: &[(u32, u64)]) -> u64 {
     for &(shift, mask) in stages {
@@ -137,6 +142,7 @@ fn compact_lanes(mut x: u64, stages: &[(u32, u64)]) -> u64 {
 /// Stage parameters are derived from [`SWAR_TABLE`]: stage K uses
 /// `(SWAR_TABLE[K].0, SWAR_TABLE[K+1].1)` — the shift of level K and
 /// the lane mask of level K+1.
+#[cfg(test)]
 #[inline]
 pub(crate) fn narrow_word(w: u64, original_width: Width) -> u64 {
     const COMPACT_STAGES: [(u32, u64); 5] = [
@@ -165,6 +171,7 @@ pub(crate) fn narrow_word(w: u64, original_width: Width) -> u64 {
 /// fitting in `original_width`. This function bit-compresses each word
 /// (via [`narrow_word`]) and packs pairs of words into one, freeing the
 /// upper half of the array.
+#[cfg(test)]
 #[inline]
 pub(crate) fn swar_narrow_compact(data: &mut [u64], original_width: Width) {
     compact_with(data, |w| narrow_word(w, original_width));
