@@ -1,7 +1,7 @@
 // Tests always run with std available, even when the crate is no_std.
 extern crate std;
 
-use super::swar::{narrow_word, swar_has_overflow, swar_narrow_compact, swar_step};
+use super::swar::{narrow_word, swar_has_overflow, swar_narrow_compact, swar_shift_up, swar_step};
 use super::*;
 use crate::mapping::Scale;
 use rand::rngs::StdRng;
@@ -932,6 +932,60 @@ fn test_swar_step_then_narrow_compact_overflow() {
     swar_step(&mut data, Width::B4);
     assert!(swar_has_overflow(&data, Width::B4));
     assert_eq!(data[0] & 0xFF, 17, "first byte sum should be 17");
+}
+
+// -----------------------------------------------------------------------
+// swar_shift_up tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_swar_shift_up_one_slot_u8() {
+    // Shift 8 U8 counters right by 1 slot.
+    let mut data = [pack_u8x8([1, 2, 3, 4, 5, 6, 7, 0])];
+    swar_shift_up(&mut data, Width::U8, 1);
+    assert_eq!(data[0], pack_u8x8([0, 1, 2, 3, 4, 5, 6, 7]));
+}
+
+#[test]
+fn test_swar_shift_up_multi_slot_b4() {
+    // Shift 16 B4 counters right by 3 slots.
+    let mut data = [pack_b4x16([
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0,
+    ])];
+    swar_shift_up(&mut data, Width::B4, 3);
+    assert_eq!(
+        data[0],
+        pack_b4x16([0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+    );
+}
+
+#[test]
+fn test_swar_shift_up_cross_word_u8() {
+    // Two words of U8, shift by 4 slots (half a word).
+    let mut data = [
+        pack_u8x8([1, 2, 3, 4, 5, 6, 7, 8]),
+        pack_u8x8([0, 0, 0, 0, 0, 0, 0, 0]),
+    ];
+    swar_shift_up(&mut data, Width::U8, 4);
+    assert_eq!(data[0], pack_u8x8([0, 0, 0, 0, 1, 2, 3, 4]));
+    assert_eq!(data[1], pack_u8x8([5, 6, 7, 8, 0, 0, 0, 0]));
+}
+
+#[test]
+fn test_swar_shift_up_whole_word_u16() {
+    // Two words of U16, shift by 4 slots = 1 whole word.
+    let mut data = [pack_u16x4([10, 20, 30, 40]), pack_u16x4([0, 0, 0, 0])];
+    swar_shift_up(&mut data, Width::U16, 4);
+    assert_eq!(data[0], 0);
+    assert_eq!(data[1], pack_u16x4([10, 20, 30, 40]));
+}
+
+#[test]
+fn test_swar_shift_up_zero() {
+    let mut data = [pack_u8x8([1, 2, 3, 4, 5, 6, 7, 8])];
+    let original = data[0];
+    swar_shift_up(&mut data, Width::U8, 0);
+    assert_eq!(data[0], original);
 }
 
 // -----------------------------------------------------------------------

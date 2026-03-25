@@ -66,31 +66,59 @@ fn compact_with<F: Fn(u64) -> u64>(data: &mut [u64], narrow: F) {
     }
 }
 
-/// Shifts all slot values up by one position, inserting a zero at slot 0.
+/// Shifts all slot values up (toward higher physical positions) by
+/// `count` slots, inserting zeros at the bottom.
 ///
-/// This effectively decrements the logical `index_base` by one, turning
-/// an odd base into an even one so that a normal SWAR step pairs the
+/// This effectively decrements the logical `index_base` by `count`,
+/// aligning it to a group boundary so that SWAR steps pair the
 /// correct indices.
 ///
-/// Precondition: the top slot of the last word must be zero (the live
-/// range must not fill the entire capacity).
+/// Precondition: the top `count` slots of the data must be zero
+/// (the live range must not fill the entire capacity minus `count`).
 #[inline]
-pub(crate) fn swar_shift_up_one(data: &mut [u64], width: Width) {
-    debug_assert_ne!(width, Width::U64);
+pub(crate) fn swar_shift_up(data: &mut [u64], width: Width, count: usize) {
+    if count == 0 {
+        return;
+    }
     let bits = width.bits();
+    let spw = width.slots_per_word();
     let n = data.len();
     if n == 0 {
         return;
     }
-    debug_assert!(
-        data[n - 1] >> (64 - bits) == 0,
-        "top slot must be zero before shift",
-    );
-    // Process high-to-low so each word reads from the (unmodified) word below.
-    for i in (1..n).rev() {
-        data[i] = (data[i] << bits) | (data[i - 1] >> (64 - bits));
+
+    // Decompose the shift into whole words + remaining slots.
+    let word_shift = count / spw;
+    let slot_shift = count % spw;
+    let bit_shift = slot_shift * bits;
+
+    // Shift whole words first (high to low), then sub-word bits.
+    if word_shift >= n {
+        // Entire data is shifted out — zero everything.
+        for w in data.iter_mut() {
+            *w = 0;
+        }
+        return;
     }
-    data[0] <<= bits;
+
+    if bit_shift == 0 {
+        // Pure word-granularity shift.
+        for i in (word_shift..n).rev() {
+            data[i] = data[i - word_shift];
+        }
+    } else {
+        let complement = 64 - bit_shift;
+        for i in (word_shift + 1..n).rev() {
+            data[i] =
+                (data[i - word_shift] << bit_shift) | (data[i - word_shift - 1] >> complement);
+        }
+        data[word_shift] = data[0] << bit_shift;
+    }
+
+    // Zero the vacated low words.
+    for w in &mut data[..word_shift] {
+        *w = 0;
+    }
 }
 
 /// Progressive bit-compaction: at each stage, merge adjacent groups by
