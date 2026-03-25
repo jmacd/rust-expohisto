@@ -3,7 +3,7 @@
 
 //! Merge logic for combining histograms.
 
-use super::{scale_reduction, BucketDescriptor, Error, HighLow, Histogram, Stats};
+use super::{BucketDescriptor, Error, HighLow, Histogram, Stats, scale_reduction};
 
 impl<const N: usize> Histogram<N> {
     /// Merges another histogram into this one.
@@ -35,7 +35,7 @@ impl<const N: usize> Histogram<N> {
             },
             |i| {
                 let index = other.index_start + i as i32;
-                other.bucket_get(other.slot_for(index))
+                other.phys_bucket(other.slot_for(index))
             },
         )
     }

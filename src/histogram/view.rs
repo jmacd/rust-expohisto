@@ -110,7 +110,7 @@ impl<const N: usize> HistogramView<'_, N> {
         let positive_count: u64 = (0..bucket_len)
             .map(|pos| {
                 let index = offset + pos as i32;
-                self.hist.bucket_get(self.hist.slot_for(index))
+                self.hist.phys_bucket(self.hist.slot_for(index))
             })
             .sum();
         let zero_count = total_count.saturating_sub(positive_count);

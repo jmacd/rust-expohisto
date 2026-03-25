@@ -8,8 +8,8 @@
 
 use core::fmt;
 
-use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
-use crate::mapping::{max_scale, Scale, ScaleError};
+use crate::float64::{NAN_INF_BIASED, get_biased_exponent, get_significand, unbias_exponent};
+use crate::mapping::{Scale, ScaleError, max_scale};
 
 mod bucket_ops;
 mod merge;
@@ -305,7 +305,7 @@ impl<const N: usize> Histogram<N> {
     /// Number of logical buckets in the live range, or 0 if empty.
     #[inline]
     const fn range_len(&self) -> u32 {
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             0
         } else {
             (self.index_end - self.index_start + 1) as u32
@@ -314,7 +314,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Ring-buffer slot index for a given bucket index.
     #[inline]
-    const fn slot_for(&self, index: i32) -> usize {
+    pub(super) const fn slot_for(&self, index: i32) -> usize {
         let cap = self.bucket_count() as i32;
         (index - self.index_base).rem_euclid(cap) as usize
     }
@@ -361,24 +361,17 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Returns true if no non-zero values have been recorded.
-    #[inline]
-    pub fn buckets_empty(&self) -> bool {
-        self.range_is_empty()
-    }
-
-    /// Checks if the bucket index range is empty (bucket-mode only).
-    /// Structural check: are the bucket index pointers empty?
     ///
-    /// Distinct from `buckets_empty()` because during reconstruction
-    /// (promotion, downscale) the indices are reset while stats.sum
-    /// remains non-zero.
+    /// When `index_start == index_end` the range covers a single
+    /// bucket; the histogram is empty only if that physical slot is
+    /// zero.
     #[inline]
-    const fn range_is_empty(&self) -> bool {
+    pub(crate) const fn buckets_empty(&self) -> bool {
         if self.index_end != self.index_start {
             return false;
         }
         let slot = self.slot_for(self.index_start);
-        self.bucket_get(slot) == 0
+        self.phys_bucket(slot) == 0
     }
 
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
@@ -400,7 +393,7 @@ impl<const N: usize> Histogram<N> {
     /// for byte-aligned widths the compiler reduces it to the same code as
     /// a direct typed read.
     #[inline]
-    const fn bucket_get(&self, slot: usize) -> u64 {
+    pub(super) const fn phys_bucket(&self, slot: usize) -> u64 {
         let (wi, shift, mask) = self.slot_addr(slot);
         (self.bucket_data()[wi] >> shift) & mask
     }
@@ -460,7 +453,7 @@ impl<const N: usize> Histogram<N> {
     /// Attempts to add `incr` to a physical slot. Returns false on overflow.
     #[inline]
     fn bucket_try_increment(&mut self, slot: usize, incr: u64) -> bool {
-        let val = self.bucket_get(slot);
+        let val = self.phys_bucket(slot);
         let new_val = match val.checked_add(incr) {
             Some(v) if v <= self.current.width.counter_max() => v,
             _ => return false,
@@ -686,7 +679,7 @@ impl<const N: usize> Histogram<N> {
     /// Widens bucket counters by one step, adjusting the scale
     /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Error> {
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.current.width = self.current.width.wider().ok_or(Error::Overflow)?;
             self.shift_indices(1);
             return self.decrease_scale(1);
@@ -710,7 +703,7 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.shift_indices(change);
             return self.decrease_scale(change);
         }
@@ -739,7 +732,7 @@ impl<const N: usize> Histogram<N> {
 
         let cap = self.bucket_count() as i32;
 
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.index_start = index;
             self.index_end = index;
             // Align base to a word boundary so that SWAR pairwise ops

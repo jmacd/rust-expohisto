@@ -124,7 +124,7 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
         // Walk positive buckets until cumulative count reaches the target.
         while self.pos < self.bucket_len {
             let index = self.offset + self.pos as i32;
-            let count = self.hist.bucket_get(self.hist.slot_for(index));
+            let count = self.hist.phys_bucket(self.hist.slot_for(index));
 
             if count == 0 {
                 self.pos += 1;

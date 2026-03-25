@@ -71,7 +71,7 @@ impl<const N: usize> Histogram<N> {
     ) -> Result<(), super::Error> {
         debug_assert!(change >= 1);
 
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.shift_indices(change);
             return Ok(());
         }
@@ -201,7 +201,7 @@ impl<const N: usize> Histogram<N> {
     pub(super) fn widen_by_one(&mut self) -> Result<(), super::Error> {
         let min = self.current.width.wider().ok_or(super::Error::Overflow)?;
 
-        if self.range_is_empty() {
+        if self.buckets_empty() {
             self.current.width = min;
             self.shift_indices(1);
             return Ok(());
