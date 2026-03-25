@@ -27,7 +27,7 @@ pub use histogram::{
 };
 #[cfg(feature = "quantile")]
 pub use histogram::{QuantileIter, QuantileValue};
-pub use mapping::{max_scale, Scale, ScaleError, MAX_SCALE, MIN_SCALE};
+pub use mapping::{MAX_SCALE, MIN_SCALE, Scale, ScaleError, table_scale};
 
 // Note: public because mapping-gen uses it from another crate
 pub mod float64;

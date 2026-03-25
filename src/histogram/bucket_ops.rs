@@ -9,15 +9,15 @@
 //! This linear read→fold→write pattern avoids in-place alignment
 //! fixups and is SIMD-friendly.
 
-use super::width::Width;
 use super::Histogram;
+use super::width::Width;
 
 /// Captured old-layout state for a downscale operation.
 ///
 /// Bundles the immutable parameters shared by all downscale codepaths,
 /// keeping their signatures compact.
 struct DownscaleCtx<'a, const N: usize> {
-    change: i32,
+    change: u32,
     old_data: &'a [u64; N],
     old_width: Width,
     old_base: i32,
@@ -66,13 +66,12 @@ impl<const N: usize> Histogram<N> {
     /// Returns `Err(Error)` if any group sum exceeds `u64::MAX`.
     pub(super) fn do_downscale(
         &mut self,
-        change: i32,
+        change: u32,
         min_width: Width,
     ) -> Result<(), super::Error> {
         debug_assert!(change >= 1);
 
         if self.buckets_empty() {
-            self.shift_indices(change);
             return Ok(());
         }
 

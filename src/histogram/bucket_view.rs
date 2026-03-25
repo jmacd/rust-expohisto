@@ -63,7 +63,7 @@ impl<const N: usize> BucketView<'_, N> {
             len
         );
         let index = self.hist.index_start + pos as i32;
-        self.hist.phys_bucket(self.hist.slot_for(index))
+        self.hist.bucket_get(self.hist.slot_for(index))
     }
 
     /// Returns an iterator over bucket counts.
@@ -104,7 +104,7 @@ impl<const N: usize> Iterator for BucketsIter<'_, N> {
             return None;
         }
         let index = self.hist.index_start + self.pos as i32;
-        let count = self.hist.phys_bucket(self.hist.slot_for(index));
+        let count = self.hist.bucket_get(self.hist.slot_for(index));
         self.pos += 1;
         Some(count)
     }

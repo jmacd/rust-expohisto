@@ -124,7 +124,7 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
         // Walk positive buckets until cumulative count reaches the target.
         while self.pos < self.bucket_len {
             let index = self.offset + self.pos as i32;
-            let count = self.hist.phys_bucket(self.hist.slot_for(index));
+            let count = self.hist.bucket_get(self.hist.slot_for(index));
 
             if count == 0 {
                 self.pos += 1;
@@ -331,11 +331,7 @@ mod tests {
             * (0.254829592
                 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
         let result = 1.0 - poly * (-a * a).exp();
-        if x < 0.0 {
-            -result
-        } else {
-            result
-        }
+        if x < 0.0 { -result } else { result }
     }
 
     /// Computes reduced χ²/df of histogram bucket counts vs a theoretical
@@ -433,15 +429,9 @@ mod tests {
             let view = h.view();
             let stats = view.stats();
             let vals: Vec<_> = view.quantiles(&qs).collect();
+            assert_eq!(vals[0].value, stats.min, "{}: p0 must equal min", case.name);
             assert_eq!(
-                vals[0].value,
-                stats.min,
-                "{}: p0 must equal min",
-                case.name
-            );
-            assert_eq!(
-                vals[2].value,
-                stats.max,
+                vals[2].value, stats.max,
                 "{}: p100 must equal max",
                 case.name
             );

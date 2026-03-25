@@ -47,7 +47,7 @@ impl std::error::Error for ScaleError {}
 /// This equals the compiled lookup table scale (set by the `scale-N`
 /// feature). Exponent mapping (scale ≤ 0) is always available.
 #[inline]
-pub const fn max_scale() -> i32 {
+pub const fn table_scale() -> i32 {
     crate::lookup::TABLE_SCALE
 }
 
@@ -70,7 +70,7 @@ impl Scale {
     /// Returns `ScaleError::InvalidScale` if scale is outside
     /// [`MIN_SCALE`]..=[`max_scale()`].
     pub fn new(scale: i32) -> Result<Self, ScaleError> {
-        if !(MIN_SCALE..=max_scale()).contains(&scale) {
+        if !(MIN_SCALE..=table_scale()).contains(&scale) {
             return Err(ScaleError::InvalidScale);
         }
 
@@ -132,7 +132,7 @@ mod tests {
         assert!(Scale::new(1).is_ok());
 
         // All scales up to max_scale() are supported
-        for scale in MIN_SCALE..=max_scale() {
+        for scale in MIN_SCALE..=table_scale() {
             assert!(
                 Scale::new(scale).is_ok(),
                 "scale {} should be supported",
@@ -140,8 +140,8 @@ mod tests {
             );
         }
         // Scales above max_scale() are rejected
-        if max_scale() < MAX_SCALE {
-            assert!(Scale::new(max_scale() + 1).is_err());
+        if table_scale() < MAX_SCALE {
+            assert!(Scale::new(table_scale() + 1).is_err());
         }
         assert!(Scale::new(MAX_SCALE + 1).is_err());
     }
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn test_powers_of_two_all_scales() {
         // Powers of two should map to (exp << scale) - 1 for all supported scales
-        for scale in 1..=max_scale() {
+        for scale in 1..=table_scale() {
             let m = Scale::new(scale).unwrap();
             for exp in -10..=10 {
                 let value = 2.0_f64.powi(exp);

@@ -50,7 +50,7 @@ fn test_histogram_downscale() {
     h.update(1.0).unwrap();
     h.update(1000.0).unwrap();
     assert_eq!(h.view().stats().count, 2);
-    assert!(h.view().scale() < max_scale());
+    assert!(h.view().scale() < table_scale());
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn test_with_scale_records_at_limited_scale() {
 
     let limited_view = limited.view();
     assert!(limited_view.scale() <= 3);
-    if max_scale() > 3 {
+    if table_scale() > 3 {
         let unlimited_view = unlimited.view();
         assert!(unlimited_view.scale() > limited_view.scale());
     }
@@ -279,8 +279,7 @@ fn test_merge_equivalence_for_size<const K: usize>(test_sets: &[Vec<f64>]) {
             let merged_stats = merged.view().stats();
             let single_stats = single.view().stats();
             assert_eq!(
-                merged_stats.count,
-                single_stats.count,
+                merged_stats.count, single_stats.count,
                 "count mismatch for {label}"
             );
             let ms = merged_stats.sum;
@@ -1046,7 +1045,7 @@ fn test_swar_step_b4_max_pair_sum() {
 
 #[test]
 fn test_scale_reduction() {
-    let cases: &[(i32, i32, i32, i32, &str)] = &[
+    let cases: &[(i32, i32, usize, u32, &str)] = &[
         (0, 4, 10, 0, "fits"),
         (0, 10, 10, 1, "exact boundary"),
         (0, 39, 10, 2, "double"),
@@ -1641,7 +1640,7 @@ fn repro_fuzz_histogram_oracle_offset() {
     let min_value = crate::float64::MIN_VALUE;
 
     // At every scale, the subnormal must have the same index as MIN_VALUE.
-    for s in 0..=max_scale() {
+    for s in 0..=table_scale() {
         let m = Scale::new(s).unwrap();
         assert_eq!(
             m.map_to_index(subnormal),
@@ -1696,10 +1695,7 @@ fn repro_fuzz_merge_oracle_offset() {
     );
     let bt: u64 = buckets.iter().sum();
     let count = v.stats().count;
-    assert!(
-        bt <= count,
-        "bucket total ({bt}) > count ({count})",
-    );
+    assert!(bt <= count, "bucket total ({bt}) > count ({count})",);
 }
 
 #[test]

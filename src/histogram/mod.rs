@@ -9,7 +9,7 @@
 use core::fmt;
 
 use crate::float64::{NAN_INF_BIASED, get_biased_exponent, get_significand, unbias_exponent};
-use crate::mapping::{Scale, ScaleError, max_scale};
+use crate::mapping::{Scale, ScaleError, table_scale};
 
 mod bucket_ops;
 mod merge;
@@ -185,9 +185,9 @@ enum IncrResult {
 
 /// Computes how much downscaling is needed for indices to fit in `size` buckets.
 #[inline]
-const fn scale_reduction(mut hl: HighLow, size: i32) -> i32 {
+const fn scale_reduction(mut hl: HighLow, size: usize) -> u32 {
     let mut change = 0;
-    while hl.high - hl.low >= size {
+    while (hl.high - hl.low) as usize >= size {
         hl.high >>= 1;
         hl.low >>= 1;
         change += 1;
@@ -321,7 +321,7 @@ impl<const N: usize> Histogram<N> {
 
     /// Shifts all three index fields right by `by` positions.
     #[inline]
-    fn shift_indices(&mut self, by: i32) {
+    fn shift_indices(&mut self, by: u32) {
         self.index_start >>= by;
         self.index_end >>= by;
         self.index_base >>= by;
@@ -371,7 +371,7 @@ impl<const N: usize> Histogram<N> {
             return false;
         }
         let slot = self.slot_for(self.index_start);
-        self.phys_bucket(slot) == 0
+        self.bucket_get(slot) == 0
     }
 
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
@@ -393,7 +393,7 @@ impl<const N: usize> Histogram<N> {
     /// for byte-aligned widths the compiler reduces it to the same code as
     /// a direct typed read.
     #[inline]
-    pub(super) const fn phys_bucket(&self, slot: usize) -> u64 {
+    pub(super) const fn bucket_get(&self, slot: usize) -> u64 {
         let (wi, shift, mask) = self.slot_addr(slot);
         (self.bucket_data()[wi] >> shift) & mask
     }
@@ -453,7 +453,7 @@ impl<const N: usize> Histogram<N> {
     /// Attempts to add `incr` to a physical slot. Returns false on overflow.
     #[inline]
     fn bucket_try_increment(&mut self, slot: usize, incr: u64) -> bool {
-        let val = self.phys_bucket(slot);
+        let val = self.bucket_get(slot);
         let new_val = match val.checked_add(incr) {
             Some(v) if v <= self.current.width.counter_max() => v,
             _ => return false,
@@ -468,11 +468,24 @@ impl<const N: usize> Histogram<N> {
 // ---------------------------------------------------------------------------
 
 impl<const N: usize> Histogram<N> {
-    // Shared constructor — all public constructors delegate here.
-    fn new_at_scale(scale: i32) -> Result<Self, ScaleError> {
-        const { assert!(N >= 1, "N must be >= 1 for at least 1 bucket word") };
-        let settings = Settings::new(Scale::new(scale)?, Width::B1);
-        Ok(Self {
+    /// Creates a new histogram at the maximum supported scale.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        // The limit at 2 ensures MIN_SCALE is sufficient to cover the
+        // entire range.
+        const { assert!(N >= 2, "requires >= 2 u64 buckets") };
+
+        // The limit at 250 allows up to 16k single-bit buckets and
+        // limits the histogram struct to 2048 bytes, noting that the
+        // structure itself uses 6 words.
+        const { assert!(N <= 250, "requires <= 256 u64 buckets") };
+
+        let settings = Settings::new(
+            Scale::new(table_scale()).expect("table scale is valid"),
+            Width::B1,
+        );
+        Self {
             initial: settings,
             current: settings,
             index_base: 0,
@@ -480,27 +493,10 @@ impl<const N: usize> Histogram<N> {
             index_end: 0,
             stats: Stats::EMPTY,
             data: [0u64; N],
-        })
+        }
     }
 
-    /// Creates a new histogram at the maximum supported scale.
-    ///
-    /// The maximum scale is determined by the compiled lookup table
-    /// (`scale-N` feature). This always succeeds because scale 0
-    /// (exponent mapping) is unconditionally available.
-    #[inline]
-    #[must_use]
-    pub fn new() -> Self {
-        // max_scale() is always valid (>= 0), so this cannot fail.
-        Self::new_at_scale(max_scale()).unwrap()
-    }
-
-    /// Sets the exact scale.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ScaleError::InvalidScale`] if `scale` is outside
-    /// the supported range [`MIN_SCALE`](crate::MIN_SCALE)..=[`max_scale()`](crate::max_scale).
+    /// Sets the maximum scale.
     #[inline]
     pub fn with_scale(mut self, scale: i32) -> Result<Self, ScaleError> {
         let s = Scale::new(scale)?;
@@ -509,7 +505,7 @@ impl<const N: usize> Histogram<N> {
         Ok(self)
     }
 
-    /// Sets the minimum (initial) bucket counter width.
+    /// Sets the minimum bucket width.
     #[inline]
     #[must_use]
     pub fn with_min_width(mut self, width: Width) -> Self {
@@ -532,26 +528,12 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Swaps contents with another histogram.
-    ///
-    /// Useful for the "swap and export" pattern: record into a histogram,
-    /// then swap with a fresh one to hand off the data:
-    ///
-    /// ```
-    /// use otel_expohisto::Histogram;
-    ///
-    /// let mut h: Histogram<16> = Histogram::new();
-    /// // … record values, export via view() …
-    /// let mut fresh = Histogram::new();
-    /// h.swap(&mut fresh);
-    /// // h is now empty; fresh holds the old data
-    /// ```
     #[inline]
     pub fn swap(&mut self, other: &mut Self) {
         core::mem::swap(self, other);
     }
 
-    /// Resets the histogram to its initial state, preserving the
-    /// configured scale and minimum bucket width.
+    /// Resets the histogram to its initial state.
     pub fn clear(&mut self) {
         self.current = self.initial;
         self.index_base = 0;
@@ -561,31 +543,13 @@ impl<const N: usize> Histogram<N> {
         self.data.fill(0); // TODO: is this required?
     }
 
+    /// Records a single value.
+    #[inline]
+    pub fn update(&mut self, value: f64) -> Result<(), Error> {
+        self.record_incr(value, 1)
+    }
+
     /// Records a value with a specified increment.
-    ///
-    /// The value must be non-negative and not NaN.  **This is not
-    /// checked at runtime** — `debug_assert!` catches violations in
-    /// debug builds, but release builds assume valid input.
-    ///
-    /// This is deliberate: an OTel SDK must already validate values
-    /// at the API boundary (rejecting NaN, Inf, and negative values
-    /// before selecting an aggregator), so repeating that check here
-    /// would add a branch to the hot path for no benefit.  The
-    /// `debug_assert!` exists as a safety net during development.
-    ///
-    /// Positive infinity (`f64::INFINITY`) is accepted and mapped to
-    /// the same bucket as `f64::MAX`, consistent with the Prometheus
-    /// exponential histogram specification.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Overflow`] if the total count would exceed `u64::MAX`.
-    /// The total count is checked before any mutation, and because the
-    /// total is always ≥ any individual bucket count, no bucket at
-    /// `u64` width can overflow once the total-count check passes.
-    /// Callers that need rollback semantics can `clone()` beforehand,
-    /// but in practice histograms should be flushed and reset long
-    /// before `u64` exhaustion.
     pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Error> {
         // Extract the raw exponent and significand (sign bit is ignored).
         let mut biased_exp = get_biased_exponent(value);
@@ -631,12 +595,6 @@ impl<const N: usize> Histogram<N> {
         Ok(())
     }
 
-    /// Records a single value.
-    #[inline]
-    pub fn update(&mut self, value: f64) -> Result<(), Error> {
-        self.record_incr(value, 1)
-    }
-
     /// Updates buckets for a decomposed value.
     fn update_decomposed(
         &mut self,
@@ -670,10 +628,10 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Decreases the scale by `decrease` steps.
-    fn decrease_scale(&mut self, decrease: i32) -> Result<(), Error> {
-        let new_scale = self.current.scale.scale() - decrease;
-        self.current.scale = Scale::new(new_scale).map_err(|_| Error::Overflow)?;
-        Ok(())
+    fn change_scale(&mut self, decrease: u32) {
+        let new_scale = self.current.scale.scale() - decrease as i32;
+        self.current.scale =
+            Scale::new(new_scale).expect("two buckets fit entire range at min_scale");
     }
 
     /// Widens bucket counters by one step, adjusting the scale
@@ -681,11 +639,11 @@ impl<const N: usize> Histogram<N> {
     fn widen_one_step(&mut self) -> Result<(), Error> {
         if self.buckets_empty() {
             self.current.width = self.current.width.wider().ok_or(Error::Overflow)?;
-            self.shift_indices(1);
-            return self.decrease_scale(1);
+        } else {
+            self.widen_by_one()?;
         }
-        self.widen_by_one()?;
-        self.decrease_scale(1)
+        self.change_scale(1);
+        Ok(())
     }
 
     /// Downscales by `change` scale-steps.
@@ -694,22 +652,8 @@ impl<const N: usize> Histogram<N> {
     /// adjacent counters into a fresh, aligned output buffer.  The
     /// output width is the minimum that holds all group sums.
     #[cfg(any(test, feature = "bench-internals"))]
-    pub fn downscale(&mut self, change: i32) -> Result<(), Error> {
+    pub fn downscale(&mut self, change: u32) -> Result<(), Error> {
         self.downscale_by(change)
-    }
-
-    fn downscale_by(&mut self, change: i32) -> Result<(), Error> {
-        if change <= 0 {
-            return Ok(());
-        }
-
-        if self.buckets_empty() {
-            self.shift_indices(change);
-            return self.decrease_scale(change);
-        }
-
-        self.do_downscale(change, self.current.width)?;
-        self.decrease_scale(change)
     }
 
     fn downscale_to(&mut self, target_scale: i32) -> Result<(), Error> {
@@ -717,14 +661,22 @@ impl<const N: usize> Histogram<N> {
         if change <= 0 {
             return Ok(());
         }
-        self.downscale_by(change)
+        self.downscale_by(change as u32)
     }
 
-    /// Attempts to place `incr` into the bucket at `index`.
-    ///
-    /// Returns `NeedsDownscale` if the index doesn't fit in the current
-    /// range, or `CounterError` if the counter at `index` can't hold
-    /// the addition.  The caller retries after adjusting scale or width.
+    fn downscale_by(&mut self, change: u32) -> Result<(), Error> {
+        if change <= 0 {
+            return Ok(());
+        }
+
+        debug_assert!(!self.buckets_empty());
+
+        self.do_downscale(change, self.current.width)?;
+        self.change_scale(change);
+        Ok(())
+    }
+
+    /// Attempts to add `incr` into the bucket at `index`.
     fn try_increment(&mut self, index: i32, incr: u64) -> IncrResult {
         if incr == 0 {
             return IncrResult::Ok;
@@ -788,7 +740,7 @@ impl<const N: usize> Histogram<N> {
                 Ok(false)
             }
             IncrResult::NeedsDownscale(hl) => {
-                let change = scale_reduction(hl, self.bucket_count() as i32);
+                let change = scale_reduction(hl, self.bucket_count());
                 if change > 0 {
                     self.downscale_by(change)?;
                 } else if self.swar_would_wrap(hl.low) || self.swar_would_wrap(hl.high) {

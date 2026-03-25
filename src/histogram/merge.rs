@@ -35,7 +35,7 @@ impl<const N: usize> Histogram<N> {
             },
             |i| {
                 let index = other.index_start + i as i32;
-                other.phys_bucket(other.slot_for(index))
+                other.bucket_get(other.slot_for(index))
             },
         )
     }
@@ -75,7 +75,7 @@ impl<const N: usize> Histogram<N> {
 
         if buckets.len > 0 {
             let other_end = buckets.offset + buckets.len as i32 - 1;
-            let cap = self.bucket_count() as i32;
+            let cap = self.bucket_count();
             let min_scale = self.current.scale.scale().min(buckets.scale);
 
             let self_hl = self.index_range_at_scale(min_scale);
@@ -87,7 +87,7 @@ impl<const N: usize> Histogram<N> {
                 }
             };
             let hlp = self_hl.merge(other_hl);
-            let target_scale = min_scale - scale_reduction(hlp, cap);
+            let target_scale = min_scale - scale_reduction(hlp, cap) as i32;
 
             self.downscale_to(target_scale)?;
 
