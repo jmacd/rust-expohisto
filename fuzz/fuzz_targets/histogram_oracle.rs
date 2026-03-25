@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::{Width, Histogram, Scale, max_scale};
+use otel_expohisto::{Width, Histogram, Scale, MAX_SCALE};
 
 #[path = "verify.rs"]
 mod verify;
@@ -59,8 +59,8 @@ fn check_histogram<const N: usize>(values: &[f64]) {
     let b1_cap = (N * 64) as i32;
 
     // Find the highest scale where span fits at B1 capacity.
-    let mut optimal = max_scale();
-    for s in (otel_expohisto::MIN_SCALE..=max_scale()).rev() {
+    let mut optimal = MAX_SCALE;
+    for s in (otel_expohisto::MIN_SCALE..=MAX_SCALE).rev() {
         if let Ok(m) = Scale::new(s) {
             let indices: Vec<i32> = non_zero.iter().map(|&v| m.map_to_index(v)).collect();
             let lo = *indices.iter().min().unwrap();

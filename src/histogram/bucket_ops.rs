@@ -4,12 +4,12 @@
 //! Bucket operations — widen and downscale.
 //!
 //! Downscale merges groups of `2^change` adjacent buckets by summing
-//! their counters.  When alignment permits, the implementation uses
-//! SWAR (SIMD Within A Register) to sum packed counters in parallel.
-//! Otherwise it falls back to a scalar read–sum–write path.
+//! their counters.  When possible the implementation uses SWAR
+//! (SIMD Within A Register) to sum packed counters in parallel,
+//! falling back to scalar accumulation at U64 width.
 
 use super::Histogram;
-use super::swar::{swar_shift_up, swar_step};
+use super::swar::swar_step;
 use super::width::{ALL_WIDTHS, Width};
 
 impl<const N: usize> Histogram<N> {
@@ -19,6 +19,12 @@ impl<const N: usize> Histogram<N> {
     /// `min_width` sets a floor on the output width (use the current
     /// width for a normal downscale, or the next wider width when
     /// a counter overflow forces widening).
+    ///
+    /// Since `index_base` is always word-aligned (a multiple of
+    /// `slots_per_word`), SWAR pair boundaries always align with
+    /// group boundaries for the in-word case.  For cross-word
+    /// groups (change > log2(spw)), word offsets are computed
+    /// directly from the word-aligned base.
     pub(super) fn do_downscale(
         &mut self,
         change: u32,
@@ -30,31 +36,18 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        let group_size = 1i32 << change;
         let new_start = self.index_start >> change;
         let new_end = self.index_end >> change;
         let num_groups = (new_end - new_start + 1) as usize;
 
         let width = self.current.width;
-        let spw = width.slots_per_word();
 
-        // How many SWAR steps fit within a word.
+        // At U64 the data is a ring buffer; use scalar path.
         let swar_steps = if width == Width::U64 {
             0u32
         } else {
+            let spw = width.slots_per_word();
             change.min(spw.trailing_zeros())
-        };
-
-        // Check if SWAR alignment fits in the data array.
-        let can_swar = swar_steps > 0 && {
-            let misalign = self.index_base.rem_euclid(group_size) as usize;
-            let shift = if misalign != 0 {
-                group_size as usize - misalign
-            } else {
-                0
-            };
-            let new_last_slot = (self.index_end - self.index_base) as usize + shift;
-            new_last_slot / spw < N
         };
 
         let spec_width = Self::speculative_width(
@@ -65,9 +58,9 @@ impl<const N: usize> Histogram<N> {
             min_width.max(self.initial.width),
         );
 
-        if can_swar {
+        if swar_steps > 0 {
             self.do_downscale_swar(
-                change, new_start, new_end, num_groups, spec_width,
+                change, swar_steps, new_start, new_end, num_groups, spec_width,
             )
         } else {
             self.do_downscale_scalar(
@@ -76,10 +69,18 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    /// SWAR path: align, reduce in parallel, extract, repack.
+    /// SWAR path: reduce in parallel, extract, repack.
+    ///
+    /// `index_base` is always a multiple of `slots_per_word` (set by
+    /// `word_start`).  For in-word groups (`group_size ≤ spw`) this
+    /// guarantees SWAR pair alignment.  For cross-word groups
+    /// (`group_size > spw`) the SWAR pairs are still correct (they
+    /// only need spw-alignment); the word offsets are computed
+    /// directly from `index_base`.
     fn do_downscale_swar(
         &mut self,
         change: u32,
+        swar_steps: u32,
         new_start: i32,
         new_end: i32,
         num_groups: usize,
@@ -87,8 +88,7 @@ impl<const N: usize> Histogram<N> {
     ) -> Result<(), super::Error> {
         let group_size = 1i32 << change;
         let width = self.current.width;
-        let spw = width.slots_per_word();
-        let swar_steps = change.min(spw.trailing_zeros());
+        let spw = width.slots_per_word() as i32;
         let swar_width = ALL_WIDTHS[width.level() + swar_steps as usize];
         let swar_spw = swar_width.slots_per_word();
         let swar_bits = swar_width.bits();
@@ -98,16 +98,6 @@ impl<const N: usize> Histogram<N> {
         } else {
             1
         };
-
-        // --- Align ---
-        let misalign = self.index_base.rem_euclid(group_size) as usize;
-        if misalign != 0 {
-            let shift = group_size as usize - misalign;
-            let new_last_slot = (self.index_end - self.index_base) as usize + shift;
-            let needed_words = new_last_slot / spw + 1;
-            swar_shift_up(&mut self.data[..needed_words], width, shift);
-            self.index_base -= shift as i32;
-        }
 
         // --- SWAR reduce ---
         let data_words = self.data_word_count();
@@ -119,26 +109,41 @@ impl<const N: usize> Histogram<N> {
             }
         }
 
+        // After SWAR, lane k at swar_width holds the sum of
+        // 2^swar_steps original slots starting at slot k*2^swar_steps.
+        //
+        // For in-word groups (words_per_group == 1):
+        //   Output group g is at lane (group_start - index_base) / 2^swar_steps
+        //   where group_start = (new_start + g) * group_size.
+        //   Since index_base is spw-aligned and group_size <= spw,
+        //   this simplifies to lane_offset + g.
+        //
+        // For cross-word groups (words_per_group > 1):
+        //   Each word is one U64 value after SWAR to U64.
+        //   Word w covers original slots [w*spw, (w+1)*spw).
+        //   Output group g's first word = (group_start - index_base) / spw.
+
         // --- Find max group sum ---
-        let swar_base = self.index_base >> change;
-        let lane_offset = (new_start - swar_base) as usize;
         let mut max_sum: u64 = 0;
 
         if words_per_group > 1 {
             for g in 0..num_groups {
-                let first_word = (lane_offset + g) * words_per_group;
+                let group_start = (new_start + g as i32) * group_size;
+                let first_word = (group_start - self.index_base) / spw;
                 let mut acc: u64 = 0;
-                for w in 0..words_per_group {
+                for w in 0..words_per_group as i32 {
                     let wi = first_word + w;
-                    if wi < data_words {
+                    if wi >= 0 && (wi as usize) < data_words {
                         acc = acc
-                            .checked_add(self.data[wi])
+                            .checked_add(self.data[wi as usize])
                             .ok_or(super::Error::Overflow)?;
                     }
                 }
                 max_sum = max_sum.max(acc);
             }
         } else {
+            let lane_offset = ((new_start * group_size - self.index_base)
+                / (1i32 << swar_steps)) as usize;
             for g in 0..num_groups {
                 let lane = lane_offset + g;
                 let wi = lane / swar_spw;
@@ -158,18 +163,21 @@ impl<const N: usize> Histogram<N> {
 
         if words_per_group > 1 {
             for g in 0..num_groups {
-                let first_word = (lane_offset + g) * words_per_group;
+                let group_start = (new_start + g as i32) * group_size;
+                let first_word = (group_start - self.index_base) / spw;
                 let mut acc: u64 = 0;
-                for w in 0..words_per_group {
+                for w in 0..words_per_group as i32 {
                     let wi = first_word + w;
-                    if wi < data_words {
-                        acc = acc.wrapping_add(widened_data[wi]);
+                    if wi >= 0 && (wi as usize) < data_words {
+                        acc = acc.wrapping_add(widened_data[wi as usize]);
                     }
                 }
                 let slot = (new_start + g as i32 - base) as usize;
                 Self::set_in(&mut self.data, slot, actual_width, acc);
             }
         } else {
+            let lane_offset = ((new_start * group_size - self.index_base)
+                / (1i32 << swar_steps)) as usize;
             for g in 0..num_groups {
                 let lane = lane_offset + g;
                 let wi = lane / swar_spw;

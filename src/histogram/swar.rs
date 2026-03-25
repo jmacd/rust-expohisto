@@ -79,6 +79,7 @@ fn compact_with<F: Fn(u64) -> u64>(data: &mut [u64], narrow: F) {
 ///
 /// Precondition: the top `count` slots of the data must be zero
 /// (the live range must not fill the entire capacity minus `count`).
+#[cfg(test)]
 #[inline]
 pub(crate) fn swar_shift_up(data: &mut [u64], width: Width, count: usize) {
     if count == 0 {
