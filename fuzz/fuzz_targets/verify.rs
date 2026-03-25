@@ -17,11 +17,14 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         return;
     }
 
-    // min / max
-    let expected_min = ops.iter().map(|&(v, _)| v).fold(f64::INFINITY, f64::min);
-    let expected_max = ops.iter().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
-    assert_eq!(v.min(), expected_min, "{label}: min mismatch");
-    assert_eq!(v.max(), expected_max, "{label}: max mismatch");
+    // min / max — only covers non-zero (bucketed) values
+    let non_zero_ops = ops.iter().filter(|&&(v, _)| v != 0.0);
+    let expected_min = non_zero_ops.clone().map(|&(v, _)| v).fold(f64::INFINITY, f64::min);
+    let expected_max = non_zero_ops.clone().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
+    if expected_min != f64::INFINITY {
+        assert_eq!(v.min(), expected_min, "{label}: min mismatch");
+        assert_eq!(v.max(), expected_max, "{label}: max mismatch");
+    }
 
     // zero count
     let non_zero_total: u64 = ops

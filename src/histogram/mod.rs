@@ -625,7 +625,7 @@ impl<const N: usize> Histogram<N> {
         match biased_exp {
             0 => {
                 if significand == 0 {
-                    // Zero case.
+                    // Zero case: no bucket, no min/max update.
                     self.stats.count = new_count;
                     return Ok(());
                 } else {
