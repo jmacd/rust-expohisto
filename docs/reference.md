@@ -7,10 +7,10 @@ All mutating operations (`update`, `record`, `merge_from`, `merge_from_raw`) ret
 **Snapshot/rollback guarantee:** Before any mutating operation, the histogram clones itself. If the operation fails (e.g., a U64 counter would overflow), the clone is restored and the histogram is left unchanged. This ensures that partial mutations from multi-step operations (downscale + widen + insert) never leak to the caller.
 
 ```rust,ignore
-let snapshot_count = h.view().count();
+let snapshot_count = h.view().stats().count;
 if h.update(value).is_err() {
     // h is unchanged — count, sum, buckets all identical to before
-    assert_eq!(h.view().count(), snapshot_count);
+    assert_eq!(h.view().stats().count, snapshot_count);
 }
 ```
 

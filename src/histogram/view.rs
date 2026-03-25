@@ -9,7 +9,7 @@ use crate::mapping::Scale;
 use super::bucket_view::BucketView;
 #[cfg(feature = "quantile")]
 use super::quantile::QuantileIter;
-use super::Histogram;
+use super::{Histogram, Stats};
 
 /// Read-only view of a histogram's data.
 ///
@@ -25,8 +25,8 @@ use super::Histogram;
 /// h.update(2.7).unwrap();
 ///
 /// let v = h.view();
-/// assert_eq!(v.count(), 2);
-/// assert!(v.sum() > 4.0);
+/// assert_eq!(v.stats().count, 2);
+/// assert!(v.stats().sum > 4.0);
 /// println!("scale = {}, buckets = {}", v.scale(), v.positive().len());
 /// ```
 #[derive(Debug)]
@@ -47,36 +47,21 @@ impl<const N: usize> HistogramView<'_, N> {
         }
     }
 
-    /// Returns the count of all recorded values.
-    /// This includes zeros.
+    /// Returns the aggregate statistics (count, sum, min, max).
+    ///
+    /// When the histogram is empty (count is 0), min and max are
+    /// reported as 0.0.
     #[inline]
-    pub const fn count(&self) -> u64 {
-        self.hist.stats.count
-    }
-
-    /// Returns the sum of all recorded values as `f64`.
-    #[inline]
-    pub const fn sum(&self) -> f64 {
-        self.hist.stats.sum
-    }
-
-    /// Returns the minimum recorded value, or 0.0 if empty.
-    #[inline]
-    pub const fn min(&self) -> f64 {
+    pub const fn stats(&self) -> Stats {
         if self.hist.stats.count == 0 {
-            0.0
+            Stats {
+                count: 0,
+                sum: 0.0,
+                min: 0.0,
+                max: 0.0,
+            }
         } else {
-            self.hist.stats.min
-        }
-    }
-
-    /// Returns the maximum recorded value, or 0.0 if empty.
-    #[inline]
-    pub const fn max(&self) -> f64 {
-        if self.hist.stats.count == 0 {
-            0.0
-        } else {
-            self.hist.stats.max
+            self.hist.stats
         }
     }
 
@@ -89,8 +74,8 @@ impl<const N: usize> HistogramView<'_, N> {
     /// Returns an iterator that estimates values at the requested quantiles.
     ///
     /// Each quantile must be in `[0.0, 1.0]` and the slice must be sorted
-    /// in non-decreasing order. By definition, quantile 0.0 yields
-    /// [`min()`](Self::min) and quantile 1.0 yields [`max()`](Self::max).
+    /// in non-decreasing order. By definition, quantile 0.0 yields the
+    /// minimum and quantile 1.0 yields the maximum.
     ///
     /// The iterator walks the histogram's CDF exactly once, using linear
     /// interpolation within the bucket that straddles each threshold.
@@ -112,9 +97,10 @@ impl<const N: usize> HistogramView<'_, N> {
             "quantiles must be in [0.0, 1.0]"
         );
 
-        let total_count = self.count();
-        let min = self.min();
-        let max = self.max();
+        let stats = self.stats();
+        let total_count = stats.count;
+        let min = stats.min;
+        let max = stats.max;
 
         let bucket_len = self.hist.range_len();
         let offset = self.hist.index_start;

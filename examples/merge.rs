@@ -9,13 +9,14 @@ use otel_expohisto::Histogram;
 
 fn print_histogram<const N: usize>(label: &str, h: &mut Histogram<N>) {
     let v = h.view();
+    let stats = v.stats();
     println!("{label}:");
     println!(
         "  count={}, sum={:.1}, min={:.1}, max={:.1}, scale={}",
-        v.count(),
-        v.sum(),
-        v.min(),
-        v.max(),
+        stats.count,
+        stats.sum,
+        stats.min,
+        stats.max,
         v.scale()
     );
     let b = v.positive();

@@ -27,12 +27,7 @@ impl<const N: usize> Histogram<N> {
     /// [`merge_from_raw`](Self::merge_from_raw).
     fn merge_as_raw<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
         self.merge_from_raw(
-            &Stats {
-                count: other.count(),
-                sum: other.sum(),
-                min: other.min(),
-                max: other.max(),
-            },
+            &other.stats(),
             &BucketDescriptor {
                 scale: other.current.scale.scale(),
                 offset: other.index_start,
@@ -76,7 +71,7 @@ impl<const N: usize> Histogram<N> {
         at: &impl Fn(u32) -> u64,
     ) -> Result<(), Error> {
         let new_count = self.checked_add_count(stats.count).ok_or(Error::Overflow)?;
-        let new_sum = self.sum() + stats.sum;
+        let new_sum = self.stats.sum + stats.sum;
 
         if buckets.len > 0 {
             let other_end = buckets.offset + buckets.len as i32 - 1;

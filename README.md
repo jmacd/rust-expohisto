@@ -49,7 +49,8 @@ hist.update(100.0).unwrap();
 
 // Access statistics through a view
 let v = hist.view();
-println!("count: {}, sum: {}", v.count(), v.sum());
+let stats = v.stats();
+println!("count: {}, sum: {}", stats.count, stats.sum);
 println!("scale: {}", v.scale());
 ```
 

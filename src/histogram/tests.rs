@@ -14,7 +14,7 @@ fn bucket_total<const N: usize>(h: &mut Histogram<N>) -> u64 {
 }
 
 fn derived_zero_count<const N: usize>(h: &mut Histogram<N>) -> u64 {
-    h.view().count() - bucket_total(h)
+    h.view().stats().count - bucket_total(h)
 }
 
 #[test]
@@ -30,9 +30,9 @@ fn test_histogram_basic() {
 fn test_histogram_zero() {
     let mut h: Histogram<16> = Histogram::new();
     h.update(0.0).unwrap();
-    assert_eq!(h.view().count(), 1);
+    assert_eq!(h.view().stats().count, 1);
     assert_eq!(derived_zero_count(&mut h), 1);
-    assert_eq!(h.view().sum(), 0.0);
+    assert_eq!(h.view().stats().sum, 0.0);
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn test_histogram_downscale() {
     let mut h: Histogram<8> = Histogram::new();
     h.update(1.0).unwrap();
     h.update(1000.0).unwrap();
-    assert_eq!(h.view().count(), 2);
+    assert_eq!(h.view().stats().count, 2);
     assert!(h.view().scale() < max_scale());
 }
 
@@ -68,8 +68,8 @@ fn test_histogram_merge() {
 #[test]
 fn test_histogram_recreate() {
     let h: Histogram<16> = Histogram::new();
-    assert_eq!(h.view().count(), 0);
-    assert_eq!(h.view().sum(), 0.0);
+    assert_eq!(h.view().stats().count, 0);
+    assert_eq!(h.view().stats().sum, 0.0);
     assert_eq!(h.view().scale(), 0);
     assert_eq!(h.width(), Width::B1);
 }
@@ -100,21 +100,21 @@ fn test_auto_widen_cascade() {
     assert_eq!(h.width(), Width::B4);
     h.update(1.0).unwrap();
     assert_eq!(h.width(), Width::U8);
-    assert_eq!(h.view().count(), 16);
+    assert_eq!(h.view().stats().count, 16);
 
     // U8 → U16 at threshold 255+1=256
     h.record_incr(1.0, 239).unwrap();
     assert_eq!(h.width(), Width::U8);
     h.update(1.0).unwrap();
     assert_eq!(h.width(), Width::U16);
-    assert_eq!(h.view().count(), 256);
+    assert_eq!(h.view().stats().count, 256);
 
     // U16 → U32 at threshold 65535+1=65536
     h.record_incr(1.0, u16::MAX as u64 - 256).unwrap();
     assert_eq!(h.width(), Width::U16);
     h.update(1.0).unwrap();
     assert_eq!(h.width(), Width::U32);
-    assert_eq!(h.view().count(), u16::MAX as u64 + 1);
+    assert_eq!(h.view().stats().count, u16::MAX as u64 + 1);
 
     // U32 → U64 at threshold 4294967295+1
     h.record_incr(1.0, u32::MAX as u64 - (u16::MAX as u64 + 1))
@@ -133,7 +133,7 @@ fn test_auto_widen_b4_to_u8_from_b4_start() {
     assert_eq!(h.width(), Width::B4);
     h.update(1.0).unwrap();
     assert_eq!(h.width(), Width::U8);
-    assert_eq!(h.view().count(), 16);
+    assert_eq!(h.view().stats().count, 16);
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn test_recreate_preserves_b4() {
         .unwrap()
         .with_min_width(Width::B4);
     assert_eq!(h.width(), Width::B4);
-    assert_eq!(h.view().count(), 0);
+    assert_eq!(h.view().stats().count, 0);
     // Record a value to verify it starts at scale 3.
     h.update(1.0).unwrap();
     assert_eq!(h.view().scale(), 3);
@@ -198,8 +198,8 @@ fn test_widen_preserves_data() {
     h.record_incr(65536.0, 200).unwrap();
 
     let (count_before, sum_before) = {
-        let v = h.view();
-        (v.count(), v.sum())
+        let s = h.view().stats();
+        (s.count, s.sum)
     };
 
     h.record_incr(65536.0, 55).unwrap();
@@ -207,9 +207,9 @@ fn test_widen_preserves_data() {
     h.update(65536.0).unwrap();
     assert_eq!(h.width(), Width::U16);
 
-    let v = h.view();
-    assert_eq!(v.count(), count_before + 56);
-    assert!((v.sum() - (sum_before + 56.0 * 65536.0)).abs() < 1.0);
+    let s = h.view().stats();
+    assert_eq!(s.count, count_before + 56);
+    assert!((s.sum - (sum_before + 56.0 * 65536.0)).abs() < 1.0);
 }
 
 #[test]
@@ -276,15 +276,15 @@ fn test_merge_equivalence_for_size<const K: usize>(test_sets: &[Vec<f64>]) {
             }
 
             let label = format!("size={K} sets {i} x {j}");
-            let merged_view = merged.view();
-            let single_view = single.view();
+            let merged_stats = merged.view().stats();
+            let single_stats = single.view().stats();
             assert_eq!(
-                merged_view.count(),
-                single_view.count(),
+                merged_stats.count,
+                single_stats.count,
                 "count mismatch for {label}"
             );
-            let ms = merged_view.sum();
-            let ss = single_view.sum();
+            let ms = merged_stats.sum;
+            let ss = single_stats.sum;
             let sum_diff = (ms - ss).abs();
             let denom = ms.abs().max(ss.abs()).max(1e-30);
             assert!(
@@ -321,10 +321,7 @@ fn test_merge_regression_bucket_total() {
     for &v in set_b {
         other.update(v).unwrap();
         let bt = bucket_total(&mut other);
-        let non_zero_count = {
-            let v = other.view();
-            v.count()
-        } - derived_zero_count(&mut other);
+        let non_zero_count = other.view().stats().count - derived_zero_count(&mut other);
         assert_eq!(
             bt, non_zero_count,
             "bucket total mismatch after inserting {v}"
@@ -358,7 +355,7 @@ fn test_edge_values_subnormals() {
     let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap();
     h.update(subnormal).unwrap();
     h.update(min_normal).unwrap();
-    assert_eq!(h.view().count(), 2);
+    assert_eq!(h.view().stats().count, 2);
     assert_eq!(h.view().positive().len(), 1);
 }
 
@@ -407,10 +404,10 @@ fn test_exhaustive_u8_overflow() {
         "expected at least U8, got {:?}",
         h.width()
     );
-    assert_eq!(h.view().count(), num_buckets as u64 * 255);
+    assert_eq!(h.view().stats().count, num_buckets as u64 * 255);
     // Adding one more should still be fine at U64 (no further widen needed).
     h.update(1.0).unwrap();
-    assert_eq!(h.view().count(), num_buckets as u64 * 255 + 1);
+    assert_eq!(h.view().stats().count, num_buckets as u64 * 255 + 1);
 }
 
 #[test]
@@ -421,22 +418,22 @@ fn test_successive_sub_byte_widening() {
         .with_min_width(Width::B4);
 
     h.update(1.0).unwrap();
-    assert_eq!(h.view().count(), 1);
+    assert_eq!(h.view().stats().count, 1);
     assert_eq!(h.width(), Width::B4);
 
     for count in 2..=15u64 {
         h.update(1.0).unwrap();
-        assert_eq!(h.view().count(), count);
+        assert_eq!(h.view().stats().count, count);
         assert_eq!(h.width(), Width::B4, "expected B4 at count {count}");
     }
 
     h.update(1.0).unwrap();
-    assert_eq!(h.view().count(), 16);
+    assert_eq!(h.view().stats().count, 16);
     assert_eq!(h.width(), Width::U8);
 
-    assert!((h.view().sum() - 16.0).abs() < 1e-10);
-    assert_eq!(h.view().min(), 1.0);
-    assert_eq!(h.view().max(), 1.0);
+    assert!((h.view().stats().sum - 16.0).abs() < 1e-10);
+    assert_eq!(h.view().stats().min, 1.0);
+    assert_eq!(h.view().stats().max, 1.0);
 }
 
 #[test]
@@ -451,17 +448,17 @@ fn test_successive_sub_byte_widening_multi_bucket() {
     for &v in &values {
         h.update(v).unwrap();
     }
-    assert_eq!(h.view().count(), num_buckets as u64);
+    assert_eq!(h.view().stats().count, num_buckets as u64);
     assert_eq!(h.width(), Width::B4);
 
     for &v in &values {
         h.update(v).unwrap();
     }
-    assert_eq!(h.view().count(), 2 * num_buckets as u64);
+    assert_eq!(h.view().stats().count, 2 * num_buckets as u64);
     assert!(h.width() >= Width::B4);
 
     let target = 16 * num_buckets as u64;
-    while h.view().count() < target {
+    while h.view().stats().count < target {
         for &v in &values {
             h.update(v).unwrap();
         }
@@ -470,12 +467,12 @@ fn test_successive_sub_byte_widening_multi_bucket() {
 
     let expected_sum: f64 = values.iter().sum::<f64>() * 16.0;
     assert!(
-        (h.view().sum() - expected_sum).abs() < 1e-6,
+        (h.view().stats().sum - expected_sum).abs() < 1e-6,
         "sum mismatch: got {} expected {}",
-        h.view().sum(),
+        h.view().stats().sum,
         expected_sum
     );
-    assert_eq!(h.view().count(), target);
+    assert_eq!(h.view().stats().count, target);
 }
 
 // -----------------------------------------------------------------------
@@ -494,9 +491,9 @@ fn test_merge_different_sizes() {
 
     collector.merge_from(&source).unwrap();
 
-    assert_eq!(collector.view().count(), 4);
+    assert_eq!(collector.view().stats().count, 4);
     assert_eq!(derived_zero_count(&mut collector), 1);
-    assert!((collector.view().sum() - 7.0).abs() < 1e-5);
+    assert!((collector.view().stats().sum - 7.0).abs() < 1e-5);
 }
 
 #[test]
@@ -511,8 +508,8 @@ fn test_merge_multiple_sources() {
         collector.merge_from(&src).unwrap();
     }
 
-    assert_eq!(collector.view().count(), 50);
-    assert!(collector.view().sum() > 0.0);
+    assert_eq!(collector.view().stats().count, 50);
+    assert!(collector.view().stats().sum > 0.0);
 }
 
 #[test]
@@ -556,8 +553,8 @@ fn test_merge_empty_into_populated() {
     let empty: Histogram<8> = Histogram::new();
     collector.merge_from(&empty).unwrap();
 
-    assert_eq!(collector.view().count(), 1);
-    assert_eq!(collector.view().sum(), 1.0);
+    assert_eq!(collector.view().stats().count, 1);
+    assert_eq!(collector.view().stats().sum, 1.0);
 }
 
 #[test]
@@ -568,8 +565,8 @@ fn test_merge_into_empty() {
 
     collector.merge_from(&source).unwrap();
 
-    assert_eq!(collector.view().count(), 1);
-    assert!((collector.view().sum() - 5.0).abs() < 1e-5);
+    assert_eq!(collector.view().stats().count, 1);
+    assert!((collector.view().stats().sum - 5.0).abs() < 1e-5);
 }
 
 // -----------------------------------------------------------------------
@@ -668,11 +665,11 @@ fn assert_swar_roundtrip(
 
 /// Helper for asserting `Stats` fields.
 fn assert_stats<const N: usize>(h: &mut Histogram<N>, count: u64, sum: f64, min: f64, max: f64) {
-    let v = h.view();
-    assert_eq!(v.count(), count, "count");
-    assert_eq!(v.sum(), sum, "sum");
-    assert_eq!(v.min(), min, "min");
-    assert_eq!(v.max(), max, "max");
+    let s = h.view().stats();
+    assert_eq!(s.count, count, "count");
+    assert_eq!(s.sum, sum, "sum");
+    assert_eq!(s.min, min, "min");
+    assert_eq!(s.max, max, "max");
 }
 
 #[test]
@@ -1380,12 +1377,13 @@ fn test_adaptive_downscale_sequential_inserts_small_pool() {
         h.update(v).unwrap();
         let total = bucket_total(&mut h);
         let view = h.view();
+        let stats = view.stats();
         assert_eq!(
             total,
-            view.count(),
+            stats.count,
             "After inserting {v}: bucket total ({total}) != count ({})\n  \
              scale={} width={:?}",
-            view.count(),
+            stats.count,
             view.scale(),
             h.width()
         );
@@ -1401,12 +1399,13 @@ fn test_adaptive_downscale_wide_span_small_pool() {
         h.update(v).unwrap();
         let total = bucket_total(&mut h);
         let view = h.view();
+        let stats = view.stats();
         assert_eq!(
             total,
-            view.count(),
+            stats.count,
             "After values[{vi}]={v}: bucket total ({total}) != count ({})\n  \
              scale={} width={:?}",
-            view.count(),
+            stats.count,
             view.scale(),
             h.width()
         );
@@ -1460,7 +1459,7 @@ fn assert_merge_result<const N: usize>(
     label: &str,
 ) {
     let expected: u64 = left.iter().chain(right).map(|&(_, i)| i).sum();
-    let count = h.view().count();
+    let count = h.view().stats().count;
     assert_eq!(count, expected, "{label}: count mismatch");
     let bt = bucket_total(h);
     assert!(bt <= count, "{label}: bt={bt} > count={count}");
@@ -1494,19 +1493,11 @@ fn test_merge_needs_downscale_in_raw() {
     h2.update(1e-30).unwrap();
 
     let h2_view = h2.view();
-    let h2_count = h2_view.count();
-    let h2_sum = h2_view.sum();
-    let h2_min = h2_view.min();
-    let h2_max = h2_view.max();
+    let h2_stats = h2_view.stats();
     let h2_scale = h2_view.scale();
     let b2 = h2_view.positive();
     h1.merge_from_raw(
-        &Stats {
-            count: h2_count,
-            sum: h2_sum,
-            min: h2_min,
-            max: h2_max,
-        },
+        &h2_stats,
         &BucketDescriptor {
             scale: h2_scale,
             offset: b2.offset(),
@@ -1515,7 +1506,7 @@ fn test_merge_needs_downscale_in_raw() {
         |i| b2.at(i),
     )
     .unwrap();
-    assert_eq!(h1.view().count(), 3);
+    assert_eq!(h1.view().stats().count, 3);
     assert_eq!(bucket_total(&mut h1), 3);
 }
 
@@ -1570,11 +1561,11 @@ fn test_merge_p64_bucket_total_exceeds_count() {
 
     // Step 3: merge h0 into h1
     h1.merge_from(&h0).unwrap();
-    assert_eq!(h1.view().count(), 41);
+    assert_eq!(h1.view().stats().count, 41);
 
     // Step 4: merge h1 into h0
     if h0.merge_from(&h1).is_ok() {
-        let count = h0.view().count();
+        let count = h0.view().stats().count;
         let bt = bucket_total(&mut h0);
         assert!(bt <= count, "bucket total ({bt}) exceeds count ({count})");
     }
@@ -1704,10 +1695,10 @@ fn repro_fuzz_merge_oracle_offset() {
         v.scale()
     );
     let bt: u64 = buckets.iter().sum();
+    let count = v.stats().count;
     assert!(
-        bt <= v.count(),
-        "bucket total ({bt}) > count ({})",
-        v.count()
+        bt <= count,
+        "bucket total ({bt}) > count ({count})",
     );
 }
 

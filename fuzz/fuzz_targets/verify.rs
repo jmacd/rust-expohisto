@@ -10,7 +10,8 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
     let total_count: u64 = ops.iter().map(|&(_, incr)| incr).sum();
 
     let v = hist.view();
-    assert_eq!(v.count(), total_count, "{label}: count mismatch");
+    let stats = v.stats();
+    assert_eq!(stats.count, total_count, "{label}: count mismatch");
 
     if total_count == 0 {
         assert_eq!(v.positive().len(), 0, "{label}: should have no buckets");
@@ -22,8 +23,8 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
     let expected_min = non_zero_ops.clone().map(|&(v, _)| v).fold(f64::INFINITY, f64::min);
     let expected_max = non_zero_ops.clone().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
     if expected_min != f64::INFINITY {
-        assert_eq!(v.min(), expected_min, "{label}: min mismatch");
-        assert_eq!(v.max(), expected_max, "{label}: max mismatch");
+        assert_eq!(stats.min, expected_min, "{label}: min mismatch");
+        assert_eq!(stats.max, expected_max, "{label}: max mismatch");
     }
 
     // zero count
@@ -34,7 +35,7 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         .sum();
     let expected_zero_count = total_count - non_zero_total;
 
-    let count = v.count();
+    let count = stats.count;
     let scale = v.scale();
     let buckets = v.positive();
     let bucket_total: u64 = buckets.iter().sum();

@@ -266,10 +266,11 @@ All read access goes through `view()`, which promotes from literal mode if neede
 
 ```rust,ignore
 let v = h.view();
-v.count()                      // u64  — total observations
-v.sum()                        // f64  — arithmetic sum
-v.min()                        // f64  — minimum value
-v.max()                        // f64  — maximum value
+let s = v.stats();
+s.count                        // u64  — total observations
+s.sum                          // f64  — arithmetic sum
+s.min                          // f64  — minimum value
+s.max                          // f64  — maximum value
 v.scale()                      // i32  — current mapping scale
 
 // Iterate over non-empty positive buckets

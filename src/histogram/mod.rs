@@ -255,11 +255,12 @@ impl<const N: usize> Clone for Histogram<N> {
 impl<const N: usize> fmt::Debug for Histogram<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = f.debug_struct("Histogram");
+        let stats = self.stats();
         s.field("width", &self.current.width)
-            .field("count", &self.count())
-            .field("sum", &self.sum())
-            .field("min", &self.min())
-            .field("max", &self.max())
+            .field("count", &stats.count)
+            .field("sum", &stats.sum)
+            .field("min", &stats.min)
+            .field("max", &stats.max)
             .field("scale", &self.current.scale.scale())
             .field("bucket_len", &self.range_len());
         s.finish()
@@ -277,28 +278,10 @@ impl<const N: usize> Default for Histogram<N> {
 // ---------------------------------------------------------------------------
 
 impl<const N: usize> Histogram<N> {
-    /// Returns the sum of all recorded values as `f64`.
+    /// Returns the aggregate statistics (count, sum, min, max).
     #[inline]
-    pub(crate) const fn sum(&self) -> f64 {
-        self.stats.sum
-    }
-
-    /// Returns the count of all recorded values.
-    #[inline]
-    pub(crate) const fn count(&self) -> u64 {
-        self.stats.count
-    }
-
-    /// Returns the minimum recorded value.
-    #[inline]
-    pub(crate) const fn min(&self) -> f64 {
-        self.stats.min
-    }
-
-    /// Returns the maximum recorded value.
-    #[inline]
-    pub(crate) const fn max(&self) -> f64 {
-        self.stats.max
+    pub(crate) const fn stats(&self) -> Stats {
+        self.stats
     }
 
     /// Checked increment of count by `incr`. Returns `None` on overflow.

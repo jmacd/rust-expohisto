@@ -234,23 +234,24 @@ mod tests {
 
         let qs = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0];
         let view = h.view();
+        let stats = view.stats();
         let iter = view.quantiles(&qs);
         assert_eq!(iter.len(), qs.len(), "ExactSizeIterator");
         let vals: Vec<_> = iter.collect();
 
         // p0 = min, p100 = max.
-        assert_eq!(vals[0].value, view.min());
-        assert_eq!(vals[qs.len() - 1].value, view.max());
+        assert_eq!(vals[0].value, stats.min);
+        assert_eq!(vals[qs.len() - 1].value, stats.max);
 
         // All values clamped to [min, max].
         for v in &vals {
             assert!(
-                v.value >= view.min() && v.value <= view.max(),
+                v.value >= stats.min && v.value <= stats.max,
                 "q={} value {} outside [{}, {}]",
                 v.quantile,
                 v.value,
-                view.min(),
-                view.max()
+                stats.min,
+                stats.max
             );
         }
 
@@ -302,10 +303,11 @@ mod tests {
         }
         let qs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
         let view = h.view();
+        let stats = view.stats();
         let vals: Vec<_> = view.quantiles(&qs).collect();
 
-        assert_eq!(vals[0].value, view.min());
-        assert_eq!(vals[100].value, view.max());
+        assert_eq!(vals[0].value, stats.min);
+        assert_eq!(vals[100].value, stats.max);
 
         for w in vals.windows(2) {
             assert!(
@@ -342,7 +344,7 @@ mod tests {
         let histogram_view = h.view();
         let scale = histogram_view.scale();
         let mapping = Scale::new(scale).unwrap();
-        let total = histogram_view.count() as f64;
+        let total = histogram_view.stats().count as f64;
         let view = histogram_view.positive();
 
         // Collect (observed, expected) per bucket, merging on the fly.
@@ -429,16 +431,17 @@ mod tests {
             // Spot-check p0, p50, p100.
             let qs = [0.0, 0.5, 1.0];
             let view = h.view();
+            let stats = view.stats();
             let vals: Vec<_> = view.quantiles(&qs).collect();
             assert_eq!(
                 vals[0].value,
-                view.min(),
+                stats.min,
                 "{}: p0 must equal min",
                 case.name
             );
             assert_eq!(
                 vals[2].value,
-                view.max(),
+                stats.max,
                 "{}: p100 must equal max",
                 case.name
             );

@@ -94,7 +94,7 @@ impl<const N: usize> Histogram<N> {
             self.initial.width
         };
 
-        if self.count() <= spec_width.counter_max() {
+        if self.stats.count <= spec_width.counter_max() {
             self.downscale_safe(&ctx, spec_width);
             Ok(())
         } else {

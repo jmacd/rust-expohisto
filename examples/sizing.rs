@@ -73,10 +73,11 @@ fn main() {
     }
 
     let v = h.view();
+    let stats = v.stats();
     println!(
         "Histogram<16> with scale=4 after {} values spanning {:.0}x range:",
-        v.count(),
-        v.max() / v.min()
+        stats.count,
+        stats.max / stats.min
     );
     let bw = v.positive().width();
     println!(
