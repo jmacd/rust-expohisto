@@ -10,7 +10,7 @@
 //! fixups and is SIMD-friendly.
 
 use super::Histogram;
-use super::width::Width;
+use super::width::{ALL_WIDTHS, Width};
 
 /// Captured old-layout state for a downscale operation.
 ///
@@ -76,6 +76,8 @@ impl<const N: usize> Histogram<N> {
         }
 
         let old_data = self.data;
+        let new_start = self.index_start >> change;
+        let new_end = self.index_end >> change;
         let ctx = DownscaleCtx {
             change,
             old_data: &old_data,
@@ -83,15 +85,17 @@ impl<const N: usize> Histogram<N> {
             old_base: self.index_base,
             old_start: self.index_start,
             old_end: self.index_end,
-            new_start: self.index_start >> change,
-            new_end: self.index_end >> change,
+            new_start,
+            new_end,
         };
 
-        let spec_width = if min_width > self.initial.width {
-            min_width
-        } else {
-            self.initial.width
-        };
+        let spec_width = Self::speculative_width(
+            self.stats.count,
+            (new_end - new_start + 1) as u64,
+            self.current.width,
+            change,
+            min_width.max(self.initial.width),
+        );
 
         if self.stats.count <= spec_width.counter_max() {
             self.downscale_safe(&ctx, spec_width);
@@ -99,6 +103,43 @@ impl<const N: usize> Histogram<N> {
         } else {
             self.downscale_speculative(&ctx, spec_width)
         }
+    }
+
+    /// Computes a speculative output width for the downscale pass.
+    ///
+    /// Uses two bounds to bracket the needed width:
+    ///
+    /// - **Floor** (pigeonhole): `count / num_groups` is the average
+    ///   group sum; at least one group must be ≥ this value, so any
+    ///   width below `from_max_value(average)` is provably too small.
+    ///
+    /// - **Ceiling** (worst case): each group sums at most `2^change`
+    ///   counters each at `counter_max(current_width)`, so the output
+    ///   width never exceeds `level(current_width) + change`.  When
+    ///   floor == ceiling the width is exact and no repair is needed.
+    ///
+    /// The result is clamped to at least `min_width`.
+    fn speculative_width(
+        count: u64,
+        num_groups: u64,
+        current_width: Width,
+        change: u32,
+        min_width: Width,
+    ) -> Width {
+        // Floor: average group sum.  At least one group has ≥ this.
+        let avg = count / num_groups.max(1);
+        let floor = Width::from_max_value(avg).unwrap_or(Width::B1);
+
+        // Ceiling: worst-case group sum.
+        let target_level = current_width.level() + change as usize;
+        let ceiling = if target_level <= 6 {
+            ALL_WIDTHS[target_level]
+        } else {
+            Width::U64
+        };
+
+        // Pick the tightest bound, clamped to [min_width, ceiling].
+        floor.max(min_width).min(ceiling)
     }
 
     /// Safe path: `count ≤ counter_max`, so no group can overflow.
