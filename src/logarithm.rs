@@ -7,7 +7,7 @@
 //! It has floating-point precision errors near bucket boundaries but requires
 //! no lookup tables and works for all positive scales.
 
-use crate::float64::{get_normal_base2, get_significand};
+use crate::float64::{get_significand, get_unbiased_exponent};
 
 /// Pre-computed `LOG2_E * 2^scale` for scales 0..=20.
 ///
@@ -35,7 +35,7 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
 
     let significand = get_significand(value);
-    let exp = get_normal_base2(value);
+    let exp = get_unbiased_exponent(value);
 
     // Exact power-of-two: significand is 0, index is (exp << scale) - 1.
     // We use the exponent directly rather than ln() to avoid FP imprecision.

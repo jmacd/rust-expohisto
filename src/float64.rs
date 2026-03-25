@@ -51,9 +51,7 @@ pub const fn unbias_exponent(biased: u32) -> i32 {
 /// Inf or NaN.
 #[inline]
 pub const fn get_biased_exponent(value: f64) -> u32 {
-    let raw_bits = value.to_bits();
-    let raw_exponent = ((raw_bits & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as u32;
-    raw_exponent
+    ((value.to_bits() & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as u32
 }
 
 /// Returns the 52-bit significand as an unsigned value.

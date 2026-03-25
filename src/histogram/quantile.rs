@@ -172,13 +172,13 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
 
 impl<const N: usize> ExactSizeIterator for QuantileIter<'_, N> {}
 
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::eprintln;
 
     #[test]
     fn test_quantile_empty_histogram() {
-        let mut h: Histogram<8> = Histogram::new();
+        let h: Histogram<8> = Histogram::new();
         let qs = [0.0, 0.5, 1.0];
         let v = h.view();
         let vals: Vec<_> = v.quantiles(&qs).collect();

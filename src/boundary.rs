@@ -22,12 +22,24 @@ const fn max_normal_index_exp(scale: i32) -> i32 {
     MAX_NORMAL_EXPONENT >> shift
 }
 
+/// Minimum valid bucket index for `lower_boundary` at a non-positive scale.
+#[inline]
+const fn min_normal_lower_boundary_index(scale: i32) -> i32 {
+    let shift = (-scale) as u32;
+    let mut idx = MIN_NORMAL_EXPONENT >> shift;
+    if shift < 2 {
+        // For scales -1 and 0, 2^-1022 is a power-of-two multiple
+        idx -= 1;
+    }
+    idx
+}
+
 /// Returns the lower boundary of a bucket at non-positive scale.
 fn lower_boundary_exponent(index: i32, scale: i32) -> Result<f64, ScaleError> {
     debug_assert!(scale <= 0);
     let shift = (-scale) as u32;
 
-    if index < crate::exponent::min_normal_lower_boundary_index(scale) {
+    if index < min_normal_lower_boundary_index(scale) {
         return Err(ScaleError::Underflow);
     }
     if index > max_normal_index_exp(scale) {

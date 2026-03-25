@@ -368,25 +368,25 @@ fn test_edge_values_subnormals() {
 /// produces unspecified statistical results.
 #[test]
 fn test_nan_and_negative_debug_asserts() {
-    // NaN and negative values trigger debug_assert in record().
-    // In release mode they produce unspecified but safe results.
+    // NaN, Inf, and negative values return Err(Extreme).
     let mut h: Histogram<16> = Histogram::new();
     h.update(1.0).unwrap();
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut h2 = h.clone();
-        h2.update(f64::NAN).unwrap();
-    }));
-    assert!(result.is_err(), "NaN should trigger debug_assert");
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut h2 = h.clone();
-        h2.update(-1.0).unwrap();
-    }));
+    assert!(h.clone().update(f64::NAN).is_err(), "NaN should return Err");
     assert!(
-        result.is_err(),
-        "negative values should trigger debug_assert"
+        h.clone().update(f64::INFINITY).is_err(),
+        "Inf should return Err"
     );
+    assert!(
+        h.clone().update(f64::NEG_INFINITY).is_err(),
+        "NEG_INFINITY should return Err"
+    );
+    assert!(
+        h.clone().update(-1.0).is_err(),
+        "negative values should return Err"
+    );
+    // -0.0 is treated as 0.0 (zero bucket)
+    assert!(h.clone().update(-0.0).is_ok(), "-0.0 should be accepted");
 }
 
 #[test]

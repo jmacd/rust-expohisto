@@ -95,8 +95,9 @@ impl Scale {
         }
     }
 
-    /// Test version
-    #[cfg(test)]
+    /// Maps a f64 value to a bucket index. Ignores sign.
+    ///
+    /// Handles subnormals by clamping to `MIN_VALUE`.
     pub fn map_to_index(&self, mut value: f64) -> i32 {
         debug_assert!(!value.is_infinite());
         debug_assert!(!value.is_nan());

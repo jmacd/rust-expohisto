@@ -8,8 +8,8 @@
 
 use core::fmt;
 
-use crate::float64::{NAN_INF_BIASED, get_biased_exponent, get_significand, unbias_exponent};
-use crate::mapping::{Scale, ScaleError, max_scale};
+use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
+use crate::mapping::{max_scale, Scale, ScaleError};
 
 mod bucket_ops;
 mod merge;
@@ -609,11 +609,17 @@ impl<const N: usize> Histogram<N> {
     /// but in practice histograms should be flushed and reset long
     /// before `u64` exhaustion.
     pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Error> {
-        // Extract the raw exponent.
+        // Extract the raw exponent and significand (sign bit is ignored).
         let mut biased_exp = get_biased_exponent(value);
         let mut significand = get_significand(value);
 
-        let new_count = self.checked_add_count(1).ok_or(Error::Overflow)?;
+        // Reject negative values (sign bit set, excluding -0.0 which
+        // falls through to the zero case below).
+        if value.is_sign_negative() && (biased_exp != 0 || significand != 0) {
+            return Err(Error::Extreme);
+        }
+
+        let new_count = self.checked_add_count(incr).ok_or(Error::Overflow)?;
 
         // Handle the extreme cases.
         match biased_exp {

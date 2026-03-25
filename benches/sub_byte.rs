@@ -82,7 +82,7 @@ fn bench_sub_byte(c: &mut Criterion) {
                             .unwrap()
                             .with_min_width(min_w);
                         for &v in &values {
-                            h.record(black_box(v), reps).unwrap();
+                            h.record_incr(black_box(v), reps).unwrap();
                         }
                         black_box(&h);
                     })

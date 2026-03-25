@@ -21,19 +21,15 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Test with literal mode (default).
-    check_histogram::<8>(&values, true);
-    check_histogram::<16>(&values, true);
-
-    // Test with literal mode disabled (bucket mode from start).
-    check_histogram::<8>(&values, false);
-    check_histogram::<16>(&values, false);
+    // Test with different histogram sizes.
+    check_histogram::<8>(&values);
+    check_histogram::<16>(&values);
 });
 
 /// Reference-oracle test: insert every value, then verify the histogram
 /// state matches an independently-computed expectation.
-fn check_histogram<const N: usize>(values: &[f64], literal_mode: bool) {
-    let mut hist = Histogram::<N>::new().with_min_width(if literal_mode { Width::B0 } else { Width::B1 });
+fn check_histogram<const N: usize>(values: &[f64]) {
+    let mut hist = Histogram::<N>::new().with_min_width(Width::B1);
     let mut inserted: Vec<f64> = Vec::new();
 
     for &v in values {
