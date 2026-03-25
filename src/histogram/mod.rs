@@ -665,7 +665,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     fn downscale_by(&mut self, change: u32) -> Result<(), Error> {
-        if change <= 0 {
+        if change == 0 {
             return Ok(());
         }
 
