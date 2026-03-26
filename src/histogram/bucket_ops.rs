@@ -4,9 +4,11 @@
 //! Bucket operations — widen and downscale.
 //!
 //! Downscale merges groups of `2^change` adjacent buckets by summing
-//! their counters.  When possible the implementation uses SWAR
-//! (SIMD Within A Register) to sum packed counters in parallel,
-//! falling back to scalar accumulation at U64 width.
+//! their counters.  When groups fit in a single word the
+//! implementation uses SWAR (SIMD Within A Register) to sum packed
+//! counters in parallel.  When groups span multiple words (including
+//! U64 width), SWAR widens each word to a single U64 value, then
+//! each output group's words are summed directly by index.
 
 use super::Histogram;
 use super::swar::swar_step;
@@ -19,12 +21,6 @@ impl<const N: usize> Histogram<N> {
     /// `min_width` sets a floor on the output width (use the current
     /// width for a normal downscale, or the next wider width when
     /// a counter overflow forces widening).
-    ///
-    /// Since `index_base` is always word-aligned (a multiple of
-    /// `slots_per_word`), SWAR pair boundaries always align with
-    /// group boundaries for the in-word case.  For cross-word
-    /// groups (change > log2(spw)), word offsets are computed
-    /// directly from the word-aligned base.
     pub(super) fn do_downscale(
         &mut self,
         change: u32,
@@ -41,12 +37,12 @@ impl<const N: usize> Histogram<N> {
         let num_groups = (new_end - new_start + 1) as usize;
 
         let width = self.current.width;
+        let spw = width.slots_per_word();
 
-        // At U64 the data is a ring buffer; use scalar path.
+        // How many SWAR doublings fit within a word.
         let swar_steps = if width == Width::U64 {
             0u32
         } else {
-            let spw = width.slots_per_word();
             change.min(spw.trailing_zeros())
         };
 
@@ -58,26 +54,101 @@ impl<const N: usize> Histogram<N> {
             min_width.max(self.initial.width),
         );
 
-        if swar_steps > 0 {
-            self.do_downscale_swar(
+        if swar_steps == change {
+            // Groups fit in one word — full SWAR, extract lanes.
+            self.downscale_intra_word(
                 change, swar_steps, new_start, new_end, num_groups, spec_width,
             )
         } else {
-            self.do_downscale_scalar(
-                change, new_start, new_end, num_groups, spec_width,
+            // Groups span words — SWAR to U64, then direct
+            // group-sum by word index.
+            self.downscale_inter_word(
+                change, swar_steps, new_start, new_end, num_groups, spec_width,
             )
         }
     }
 
-    /// SWAR path: reduce in parallel, extract, repack.
+    /// Intra-word path: SWAR reduces each group entirely within a
+    /// word, then extract the widened lanes.
     ///
     /// `index_base` is always a multiple of `slots_per_word` (set by
-    /// `word_start`).  For in-word groups (`group_size ≤ spw`) this
-    /// guarantees SWAR pair alignment.  For cross-word groups
-    /// (`group_size > spw`) the SWAR pairs are still correct (they
-    /// only need spw-alignment); the word offsets are computed
-    /// directly from `index_base`.
-    fn do_downscale_swar(
+    /// `word_start`).  Since `group_size ≤ spw`, `index_base` is
+    /// also a multiple of `group_size`, so SWAR pair boundaries
+    /// naturally align with group boundaries.
+    fn downscale_intra_word(
+        &mut self,
+        change: u32,
+        swar_steps: u32,
+        new_start: i32,
+        _new_end: i32,
+        num_groups: usize,
+        spec_width: Width,
+    ) -> Result<(), super::Error> {
+        let group_size = 1i32 << change;
+        let width = self.current.width;
+        let swar_width = ALL_WIDTHS[width.level() + swar_steps as usize];
+        let swar_spw = swar_width.slots_per_word();
+        let swar_bits = swar_width.bits();
+        let swar_mask = swar_width.counter_max();
+
+        // SWAR reduce.
+        let data_words = self.data_word_count();
+        {
+            let mut cw = width;
+            for _ in 0..swar_steps {
+                swar_step(&mut self.data[..data_words], cw);
+                cw = ALL_WIDTHS[cw.level() + 1];
+            }
+        }
+
+        // Lane 0 corresponds to index_base (which is group-aligned).
+        // Output group g is at lane (lane_offset + g).
+        let lane_offset = ((new_start * group_size - self.index_base)
+            / (1i32 << swar_steps)) as usize;
+
+        // Find max group sum for width selection.
+        let mut max_sum: u64 = 0;
+        for g in 0..num_groups {
+            let lane = lane_offset + g;
+            let wi = lane / swar_spw;
+            let li = lane % swar_spw;
+            let val = (self.data[wi] >> (li * swar_bits)) & swar_mask;
+            max_sum = max_sum.max(val);
+        }
+
+        // Repack at target width.
+        let actual_width = Width::from_max_value(max_sum)
+            .unwrap_or(Width::B1)
+            .max(spec_width);
+        let base = actual_width.word_start(new_start);
+        let widened_data = self.data;
+        self.data = [0u64; N];
+
+        for g in 0..num_groups {
+            let lane = lane_offset + g;
+            let wi = lane / swar_spw;
+            let li = lane % swar_spw;
+            let val = (widened_data[wi] >> (li * swar_bits)) & swar_mask;
+            let slot = (new_start + g as i32 - base) as usize;
+            Self::set_in(&mut self.data, slot, actual_width, val);
+        }
+
+        self.current.width = actual_width;
+        self.index_base = base;
+        self.index_start = new_start;
+        self.index_end = _new_end;
+        Ok(())
+    }
+
+    /// Inter-word path: groups span multiple words.
+    ///
+    /// After SWAR-widening to U64 (if sub-U64), each data word holds
+    /// one U64 counter.  For each output group we compute which data
+    /// words fall in that group's index range and sum them directly.
+    /// The group sums are written to `data[0..num_groups]` in-place
+    /// (safe because output index g < first source index for g ≥ 1),
+    /// then repacked at the target width.
+    fn downscale_inter_word(
         &mut self,
         change: u32,
         swar_steps: u32,
@@ -89,19 +160,20 @@ impl<const N: usize> Histogram<N> {
         let group_size = 1i32 << change;
         let width = self.current.width;
         let spw = width.slots_per_word() as i32;
-        let swar_width = ALL_WIDTHS[width.level() + swar_steps as usize];
-        let swar_spw = swar_width.slots_per_word();
-        let swar_bits = swar_width.bits();
-        let swar_mask = swar_width.counter_max();
-        let words_per_group: usize = if swar_steps < change {
-            1 << (change - swar_steps)
-        } else {
-            1
-        };
-
-        // --- SWAR reduce ---
         let data_words = self.data_word_count();
-        {
+
+        // Step 1: SWAR-widen each word to a single U64 value.
+        if width == Width::U64 {
+            // Ring buffer → linearize so word w = index_base + w.
+            let mut linear = [0u64; N];
+            for idx in self.index_start..=self.index_end {
+                let ring_slot = (idx - self.index_base).rem_euclid(N as i32) as usize;
+                let dest = (idx - self.index_start) as usize;
+                linear[dest] = self.data[ring_slot];
+            }
+            self.data = linear;
+            self.index_base = self.index_start;
+        } else {
             let mut cw = width;
             for _ in 0..swar_steps {
                 swar_step(&mut self.data[..data_words], cw);
@@ -109,160 +181,50 @@ impl<const N: usize> Histogram<N> {
             }
         }
 
-        // After SWAR, lane k at swar_width holds the sum of
-        // 2^swar_steps original slots starting at slot k*2^swar_steps.
+        // Step 2: Sum each output group's words directly.
         //
-        // For in-word groups (words_per_group == 1):
-        //   Output group g is at lane (group_start - index_base) / 2^swar_steps
-        //   where group_start = (new_start + g) * group_size.
-        //   Since index_base is spw-aligned and group_size <= spw,
-        //   this simplifies to lane_offset + g.
+        // After step 1, data word w covers original indices
+        // [index_base + w*spw, index_base + (w+1)*spw).  Output
+        // group g covers original indices
+        // [(new_start+g)*group_size, (new_start+g+1)*group_size).
         //
-        // For cross-word groups (words_per_group > 1):
-        //   Each word is one U64 value after SWAR to U64.
-        //   Word w covers original slots [w*spw, (w+1)*spw).
-        //   Output group g's first word = (group_start - index_base) / spw.
-
-        // --- Find max group sum ---
-        let mut max_sum: u64 = 0;
-
-        if words_per_group > 1 {
-            for g in 0..num_groups {
-                let group_start = (new_start + g as i32) * group_size;
-                let first_word = (group_start - self.index_base) / spw;
-                let mut acc: u64 = 0;
-                for w in 0..words_per_group as i32 {
-                    let wi = first_word + w;
-                    if wi >= 0 && (wi as usize) < data_words {
-                        acc = acc
-                            .checked_add(self.data[wi as usize])
-                            .ok_or(super::Error::Overflow)?;
-                    }
-                }
-                max_sum = max_sum.max(acc);
-            }
-        } else {
-            let lane_offset = ((new_start * group_size - self.index_base)
-                / (1i32 << swar_steps)) as usize;
-            for g in 0..num_groups {
-                let lane = lane_offset + g;
-                let wi = lane / swar_spw;
-                let li = lane % swar_spw;
-                let val = (self.data[wi] >> (li * swar_bits)) & swar_mask;
-                max_sum = max_sum.max(val);
-            }
-        }
-
-        // --- Repack at target width ---
-        let actual_width = Width::from_max_value(max_sum)
-            .unwrap_or(Width::B1)
-            .max(spec_width);
-        let base = actual_width.word_start(new_start);
-        let widened_data = self.data;
-        self.data = [0u64; N];
-
-        if words_per_group > 1 {
-            for g in 0..num_groups {
-                let group_start = (new_start + g as i32) * group_size;
-                let first_word = (group_start - self.index_base) / spw;
-                let mut acc: u64 = 0;
-                for w in 0..words_per_group as i32 {
-                    let wi = first_word + w;
-                    if wi >= 0 && (wi as usize) < data_words {
-                        acc = acc.wrapping_add(widened_data[wi as usize]);
-                    }
-                }
-                let slot = (new_start + g as i32 - base) as usize;
-                Self::set_in(&mut self.data, slot, actual_width, acc);
-            }
-        } else {
-            let lane_offset = ((new_start * group_size - self.index_base)
-                / (1i32 << swar_steps)) as usize;
-            for g in 0..num_groups {
-                let lane = lane_offset + g;
-                let wi = lane / swar_spw;
-                let li = lane % swar_spw;
-                let val = (widened_data[wi] >> (li * swar_bits)) & swar_mask;
-                let slot = (new_start + g as i32 - base) as usize;
-                Self::set_in(&mut self.data, slot, actual_width, val);
-            }
-        }
-
-        self.current.width = actual_width;
-        self.index_base = base;
-        self.index_start = new_start;
-        self.index_end = new_end;
-        Ok(())
-    }
-
-    /// Scalar fallback: read each counter individually, sum groups,
-    /// write output.  Used when SWAR alignment doesn't fit or at U64
-    /// width.
-    fn do_downscale_scalar(
-        &mut self,
-        change: u32,
-        new_start: i32,
-        new_end: i32,
-        num_groups: usize,
-        spec_width: Width,
-    ) -> Result<(), super::Error> {
-        let group_size = 1i32 << change;
-        let old_data = self.data;
-        let old_width = self.current.width;
-        let old_base = self.index_base;
-        let old_start = self.index_start;
-        let old_end = self.index_end;
-        let old_spw = old_width.slots_per_word();
-        let old_bits = old_width.bits();
-        let old_mask = old_width.counter_max();
-
-        // First pass: find the max group sum.
+        // Map group boundaries to word indices and sum the
+        // overlapping range, clamped to [0, data_words).
         let mut max_sum: u64 = 0;
         for g in 0..num_groups {
-            let ni = new_start + g as i32;
-            let lo = (ni * group_size).max(old_start);
-            let hi = (ni * group_size + group_size - 1).min(old_end);
+            let group_lo = (new_start + g as i32) * group_size;
+            let group_hi = group_lo + group_size; // exclusive
+            // Word range (may extend beyond actual data).
+            let w_lo = ((group_lo - self.index_base) / spw).max(0) as usize;
+            let w_hi = (((group_hi - self.index_base) + spw - 1) / spw)
+                .max(0) as usize;
+            let w_lo = w_lo.min(data_words);
+            let w_hi = w_hi.min(data_words);
+
             let mut acc: u64 = 0;
-            for idx in lo..=hi {
-                let slot = if matches!(old_width, Width::U64) {
-                    (idx - old_base).rem_euclid(N as i32) as usize
-                } else {
-                    (idx - old_base) as usize
-                };
-                let wi = slot / old_spw;
-                let li = slot % old_spw;
-                let val = (old_data[wi] >> (li * old_bits)) & old_mask;
-                acc = acc.checked_add(val).ok_or(super::Error::Overflow)?;
+            for w in w_lo..w_hi {
+                acc = acc
+                    .checked_add(self.data[w])
+                    .ok_or(super::Error::Overflow)?;
             }
+            self.data[g] = acc;
             max_sum = max_sum.max(acc);
         }
+        // Zero tail.
+        for w in num_groups..N {
+            self.data[w] = 0;
+        }
 
-        // Determine output width.
+        // Step 3: Repack the U64 group sums at the target width.
         let actual_width = Width::from_max_value(max_sum)
             .unwrap_or(Width::B1)
             .max(spec_width);
         let base = actual_width.word_start(new_start);
-
-        // Second pass: repack at target width.
+        let sums = self.data;
         self.data = [0u64; N];
-        for g in 0..num_groups {
-            let ni = new_start + g as i32;
-            let lo = (ni * group_size).max(old_start);
-            let hi = (ni * group_size + group_size - 1).min(old_end);
-            let mut acc: u64 = 0;
-            for idx in lo..=hi {
-                let slot = if matches!(old_width, Width::U64) {
-                    (idx - old_base).rem_euclid(N as i32) as usize
-                } else {
-                    (idx - old_base) as usize
-                };
-                let wi = slot / old_spw;
-                let li = slot % old_spw;
-                let val = (old_data[wi] >> (li * old_bits)) & old_mask;
-                acc = acc.wrapping_add(val);
-            }
-            let out_slot = (ni - base) as usize;
-            Self::set_in(&mut self.data, out_slot, actual_width, acc);
+        for (g, &val) in sums[..num_groups].iter().enumerate() {
+            let slot = (new_start + g as i32 - base) as usize;
+            Self::set_in(&mut self.data, slot, actual_width, val);
         }
 
         self.current.width = actual_width;
