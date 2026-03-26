@@ -1791,3 +1791,4 @@ fn repro_fuzz_stateful_update_atomicity() {
     // This may fail with Overflow — exercise the path.
     let _ = h.record_incr(v3, 8388608);
 }
+

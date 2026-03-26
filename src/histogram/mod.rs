@@ -669,8 +669,6 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        debug_assert!(!self.buckets_empty());
-
         self.do_downscale(change, self.current.width)?;
         self.change_scale(change);
         Ok(())
