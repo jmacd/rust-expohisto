@@ -26,14 +26,9 @@ pub use quantile::{QuantileIter, QuantileValue};
 
 mod view;
 pub use view::HistogramView;
-
 pub use width::Width;
 
-/// Compact histogram configuration: scale + counter width in 2 bytes.
-///
-/// Used as both the "initial" settings (configured at construction time,
-/// restored on reset) and the "current" settings (mutated during
-/// downscale/widen operations).
+/// Compact histogram configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Settings {
@@ -62,12 +57,6 @@ impl Settings {
 }
 
 /// Error returned when the total count would exceed `u64::MAX`.
-///
-/// The total count is checked before any bucket mutation.  Because the
-/// total is always >= any individual bucket count, a `u64`-width bucket
-/// counter cannot overflow once the total-count check passes.  In
-/// practice, callers should flush and reset histograms periodically
-/// long before `u64` exhaustion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Error {
     /// Overflow of a u64 counter.
@@ -88,14 +77,7 @@ impl fmt::Display for Error {
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
-// ---------------------------------------------------------------------------
-// Aggregate stats and bucket descriptor — used by merge_from_raw
-// ---------------------------------------------------------------------------
-
 /// Aggregate statistics of a histogram: count, sum, min, max.
-///
-/// Used by [`Histogram::merge_from_raw`] to pass the source histogram's
-/// statistics without requiring a full `Histogram` instance.
 #[derive(Debug, Clone, Copy)]
 pub struct Stats {
     /// Total number of observations.
@@ -109,9 +91,7 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// Empty stats — `min` is `INFINITY` and `max` is `NEG_INFINITY`
-    /// so that the first observation overwrites both unconditionally via
-    /// `f64::min`/`f64::max`.
+    /// Empty stats.
     pub const EMPTY: Self = Self {
         count: 0,
         sum: 0.0,
@@ -134,10 +114,7 @@ pub struct BucketDescriptor {
     pub len: u32,
 }
 
-// ---------------------------------------------------------------------------
-// High-low range helpers
-// ---------------------------------------------------------------------------
-
+/// High-low range helper.
 #[derive(Debug, Clone, Copy)]
 struct HighLow {
     low: i32,
@@ -174,6 +151,18 @@ impl HighLow {
             },
         }
     }
+
+    /// Computes how much downscaling is needed.
+    #[inline]
+    const fn change_steps(mut self, size: usize) -> u32 {
+        let mut change = 0;
+        while (self.high - self.low) as usize >= size {
+            self.high >>= 1;
+            self.low >>= 1;
+            change += 1;
+        }
+        change
+    }
 }
 
 /// Result of attempting to increment a bucket.
@@ -183,58 +172,17 @@ enum IncrResult {
     CounterOverflow,
 }
 
-/// Computes how much downscaling is needed for indices to fit in `size` buckets.
-#[inline]
-const fn scale_reduction(mut hl: HighLow, size: usize) -> u32 {
-    let mut change = 0;
-    while (hl.high - hl.low) as usize >= size {
-        hl.high >>= 1;
-        hl.low >>= 1;
-        change += 1;
-    }
-    change
-}
-
-// ---------------------------------------------------------------------------
-// Histogram<N> — the unified flat-layout histogram
-// ---------------------------------------------------------------------------
-
 /// An allocation-free exponential histogram for non-negative values.
-///
-/// `N` is the number of `u64` words in the data pool. The entire pool
-/// is used for bucket counter data.  Aggregate statistics (count,
-/// sum, min, max) are stored in separate struct fields.
-///
-/// # Positive Buckets Only
-///
-/// This histogram only maintains positive buckets. Negative values are
-/// rejected by [`record()`](Self::record). The OTel exponential histogram
-/// data model defines both positive and negative bucket arrays; this
-/// crate implements the positive side only, which is sufficient for
-/// latency, size, and other non-negative metrics.
-///
-/// # Counter Widening
-///
-/// Bucket counters start at 1-bit and auto-widen in place
-/// (B0→B1→B2→B4→U8→U16→U32→U64) via combined downscale+widen
-/// when a counter saturates.
-///
-/// At minimum, `N` should be 8 (64 bytes of pool), giving 8 bucket words
-/// (128 B4 buckets or 8 U64 buckets).
 pub struct Histogram<const N: usize> {
-    // -- Settings: initial (restored on reset) and current --
     initial: Settings,
     current: Settings,
 
-    // -- Bucket index state --
-    index_base: i32,
-    index_start: i32,
-    index_end: i32,
+    word_base: i32,
+    word_start: i32,
+    word_end: i32,
 
-    // -- Aggregate statistics (min/max/sum/count) --
     stats: Stats,
 
-    // -- Data pool: bucket counters --
     data: [u64; N],
 }
 
@@ -243,9 +191,9 @@ impl<const N: usize> Clone for Histogram<N> {
         Self {
             initial: self.initial,
             current: self.current,
-            index_base: self.index_base,
-            index_start: self.index_start,
-            index_end: self.index_end,
+            word_base: self.word_base,
+            word_start: self.word_start,
+            word_end: self.word_end,
             stats: self.stats,
             data: self.data,
         }
@@ -262,8 +210,8 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
             .field("min", &stats.min)
             .field("max", &stats.max)
             .field("scale", &self.current.scale.scale())
-            .field("bucket_len", &self.range_len());
-        s.finish()
+            .field("slot_count", &self.slot_count())
+            .finish()
     }
 }
 
@@ -272,10 +220,6 @@ impl<const N: usize> Default for Histogram<N> {
         Self::new()
     }
 }
-
-// ---------------------------------------------------------------------------
-// MMSC read/write methods
-// ---------------------------------------------------------------------------
 
 impl<const N: usize> Histogram<N> {
     /// Returns the aggregate statistics (count, sum, min, max).
@@ -300,48 +244,48 @@ impl<const N: usize> Histogram<N> {
         self.stats.count = stats.count;
     }
 
-    // -- Index arithmetic helpers --
-
-    /// Number of logical buckets in the live range, or 0 if empty.
+    /// Returns true if no non-zero values have been recorded.
     #[inline]
-    const fn range_len(&self) -> u32 {
+    pub(crate) const fn buckets_empty(&self) -> bool {
+        if self.word_end != self.word_start {
+            return false;
+        }
+        self.data[0] == 0
+    }
+
+    /// Number of buckets at the current width.
+    #[inline]
+    const fn word_count(&self) -> u32 {
         if self.buckets_empty() {
             0
         } else {
-            (self.index_end - self.index_start + 1) as u32
+            (self.word_end - self.word_start + 1) as u32
         }
+    }
+
+    /// Number of buckets at the current width.
+    #[inline]
+    const fn slot_count(&self) -> u32 {
+        self.word_count() << self.current.width.to_u64_widen_by()
     }
 
     /// Ring-buffer slot index for a given bucket index.
     #[inline]
-    pub(super) const fn slot_for(&self, index: i32) -> usize {
-        let cap = self.bucket_count() as i32;
-        (index - self.index_base).rem_euclid(cap) as usize
+    pub(super) const fn slot_for(&self, index: i32) -> [u32; 2] {
+        let steps = self.current.width.to_u64_widen_by();
+        let word = index >> steps;
+        let offset = index & self.current.width.slot_mask_u64();
+        [word as u32, offset as u32]
     }
 
     /// Shifts all three index fields right by `by` positions.
     #[inline]
     fn shift_indices(&mut self, by: u32) {
-        self.index_start >>= by;
-        self.index_end >>= by;
-        self.index_base >>= by;
+        self.word_start >>= by;
+        self.word_end >>= by;
+        self.word_base >>= by;
     }
 
-    /// Returns true if `index` falls outside the contiguous physical range
-    /// `[index_base, index_base + cap)` required by SWAR at sub-U64 widths.
-    /// At U64 the ring buffer handles wrapping, so this always returns false.
-    #[inline]
-    const fn swar_would_wrap(&self, index: i32) -> bool {
-        !matches!(self.current.width, Width::U64)
-            && (index < self.index_base || index >= self.index_base + self.bucket_count() as i32)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Bucket data access — operates on the bucket slice of the data pool
-// ---------------------------------------------------------------------------
-
-impl<const N: usize> Histogram<N> {
     /// Returns the bucket data as a slice.
     #[inline]
     const fn bucket_data(&self) -> &[u64] {
@@ -354,30 +298,10 @@ impl<const N: usize> Histogram<N> {
         &mut self.data
     }
 
-    /// Returns the number of counter slots available at the current width.
-    #[inline]
-    pub const fn bucket_count(&self) -> usize {
-        self.current.width.capacity(N)
-    }
-
-    /// Returns true if no non-zero values have been recorded.
-    ///
-    /// When `index_start == index_end` the range covers a single
-    /// bucket; the histogram is empty only if that physical slot is
-    /// zero.
-    #[inline]
-    pub(crate) const fn buckets_empty(&self) -> bool {
-        if self.index_end != self.index_start {
-            return false;
-        }
-        let slot = self.slot_for(self.index_start);
-        self.bucket_get(slot) == 0
-    }
-
     /// Returns the (word_index, bit_shift, mask) for a physical slot.
     #[inline]
     const fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
-        let bits = self.current.width.bits();
+        let bits = self.current.width.bits_per_slot();
         let spw = 64 / bits;
         (
             slot / spw,
@@ -393,7 +317,7 @@ impl<const N: usize> Histogram<N> {
     /// for byte-aligned widths the compiler reduces it to the same code as
     /// a direct typed read.
     #[inline]
-    pub(super) const fn bucket_get(&self, slot: usize) -> u64 {
+    pub(super) const fn bucket_get(&self, slot: [u32; 2]) -> u64 {
         let (wi, shift, mask) = self.slot_addr(slot);
         (self.bucket_data()[wi] >> shift) & mask
     }
@@ -414,7 +338,7 @@ impl<const N: usize> Histogram<N> {
         if from_index >= to_index {
             return;
         }
-        let spw = self.current.width.slots_per_word();
+        let spw = self.current.width.slots_per_u64();
         let from_slot = self.slot_for(from_index);
         let to_slot = self.slot_for(to_index - 1) + 1;
 
@@ -461,13 +385,7 @@ impl<const N: usize> Histogram<N> {
         self.bucket_set(slot, new_val);
         true
     }
-}
 
-// ---------------------------------------------------------------------------
-// Histogram<N> — construction and public API
-// ---------------------------------------------------------------------------
-
-impl<const N: usize> Histogram<N> {
     /// Creates a new histogram at the maximum supported scale.
     #[inline]
     #[must_use]
@@ -488,9 +406,9 @@ impl<const N: usize> Histogram<N> {
         Self {
             initial: settings,
             current: settings,
-            index_base: 0,
-            index_start: 0,
-            index_end: 0,
+            word_base: 0,
+            word_start: 0,
+            word_end: 0,
             stats: Stats::EMPTY,
             data: [0u64; N],
         }
@@ -536,9 +454,9 @@ impl<const N: usize> Histogram<N> {
     /// Resets the histogram to its initial state.
     pub fn clear(&mut self) {
         self.current = self.initial;
-        self.index_base = 0;
-        self.index_start = 0;
-        self.index_end = 0;
+        self.word_base = 0;
+        self.word_start = 0;
+        self.word_end = 0;
         self.stats = Stats::EMPTY;
         self.data.fill(0); // TODO: is this required?
     }
@@ -554,12 +472,6 @@ impl<const N: usize> Histogram<N> {
         // Extract the raw exponent and significand (sign bit is ignored).
         let mut biased_exp = get_biased_exponent(value);
         let mut significand = get_significand(value);
-
-        // Reject negative values (sign bit set, excluding -0.0 which
-        // falls through to the zero case below).
-        if value.is_sign_negative() && (biased_exp != 0 || significand != 0) {
-            return Err(Error::Extreme);
-        }
 
         let new_count = self.checked_add_count(incr).ok_or(Error::Overflow)?;
 
@@ -582,6 +494,9 @@ impl<const N: usize> Histogram<N> {
             }
             _ => {
                 // Normal exponents
+                if value.is_sign_negative() {
+                    return Err(Error::Extreme);
+                }
             }
         }
 
@@ -637,11 +552,7 @@ impl<const N: usize> Histogram<N> {
     /// Widens bucket counters by one step, adjusting the scale
     /// to account for the implicit 1-step downscale.
     fn widen_one_step(&mut self) -> Result<(), Error> {
-        if self.buckets_empty() {
-            self.current.width = self.current.width.wider().ok_or(Error::Overflow)?;
-        } else {
-            self.widen_by_one()?;
-        }
+        self.current.width = self.current.width.wider_by(1).ok_or(Error::Overflow)?;
         self.change_scale(1);
         Ok(())
     }
@@ -683,18 +594,17 @@ impl<const N: usize> Histogram<N> {
         let cap = self.bucket_count() as i32;
 
         if self.buckets_empty() {
-            self.index_start = index;
-            self.index_end = index;
-            // Align base to a word boundary so that SWAR pairwise ops
-            // never split a counter pair across u64 words.
-            self.index_base = self.current.width.word_start(index);
-        } else if index < self.index_start {
-            if self.swar_would_wrap(index) {
-                return IncrResult::NeedsDownscale(HighLow {
-                    low: index,
-                    high: self.index_end,
-                });
-            }
+            // Align base to a u64 boundary
+            self.word_start = self.current.width.slot_start_u64(index);
+            self.word_end = self.current.width.slot_end_u64(index);
+            self.word_base = self.word_start;
+        } else if index < self.word_start {
+            // if self.swar_would_wrap(index) {
+            //     return IncrResult::NeedsDownscale(HighLow {
+            //         low: index,
+            //         high: self.index_end,
+            //     });
+            // }
             if self.index_end - index >= cap {
                 return IncrResult::NeedsDownscale(HighLow {
                     low: index,
@@ -738,28 +648,17 @@ impl<const N: usize> Histogram<N> {
                 Ok(false)
             }
             IncrResult::NeedsDownscale(hl) => {
-                let change = scale_reduction(hl, self.bucket_count());
-                if change > 0 {
-                    self.downscale_by(change)?;
-                } else if self.swar_would_wrap(hl.low) || self.swar_would_wrap(hl.high) {
-                    // Range fits in capacity but wraps outside the
-                    // contiguous SWAR region.  Widen to U64 (where
-                    // wrapping is safe) via a 1-step merge.
-                    self.widen_one_step()?;
-                } else {
-                    self.downscale_by(1)?;
-                }
+                let change = hl.change_steps(self.bucket_count());
+                self.downscale_by(change)?;
                 Ok(false)
             }
         }
     }
 }
 
-// Compile-time proof that Histogram is Send + Sync (all fields are Copy
-// primitives). This prevents regressions if a non-Send/Sync type is
-// accidentally added in the future.
+// Compile-time test that Histogram is Send + Sync
 const fn _assert_send_sync<T: Send + Sync>() {}
-const _: () = _assert_send_sync::<Histogram<1>>();
+const _: () = _assert_send_sync::<Histogram<2>>();
 
 #[cfg(test)]
 mod tests;

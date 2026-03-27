@@ -19,14 +19,13 @@ impl<const N: usize> BucketView<'_, N> {
     /// Returns the offset (smallest index).
     #[inline]
     pub fn offset(&self) -> i32 {
-        // BucketView is only created after promotion, so we're in bucket mode.
-        self.hist.index_start
+        self.hist.word_start
     }
 
     /// Number of logical buckets in use.
     #[inline]
-    pub fn len(&self) -> u32 {
-        self.hist.range_len()
+    pub fn bucket_count(&self) -> u32 {
+        self.hist.slot_count()
     }
 
     /// Returns the current counter width.
@@ -38,13 +37,7 @@ impl<const N: usize> BucketView<'_, N> {
     /// Returns true if no buckets are in use.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Number of logical buckets available at the current width.
-    #[inline]
-    pub fn bucket_count(&self) -> usize {
-        self.hist.bucket_count()
+        self.bucket_count() == 0
     }
 
     /// Returns the count at position `pos` (0-indexed from offset).
@@ -72,7 +65,7 @@ impl<const N: usize> BucketView<'_, N> {
         BucketsIter {
             hist: self.hist,
             pos: 0,
-            len: self.len(),
+            len: self.bucket_count(),
         }
     }
 }
@@ -103,7 +96,7 @@ impl<const N: usize> Iterator for BucketsIter<'_, N> {
         if self.pos >= self.len {
             return None;
         }
-        let index = self.hist.index_start + self.pos as i32;
+        let index = self.hist.word_start + self.pos as i32;
         let count = self.hist.bucket_get(self.hist.slot_for(index));
         self.pos += 1;
         Some(count)
