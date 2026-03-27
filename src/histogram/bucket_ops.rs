@@ -4,16 +4,12 @@
 //! Downscale operations.
 
 use super::Histogram;
-use super::width::Width;
+//use super::width::Width;
 
 impl<const N: usize> Histogram<N> {
     /// Downscales by `change` steps: merges groups of `2^change`
     /// adjacent bucket indices by summing their counters in place.
-    pub(super) fn do_downscale(
-        &mut self,
-        change: u32,
-        min_width: Width,
-    ) -> Result<(), super::Error> {
+    pub(super) fn do_downscale(&mut self, change: u32) -> Result<(), super::Error> {
         debug_assert!(change != 0);
         debug_assert!(self.buckets_empty());
 
@@ -27,7 +23,7 @@ impl<const N: usize> Histogram<N> {
             let word_start_idx = self.word_start >> to_u64_widen;
             let word_end_idx = self.word_end >> to_u64_widen;
 
-            let mut data = self.bucket_data_mut();
+            let data = self.bucket_data_mut();
             for idx in word_start_idx..=word_end_idx {
                 super::swar::widen_into(width, new_width, &mut data[idx as usize % N]);
             }

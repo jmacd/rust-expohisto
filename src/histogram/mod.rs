@@ -26,7 +26,7 @@ pub use quantile::{QuantileIter, QuantileValue};
 
 mod view;
 pub use view::HistogramView;
-pub use width::Width;
+pub use width::{SlotAddr, Width};
 
 /// Compact histogram configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,35 +124,35 @@ struct HighLow {
 }
 
 impl HighLow {
-    #[inline]
-    const fn empty() -> Self {
-        Self { low: 0, high: -1 }
-    }
+    // #[inline]
+    // const fn empty() -> Self {
+    //     Self { low: 0, high: -1 }
+    // }
 
-    #[inline]
-    const fn is_empty(&self) -> bool {
-        self.low > self.high
-    }
+    // #[inline]
+    // const fn is_empty(&self) -> bool {
+    //     self.low > self.high
+    // }
 
-    #[inline]
-    const fn merge(self, other: Self) -> Self {
-        match (self.is_empty(), other.is_empty()) {
-            (true, _) => other,
-            (_, true) => self,
-            _ => Self {
-                low: if self.low < other.low {
-                    self.low
-                } else {
-                    other.low
-                },
-                high: if self.high > other.high {
-                    self.high
-                } else {
-                    other.high
-                },
-            },
-        }
-    }
+    // #[inline]
+    // const fn merge(self, other: Self) -> Self {
+    //     match (self.is_empty(), other.is_empty()) {
+    //         (true, _) => other,
+    //         (_, true) => self,
+    //         _ => Self {
+    //             low: if self.low < other.low {
+    //                 self.low
+    //             } else {
+    //                 other.low
+    //             },
+    //             high: if self.high > other.high {
+    //                 self.high
+    //             } else {
+    //                 other.high
+    //             },
+    //         },
+    //     }
+    // }
 
     /// Computes how much downscaling is needed.
     #[inline]
@@ -171,7 +171,7 @@ impl HighLow {
 enum IncrResult {
     Ok,
     NeedsDownscale(HighLow),
-    CounterOverflow,
+    CounterOverflow(u64),
 }
 
 /// An allocation-free exponential histogram for non-negative values.
@@ -186,12 +186,6 @@ pub struct Histogram<const N: usize> {
     stats: Stats,
 
     data: [u64; N],
-}
-
-struct SlotAddr {
-    word: usize,
-    shift: usize,
-    mask: u64,
 }
 
 impl<const N: usize> Clone for Histogram<N> {
@@ -218,7 +212,7 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
             .field("min", &stats.min)
             .field("max", &stats.max)
             .field("scale", &self.current.scale.scale())
-            .field("slot_count", &self.slot_count())
+            .field("slot_count", &self.current_slot_count())
             .finish()
     }
 }
@@ -263,42 +257,37 @@ impl<const N: usize> Histogram<N> {
 
     /// Number of u64 data words in use at the current width.
     #[inline]
-    const fn current_word_count(&self) -> u32 {
+    const fn current_word_count(&self) -> i32 {
         if self.buckets_empty() {
             0
         } else {
-            (self.word_end - self.word_start + 1) as u32
+            self.word_end - self.word_start + 1
         }
     }
 
     /// Number of buckets defined at the current width.
     #[inline]
-    const fn current_slot_count(&self) -> u32 {
-        self.current_word_count() << self.current.width.to_u64_widen_steps()
+    const fn current_slot_count(&self) -> i32 {
+        self.current
+            .width
+            .word_to_slot_index(self.current_word_count())
     }
 
-    // /// Ring-buffer slot index for a given bucket index.
-    // #[inline]
-    // pub(super) const fn slot_for(&self, index: i32) -> SlotAddr {
-    //     let steps = self.current.width.to_u64_widen_steps();
-    //     let word = index >> steps;
-    //     let offset = index & self.current.width.slot_mask_u64();
-    //     [word as u32, offset as u32]
-    // }
-
-    /// Returns the (word_index, bit_shift, mask) for a physical slot.
+    /// Returns the slot address of a bucket indx.
     #[inline]
-    const fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
-        let word = slot >> self.current.width.to_u64_widen_steps();
-        let shift = slot & self.current.width.slot_mask();
+    const fn slot_addr(&self, slot: i32) -> SlotAddr<'_> {
+        self.current.width.slot_addr(slot)
+    }
 
-        // let bits = self.current.width.bits_per_slot();
-        // let spw = 64 / bits;
-        // (
-        //     slot / spw,
-        //     (slot % spw) * bits,
-        //     self.current.width.counter_max(),
-        // )
+    /// Returns the for a physical slot.
+    #[inline]
+    const fn start_addr(&self) -> SlotAddr<'_> {
+        self.slot_addr(self.current.width.word_to_slot_index(self.word_start))
+    }
+
+    #[inline]
+    pub(crate) const fn size_hint(&self, addr: &SlotAddr) -> usize {
+        addr.size_hint(self.word_end)
     }
 
     /// Shifts all three index fields right by `by` positions.
@@ -321,80 +310,37 @@ impl<const N: usize> Histogram<N> {
         &mut self.data
     }
 
-    /// Gets the value at a physical slot index.
-    ///
-    /// All widths use the same shift-and-mask formula on the underlying
-    /// `[u64]` pool. For sub-byte widths this extracts a packed bitfield;
-    /// for byte-aligned widths the compiler reduces it to the same code as
-    /// a direct typed read.
+    /// Gets the value at a slot address.
     #[inline]
-    pub(super) const fn bucket_get(&self, slot: [u32; 2]) -> u64 {
-        let (wi, shift, mask) = self.slot_addr(slot);
-        (self.bucket_data()[wi] >> shift) & mask
-    }
-
-    /// Sets the value at a physical slot index.
-    #[inline]
-    fn bucket_set(&mut self, slot: usize, value: u64) {
-        let (wi, shift, mask) = self.slot_addr(slot);
-        let word = &mut self.bucket_data_mut()[wi];
-        *word = (*word & !(mask << shift)) | ((value & mask) << shift);
-    }
-
-    /// Zeroes all counter slots in `[from_index, to_index)`.
-    ///
-    /// Operates at word granularity where possible: partial words at the
-    /// edges are cleared per-slot, but interior words are zeroed whole.
-    fn zero_slots(&mut self, from_index: i32, to_index: i32) {
-        if from_index >= to_index {
-            return;
-        }
-        let spw = self.current.width.slots_per_u64();
-        let from_slot = self.slot_for(from_index);
-        let to_slot = self.slot_for(to_index - 1) + 1;
-
-        let first_word = from_slot / spw;
-        let last_word = (to_slot - 1) / spw;
-
-        if first_word == last_word {
-            // All slots in one word — clear per-slot.
-            for slot in from_slot..to_slot {
-                self.bucket_set(slot, 0);
-            }
-            return;
-        }
-
-        // Partial first word.
-        if from_slot % spw != 0 {
-            for slot in from_slot..(first_word + 1) * spw {
-                self.bucket_set(slot, 0);
-            }
-            // Interior whole words.
-            self.data[first_word + 1..last_word].fill(0);
-        } else {
-            self.data[first_word..last_word].fill(0);
-        }
-
-        // Partial last word.
-        if to_slot % spw != 0 {
-            for slot in last_word * spw..to_slot {
-                self.bucket_set(slot, 0);
-            }
-        } else {
-            self.data[last_word] = 0;
-        }
+    pub(super) const fn bucket_get(&self, addr: &SlotAddr) -> u64 {
+        let idx = addr.data_index(N);
+        let word = self.data[idx];
+        addr.retrieve_counter(word)
     }
 
     /// Attempts to add `incr` to a physical slot. Returns false on overflow.
     #[inline]
-    fn bucket_try_increment(&mut self, slot: usize, incr: u64) -> bool {
-        let val = self.bucket_get(slot);
-        let new_val = match val.checked_add(incr) {
-            Some(v) if v <= self.current.width.counter_max() => v,
-            _ => return false,
+    fn bucket_try_increment(&mut self, addr: &SlotAddr, incr: u64) -> Result<(), u64> {
+        let idx = addr.data_index(N);
+        let word = self.data[idx];
+        let count = addr.retrieve_counter(word);
+
+        let new_count = match count.checked_add(incr) {
+            None => {
+                // Safety: the total count would overflow before the
+                // try_increment of an individual bucket would.
+                unreachable!()
+            }
+            Some(c) => {
+                if c > self.current.width.counter_max() {
+                    return Err(c);
+                }
+                c
+            }
         };
-        self.bucket_set(slot, new_val);
-        true
+
+        self.data[idx] = addr.update_counter_in_word(word, new_count);
+        Ok(())
     }
 
     /// Creates a new histogram at the maximum supported scale.
@@ -407,12 +353,12 @@ impl<const N: usize> Histogram<N> {
 
         // The limit at 250 allows up to 16k single-bit buckets and
         // limits the histogram struct to 2048 bytes, noting that the
-        // structure itself uses 6 words.
+        // structure itself uses 6 u64.
         //
         // Note that nothing breaks when we allow N to grow above this
-        // limit, but the algorithms here are designed for cache-line
-        // sized data.
-        const { assert!(N <= 250, "requires <= 256 u64 buckets") };
+        // limit, just performance. The algorithms here are designed
+        // for cache-line sized data.
+        const { assert!(N <= 250, "requires <= 250 u64 buckets") };
 
         let settings = Settings::new(
             Scale::new(table_scale()).expect("table scale is valid"),
@@ -564,89 +510,52 @@ impl<const N: usize> Histogram<N> {
             Scale::new(new_scale).expect("two buckets fit entire range at min_scale");
     }
 
-    /// Widens bucket counters by one step, adjusting the scale
-    /// to account for the implicit 1-step downscale.
-    fn widen_one_step(&mut self) -> Result<(), Error> {
-        self.current.width = self.current.width.wider_by(1).ok_or(Error::Overflow)?;
-        self.change_scale(1);
-        Ok(())
-    }
-
-    /// Downscales by `change` scale-steps.
-    ///
-    /// Clones the data array and scatter-adds groups of `2^change`
-    /// adjacent counters into a fresh, aligned output buffer.  The
-    /// output width is the minimum that holds all group sums.
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub fn downscale(&mut self, change: u32) -> Result<(), Error> {
-        self.downscale_by(change)
-    }
-
-    fn downscale_to(&mut self, target_scale: i32) -> Result<(), Error> {
-        let change = self.current.scale.scale() - target_scale;
-        if change <= 0 {
-            return Ok(());
-        }
-        self.downscale_by(change as u32)
-    }
-
     fn downscale_by(&mut self, change: u32) -> Result<(), Error> {
         if change == 0 {
             return Ok(());
         }
 
-        self.do_downscale(change, self.current.width)?;
+        self.do_downscale(change)?;
         self.change_scale(change);
         Ok(())
     }
 
     /// Attempts to add `incr` into the bucket at `index`.
-    fn try_increment(&mut self, index: i32, incr: u64) -> IncrResult {
+    fn try_increment(&mut self, slot_index: i32, incr: u64) -> IncrResult {
         if incr == 0 {
             return IncrResult::Ok;
         }
 
-        let cap = self.bucket_count() as i32;
+        let width = self.current.width;
+        let addr = width.slot_addr(slot_index);
+        let word_index = addr.word_index();
 
         if self.buckets_empty() {
-            // Align base to a u64 boundary
-            self.word_start = self.current.width.slot_start_u64(index);
-            self.word_end = self.current.width.slot_end_u64(index);
+            self.word_start = word_index;
+            self.word_end = self.word_start;
             self.word_base = self.word_start;
-        } else if index < self.word_start {
-            // if self.swar_would_wrap(index) {
-            //     return IncrResult::NeedsDownscale(HighLow {
-            //         low: index,
-            //         high: self.index_end,
-            //     });
-            // }
-            if self.index_end - index >= cap {
+        } else if word_index < self.word_start {
+            let diff = (self.word_end - word_index) as usize;
+            if diff >= N {
                 return IncrResult::NeedsDownscale(HighLow {
-                    low: index,
-                    high: self.index_end,
+                    low: word_index,
+                    high: self.word_end,
                 });
             }
-            self.zero_slots(index, self.index_start);
-            self.index_start = index;
-        } else if index > self.index_end {
-            if self.swar_would_wrap(index) {
+            self.word_start = word_index;
+        } else if word_index > self.word_end {
+            let diff = (word_index - self.word_start) as usize;
+            if diff >= N {
                 return IncrResult::NeedsDownscale(HighLow {
-                    low: self.index_start,
-                    high: index,
+                    low: self.word_start,
+                    high: word_index,
                 });
             }
-            if index - self.index_start >= cap {
-                return IncrResult::NeedsDownscale(HighLow {
-                    low: self.index_start,
-                    high: index,
-                });
-            }
-            self.zero_slots(self.index_end + 1, index + 1);
-            self.index_end = index;
+            self.word_end = word_index;
         }
 
-        if !self.bucket_try_increment(self.slot_for(index), incr) {
-            return IncrResult::CounterOverflow;
+        if let Err(oflow) = self.bucket_try_increment(&addr, incr) {
+            return IncrResult::CounterOverflow(oflow);
         }
 
         IncrResult::Ok
@@ -658,12 +567,14 @@ impl<const N: usize> Histogram<N> {
     fn resolve_increment(&mut self, result: IncrResult) -> Result<bool, Error> {
         match result {
             IncrResult::Ok => Ok(true),
-            IncrResult::CounterOverflow => {
-                self.widen_one_step()?;
+            IncrResult::CounterOverflow(total) => {
+                let new_width = Width::from_max_value(total);
+                let change = new_width.subtract(self.current.width);
+                self.downscale_by(change)?;
                 Ok(false)
             }
             IncrResult::NeedsDownscale(hl) => {
-                let change = hl.change_steps(self.bucket_count());
+                let change = hl.change_steps(N);
                 self.downscale_by(change)?;
                 Ok(false)
             }

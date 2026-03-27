@@ -37,6 +37,71 @@ pub(crate) const ALL_WIDTHS: [Width; 7] = [
     Width::U64,
 ];
 
+/// Slot address for a specific width by word- and sub-index.
+#[derive(Debug)]
+pub struct SlotAddr<'a> {
+    width: &'a Width,
+    word_index: i32,
+    sub_offset: u32,
+}
+
+impl<'a> SlotAddr<'a> {
+    #[inline]
+    pub(crate) const fn word_index(&self) -> i32 {
+        self.word_index
+    }
+
+    /// Shift count for this slot.
+    #[inline]
+    const fn shift_count(&self) -> u32 {
+        self.sub_offset * self.width.bits_per_slot()
+    }
+
+    /// Retrieves a counter.
+    #[inline]
+    pub(crate) const fn retrieve_counter(&self, word: u64) -> u64 {
+        let shifted = word >> self.shift_count();
+        shifted & self.width.counter_max()
+    }
+
+    /// Updtes the counter, promised to fit.
+    #[inline]
+    pub(crate) const fn update_counter_in_word(&self, word: u64, count: u64) -> u64 {
+        debug_assert!(count <= self.width.counter_max());
+
+        let shift = self.shift_count();
+        let sub_mask = self.width.counter_max() << shift;
+
+        (word & !sub_mask) | (count << shift)
+    }
+
+    /// Returns the next address, if valid.
+    #[inline]
+    pub(crate) const fn data_index(&self, data_size: usize) -> usize {
+        self.word_index.rem_euclid(data_size as i32) as usize
+    }
+
+    /// Returns the remaining size relative to this address.
+    #[inline]
+    pub(crate) const fn size_hint(&self, end_word_index: i32) -> usize {
+        let words = end_word_index - self.word_index + 1;
+        let buckets = words << self.width.to_u64_widen_steps();
+        let remaining = buckets as u32 - self.sub_offset;
+        remaining as usize
+    }
+
+    /// Returns the next address, if valid.
+    #[inline]
+    pub(crate) fn next_addr(mut self, end_word_index: i32) -> Option<Self> {
+        self.sub_offset += 1;
+        if self.sub_offset == self.width.slots_per_u64() {
+            self.word_index += 1;
+            self.sub_offset = 0;
+        }
+        (self.word_index <= end_word_index).then(|| self)
+    }
+}
+
 // Note we use u32 and i32 for bucket addresses. MAX_SCALE has been
 // set to ensure i32 fits all valid values.
 impl Width {
@@ -79,27 +144,43 @@ impl Width {
     /// Mask for the sub-u64 index values at this width.
     /// 0x3F through 0
     #[inline]
-    const fn slot_sub64_mask(self) -> i32 {
+    const fn slot_sub64_index_mask(self) -> i32 {
         self.slots_per_u64() as i32 - 1
+    }
+
+    /// Returns the (word_index, bit_shift, mask) for a slot index at this width.
+    #[inline]
+    pub(crate) const fn slot_addr(&self, index: i32) -> SlotAddr<'_> {
+        SlotAddr {
+            width: self,
+            word_index: self.slot_to_word_index(index),
+            sub_offset: (index & self.slot_sub64_index_mask()) as u32,
+        }
     }
 
     /// Shifts a bucket index to its u64-word address.
     #[inline]
-    pub(crate) const fn slot_to_word(self, index: i32) -> i32 {
+    const fn slot_to_word_index(self, index: i32) -> i32 {
         index >> self.to_u64_widen_steps()
     }
 
-    /// Rounds a bucket index down to the first slot in its u64 word.
+    /// Shifts a u64-word address to the first slot index.
     #[inline]
-    pub(crate) const fn slot_start_u64(self, index: i32) -> i32 {
-        index & !self.slot_sub64_mask()
+    pub(crate) const fn word_to_slot_index(self, index: i32) -> i32 {
+        index << self.to_u64_widen_steps()
     }
 
-    /// Rounds a bucket index up to the last slot in its u64 word.
-    #[inline]
-    pub(crate) const fn slot_end_u64(self, index: i32) -> i32 {
-        index | self.slot_sub64_mask()
-    }
+    // /// Rounds a bucket index down to the first slot in its u64 word.
+    // #[inline]
+    // pub(crate) const fn slot_start_u64(self, index: i32) -> i32 {
+    //     index & !self.slot_sub64_index_mask()
+    // }
+
+    // /// Rounds a bucket index up to the last slot in its u64 word.
+    // #[inline]
+    // pub(crate) const fn slot_end_u64(self, index: i32) -> i32 {
+    //     index | self.slot_sub64_index_mask()
+    // }
 
     /// Returns the next-wider counter width or None.
     #[inline]
@@ -110,6 +191,13 @@ impl Width {
         } else {
             Some(ALL_WIDTHS[value])
         }
+    }
+
+    /// Returns width difference in steps.
+    #[inline]
+    pub(crate) const fn subtract(self, other: Width) -> u32 {
+        debug_assert!(self as i32 >= other as i32);
+        (self as i32 - other as i32) as u32
     }
 
     /// Returns the narrowest viable width.

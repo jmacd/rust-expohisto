@@ -4,19 +4,16 @@
 //! Read-only view of bucket data in a histogram.
 
 use super::Histogram;
-use super::width::Width;
+use super::width::{SlotAddr, Width};
 
 /// Read-only view of bucket data in a histogram.
-///
-/// Obtained via [`HistogramView::positive()`](super::HistogramView::positive).
-/// All accessors take `&self`.
 #[derive(Debug)]
 pub struct BucketView<'a, const N: usize> {
     pub(super) hist: &'a Histogram<N>,
 }
 
 impl<const N: usize> BucketView<'_, N> {
-    /// Returns the offset (smallest index).
+    /// Returns the base bucket offset.
     #[inline]
     pub fn offset(&self) -> i32 {
         self.hist.word_start
@@ -25,7 +22,7 @@ impl<const N: usize> BucketView<'_, N> {
     /// Number of logical buckets in use.
     #[inline]
     pub fn bucket_count(&self) -> u32 {
-        self.hist.current_slot_count()
+        self.hist.current_slot_count() as u32
     }
 
     /// Returns the current counter width.
@@ -37,26 +34,7 @@ impl<const N: usize> BucketView<'_, N> {
     /// Returns true if no buckets are in use.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.bucket_count() == 0
-    }
-
-    /// Returns the count at position `pos` (0-indexed from offset).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pos >= len()`.
-    #[cfg(test)]
-    #[inline]
-    pub(crate) fn at(&self, pos: u32) -> u64 {
-        let len = self.len();
-        assert!(
-            pos < len,
-            "BucketView::at: pos {} out of range (len {})",
-            pos,
-            len
-        );
-        let index = self.hist.index_start + pos as i32;
-        self.hist.bucket_get(self.hist.slot_for(index))
+        self.hist.buckets_empty()
     }
 
     /// Returns an iterator over bucket counts.
@@ -64,8 +42,7 @@ impl<const N: usize> BucketView<'_, N> {
     pub fn iter(&self) -> BucketsIter<'_, N> {
         BucketsIter {
             hist: self.hist,
-            pos: 0,
-            len: self.bucket_count(),
+            addr: self.is_empty().then(|| self.hist.start_addr()),
         }
     }
 }
@@ -84,8 +61,7 @@ impl<'a, const N: usize> IntoIterator for &'a BucketView<'a, N> {
 #[derive(Debug)]
 pub struct BucketsIter<'a, const N: usize> {
     hist: &'a Histogram<N>,
-    pos: u32,
-    len: u32,
+    addr: Option<SlotAddr<'a>>,
 }
 
 impl<const N: usize> Iterator for BucketsIter<'_, N> {
@@ -93,19 +69,22 @@ impl<const N: usize> Iterator for BucketsIter<'_, N> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos >= self.len {
-            return None;
+        let count = self.addr.as_ref().map(|addr| self.hist.bucket_get(&addr));
+        if let Some(addr) = self.addr.take() {
+            self.addr = addr.next_addr(self.hist.word_end);
         }
-        let index = self.hist.word_start + self.pos as i32;
-        let count = self.hist.bucket_get(self.hist.slot_for(index));
-        self.pos += 1;
-        Some(count)
+        count
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = (self.len - self.pos) as usize;
-        (remaining, Some(remaining))
+        match &self.addr {
+            None => (0, None),
+            Some(addr) => {
+                let remaining = self.hist.size_hint(addr);
+                (remaining, Some(remaining))
+            }
+        }
     }
 }
 
