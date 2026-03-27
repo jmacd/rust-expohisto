@@ -298,17 +298,17 @@ impl<const N: usize> Histogram<N> {
         self.word_base >>= by;
     }
 
-    /// Returns the bucket data as a slice.
-    #[inline]
-    const fn bucket_data(&self) -> &[u64] {
-        &self.data
-    }
+    // /// Returns the bucket data as a slice.
+    // #[inline]
+    // const fn bucket_data(&self) -> &[u64] {
+    //     &self.data
+    // }
 
-    /// Returns the bucket data as a mutable slice.
-    #[inline]
-    fn bucket_data_mut(&mut self) -> &mut [u64] {
-        &mut self.data
-    }
+    // /// Returns the bucket data as a mutable slice.
+    // #[inline]
+    // fn bucket_data_mut(&mut self) -> &mut [u64] {
+    //     &mut self.data
+    // }
 
     /// Gets the value at a slot address.
     #[inline]

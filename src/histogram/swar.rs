@@ -34,7 +34,75 @@ pub(crate) const SWAR_TABLE: [(u32, u64); 6] = [
 // Widen a single word in palce.
 #[inline]
 pub(crate) fn widen_into(before: Width, after: Width, word: &mut u64) {
-    // @@@
+    match (before, after) {
+        (Width::B1, Width::U64) => {
+            *word = word.count_ones() as u64;
+        }
+        (Width::B1, Width::U32) => {
+            let s0 = (*word & 0x0000_0000_FFFF_FFFF).count_ones() as u64;
+            let s1 = (*word & 0xFFFF_FFFF_0000_0000).count_ones() as u64;
+            *word = (s0 << 0) | (s1 << 32);
+        }
+        (Width::B1, Width::U16) => {
+            let s0 = (*word & 0x0000_0000_0000_FFFF).count_ones() as u64;
+            let s1 = (*word & 0x0000_0000_FFFF_0000).count_ones() as u64;
+            let s2 = (*word & 0x0000_FFFF_0000_0000).count_ones() as u64;
+            let s3 = (*word & 0xFFFF_0000_0000_0000).count_ones() as u64;
+            *word = (s0 << 0) | (s1 << 16) | (s2 << 32) | (s3 << 48);
+        }
+        (Width::B1, Width::U8) => {
+            let s0 = (*word & 0x0000_0000_0000_00FF).count_ones() as u64;
+            let s1 = (*word & 0x0000_0000_0000_FF00).count_ones() as u64;
+            let s2 = (*word & 0x0000_0000_00FF_0000).count_ones() as u64;
+            let s3 = (*word & 0x0000_0000_FF00_0000).count_ones() as u64;
+            let s4 = (*word & 0x0000_00FF_0000_0000).count_ones() as u64;
+            let s5 = (*word & 0x0000_FF00_0000_0000).count_ones() as u64;
+            let s6 = (*word & 0x00FF_0000_0000_0000).count_ones() as u64;
+            let s7 = (*word & 0xFF00_0000_0000_0000).count_ones() as u64;
+            *word = (s0 << 0)
+                | (s1 << 8)
+                | (s2 << 16)
+                | (s3 << 24)
+                | (s4 << 32)
+                | (s5 << 40)
+                | (s6 << 48)
+                | (s7 << 56);
+        }
+        (Width::B1, Width::B4) => {
+            let s0 = (*word & 0x0000_0000_0000_000F).count_ones() as u64;
+            let s1 = (*word & 0x0000_0000_0000_00F0).count_ones() as u64;
+            let s2 = (*word & 0x0000_0000_0000_0F00).count_ones() as u64;
+            let s3 = (*word & 0x0000_0000_0000_F000).count_ones() as u64;
+            let s4 = (*word & 0x0000_0000_000F_0000).count_ones() as u64;
+            let s5 = (*word & 0x0000_0000_00F0_0000).count_ones() as u64;
+            let s6 = (*word & 0x0000_0000_0F00_0000).count_ones() as u64;
+            let s7 = (*word & 0x0000_0000_F000_0000).count_ones() as u64;
+            let s8 = (*word & 0x0000_000F_0000_0000).count_ones() as u64;
+            let s9 = (*word & 0x0000_00F0_0000_0000).count_ones() as u64;
+            let sa = (*word & 0x0000_0F00_0000_0000).count_ones() as u64;
+            let sb = (*word & 0x0000_F000_0000_0000).count_ones() as u64;
+            let sc = (*word & 0x000F_0000_0000_0000).count_ones() as u64;
+            let sd = (*word & 0x00F0_0000_0000_0000).count_ones() as u64;
+            let se = (*word & 0x0F00_0000_0000_0000).count_ones() as u64;
+            let sf = (*word & 0xF000_0000_0000_0000).count_ones() as u64;
+            *word = (s0 << 0)
+                | (s1 << 4)
+                | (s2 << 8)
+                | (s3 << 12)
+                | (s4 << 16)
+                | (s5 << 20)
+                | (s6 << 24)
+                | (s7 << 38)
+                | (s8 << 32)
+                | (s9 << 36)
+                | (sa << 40)
+                | (sb << 44)
+                | (sc << 48)
+                | (sd << 52)
+                | (se << 56)
+                | (sf << 60);
+        }
+    };
 }
 
 // /// Single SWAR step: sum adjacent counters at the current width into

@@ -23,9 +23,8 @@ impl<const N: usize> Histogram<N> {
             let word_start_idx = self.word_start >> to_u64_widen;
             let word_end_idx = self.word_end >> to_u64_widen;
 
-            let data = self.bucket_data_mut();
             for idx in word_start_idx..=word_end_idx {
-                super::swar::widen_into(width, new_width, &mut data[idx as usize % N]);
+                super::swar::widen_into(width, new_width, &mut self.data[idx as usize % N]);
             }
         }
         // @@@
