@@ -53,15 +53,14 @@ fn step_u32_u64(w: u64) -> u64 {
 /// `after` lane width by chaining SWAR pair-sum steps.
 /// Uses count_ones() shortcuts for B1→U32 and B1→U64.
 #[inline]
-pub(crate) fn widen_into(before: Width, after: Width, word: &mut u64) {
+pub(crate) fn widen(before: Width, after: Width, w: u64) -> u64 {
     use Width::*;
     debug_assert!(before < after);
-    let w = *word;
-    *word = match (before, after) {
+    match (before, after) {
         // B1 → *
-        (B1, B2)  => step_b1_b2(w),
-        (B1, B4)  => step_b2_b4(step_b1_b2(w)),
-        (B1, U8)  => step_b4_u8(step_b2_b4(step_b1_b2(w))),
+        (B1, B2) => step_b1_b2(w),
+        (B1, B4) => step_b2_b4(step_b1_b2(w)),
+        (B1, U8) => step_b4_u8(step_b2_b4(step_b1_b2(w))),
         (B1, U16) => step_u8_u16(step_b4_u8(step_b2_b4(step_b1_b2(w)))),
         (B1, U32) => {
             let lo = (w as u32).count_ones() as u64;
@@ -71,14 +70,14 @@ pub(crate) fn widen_into(before: Width, after: Width, word: &mut u64) {
         (B1, U64) => w.count_ones() as u64,
 
         // B2 → *
-        (B2, B4)  => step_b2_b4(w),
-        (B2, U8)  => step_b4_u8(step_b2_b4(w)),
+        (B2, B4) => step_b2_b4(w),
+        (B2, U8) => step_b4_u8(step_b2_b4(w)),
         (B2, U16) => step_u8_u16(step_b4_u8(step_b2_b4(w))),
         (B2, U32) => step_u16_u32(step_u8_u16(step_b4_u8(step_b2_b4(w)))),
         (B2, U64) => step_u32_u64(step_u16_u32(step_u8_u16(step_b4_u8(step_b2_b4(w))))),
 
         // B4 → *
-        (B4, U8)  => step_b4_u8(w),
+        (B4, U8) => step_b4_u8(w),
         (B4, U16) => step_u8_u16(step_b4_u8(w)),
         (B4, U32) => step_u16_u32(step_u8_u16(step_b4_u8(w))),
         (B4, U64) => step_u32_u64(step_u16_u32(step_u8_u16(step_b4_u8(w)))),
@@ -95,46 +94,45 @@ pub(crate) fn widen_into(before: Width, after: Width, word: &mut u64) {
         // U32 → U64
         (U32, U64) => step_u32_u64(w),
 
-        _ => {
-            debug_assert!(false, "widen_into: invalid pair ({before:?}, {after:?})");
-            w
-        }
-    };
+        _ => unreachable!(),
+    }
 }
 
-/// OR-fold all SWAR lanes within a word into a single representative
-/// value.  The result has the same highest-set-bit as the true
-/// maximum lane, so `Width::from_max_value(or_fold_lanes(w, word))`
-/// gives the exact minimum width needed to hold any lane.
-#[inline]
-pub(crate) fn or_fold_lanes(width: Width, w: u64) -> u64 {
-    use Width::*;
-    match width {
-        B1 => (w != 0) as u64,
-        B2 => {
-            let w = w | (w >> 2);
-            let w = w | (w >> 4);
-            let w = w | (w >> 8);
-            let w = w | (w >> 16);
-            (w | (w >> 32)) & 0x3
+impl Width {
+    /// OR-fold all SWAR lanes within a word into a single representative
+    /// value.  The result has the same highest-set-bit as the true
+    /// maximum lane, so `Width::from_max_value(or_fold_lanes(w, word))`
+    /// gives the exact minimum width needed to hold any lane.
+    #[inline]
+    pub(crate) fn or_fold_lanes(self, w: u64) -> u64 {
+        use Width::{B1, B2, B4, U8, U16, U32, U64};
+        match self {
+            B1 => (w != 0) as u64,
+            B2 => {
+                let w = w | (w >> 2);
+                let w = w | (w >> 4);
+                let w = w | (w >> 8);
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0x3
+            }
+            B4 => {
+                let w = w | (w >> 4);
+                let w = w | (w >> 8);
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0xF
+            }
+            U8 => {
+                let w = w | (w >> 8);
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0xFF
+            }
+            U16 => {
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0xFFFF
+            }
+            U32 => (w | (w >> 32)) & 0xFFFF_FFFF,
+            U64 => w,
         }
-        B4 => {
-            let w = w | (w >> 4);
-            let w = w | (w >> 8);
-            let w = w | (w >> 16);
-            (w | (w >> 32)) & 0xF
-        }
-        U8 => {
-            let w = w | (w >> 8);
-            let w = w | (w >> 16);
-            (w | (w >> 32)) & 0xFF
-        }
-        U16 => {
-            let w = w | (w >> 16);
-            (w | (w >> 32)) & 0xFFFF
-        }
-        U32 => (w | (w >> 32)) & 0xFFFF_FFFF,
-        U64 => w,
     }
 }
 
@@ -160,7 +158,13 @@ mod tests {
 
     #[test]
     fn b1_to_u64_matches_popcount() {
-        for w in [0u64, 1, u64::MAX, 0xDEAD_BEEF_CAFE_BABE, 0x8000_0000_0000_0001] {
+        for w in [
+            0u64,
+            1,
+            u64::MAX,
+            0xDEAD_BEEF_CAFE_BABE,
+            0x8000_0000_0000_0001,
+        ] {
             assert_eq!(widen(B1, U64, w), w.count_ones() as u64);
         }
     }
@@ -241,7 +245,13 @@ mod tests {
     #[test]
     fn chained_consistency() {
         let all = [B1, B2, B4, U8, U16, U32, U64];
-        let words = [0u64, 1, u64::MAX, 0xDEAD_BEEF_CAFE_BABE, 0x5555_5555_5555_5555];
+        let words = [
+            0u64,
+            1,
+            u64::MAX,
+            0xDEAD_BEEF_CAFE_BABE,
+            0x5555_5555_5555_5555,
+        ];
         for &before in &all {
             for &after in &all {
                 if before >= after {
