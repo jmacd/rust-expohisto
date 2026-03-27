@@ -268,18 +268,6 @@ impl<const N: usize> Histogram<N> {
         self.word_base >>= by;
     }
 
-    // /// Returns the bucket data as a slice.
-    // #[inline]
-    // const fn bucket_data(&self) -> &[u64] {
-    //     &self.data
-    // }
-
-    // /// Returns the bucket data as a mutable slice.
-    // #[inline]
-    // fn bucket_data_mut(&mut self) -> &mut [u64] {
-    //     &mut self.data
-    // }
-
     /// Gets the value at a slot address.
     #[inline]
     pub(super) const fn bucket_get(&self, addr: &SlotAddr) -> u64 {
@@ -537,7 +525,7 @@ impl<const N: usize> Histogram<N> {
             IncrResult::CounterOverflow(total) => {
                 let new_width = Width::from_max_value(total);
                 let change = new_width.subtract(self.current.width);
-                self.downscale_by(change)?;
+                self.downscale_by(change as u32)?;
                 Ok(false)
             }
             IncrResult::NeedsDownscale(hl) => {
