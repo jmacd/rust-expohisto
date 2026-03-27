@@ -18,7 +18,7 @@ impl<const N: usize> Histogram<N> {
         debug_assert!(self.buckets_empty());
 
         let width = self.current.width;
-        let to_u64_widen = width.to_u64_widen_by();
+        let to_u64_widen = width.to_u64_widen_steps();
 
         if to_u64_widen != 0 {
             let actual_widen_by = change.min(to_u64_widen);

@@ -110,7 +110,9 @@ pub struct BucketDescriptor {
     pub scale: i32,
     /// Index of the first bucket.
     pub offset: i32,
-    /// Number of contiguous buckets.
+    /// Number of contiguous buckets. Note that some buckets may be
+    /// zero, including at the extremes. Callers are expected to skip
+    /// and adjust for leading/trailing buckets.
     pub len: u32,
 }
 
@@ -186,6 +188,12 @@ pub struct Histogram<const N: usize> {
     data: [u64; N],
 }
 
+struct SlotAddr {
+    word: usize,
+    shift: usize,
+    mask: u64,
+}
+
 impl<const N: usize> Clone for Histogram<N> {
     fn clone(&self) -> Self {
         Self {
@@ -253,9 +261,9 @@ impl<const N: usize> Histogram<N> {
         self.data[0] == 0
     }
 
-    /// Number of buckets at the current width.
+    /// Number of u64 data words in use at the current width.
     #[inline]
-    const fn word_count(&self) -> u32 {
+    const fn current_word_count(&self) -> u32 {
         if self.buckets_empty() {
             0
         } else {
@@ -263,19 +271,34 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    /// Number of buckets at the current width.
+    /// Number of buckets defined at the current width.
     #[inline]
-    const fn slot_count(&self) -> u32 {
-        self.word_count() << self.current.width.to_u64_widen_by()
+    const fn current_slot_count(&self) -> u32 {
+        self.current_word_count() << self.current.width.to_u64_widen_steps()
     }
 
-    /// Ring-buffer slot index for a given bucket index.
+    // /// Ring-buffer slot index for a given bucket index.
+    // #[inline]
+    // pub(super) const fn slot_for(&self, index: i32) -> SlotAddr {
+    //     let steps = self.current.width.to_u64_widen_steps();
+    //     let word = index >> steps;
+    //     let offset = index & self.current.width.slot_mask_u64();
+    //     [word as u32, offset as u32]
+    // }
+
+    /// Returns the (word_index, bit_shift, mask) for a physical slot.
     #[inline]
-    pub(super) const fn slot_for(&self, index: i32) -> [u32; 2] {
-        let steps = self.current.width.to_u64_widen_by();
-        let word = index >> steps;
-        let offset = index & self.current.width.slot_mask_u64();
-        [word as u32, offset as u32]
+    const fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
+        let word = slot >> self.current.width.to_u64_widen_steps();
+        let shift = slot & self.current.width.slot_mask();
+
+        // let bits = self.current.width.bits_per_slot();
+        // let spw = 64 / bits;
+        // (
+        //     slot / spw,
+        //     (slot % spw) * bits,
+        //     self.current.width.counter_max(),
+        // )
     }
 
     /// Shifts all three index fields right by `by` positions.
@@ -296,18 +319,6 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     fn bucket_data_mut(&mut self) -> &mut [u64] {
         &mut self.data
-    }
-
-    /// Returns the (word_index, bit_shift, mask) for a physical slot.
-    #[inline]
-    const fn slot_addr(&self, slot: usize) -> (usize, usize, u64) {
-        let bits = self.current.width.bits_per_slot();
-        let spw = 64 / bits;
-        (
-            slot / spw,
-            (slot % spw) * bits,
-            self.current.width.counter_max(),
-        )
     }
 
     /// Gets the value at a physical slot index.
@@ -397,6 +408,10 @@ impl<const N: usize> Histogram<N> {
         // The limit at 250 allows up to 16k single-bit buckets and
         // limits the histogram struct to 2048 bytes, noting that the
         // structure itself uses 6 words.
+        //
+        // Note that nothing breaks when we allow N to grow above this
+        // limit, but the algorithms here are designed for cache-line
+        // sized data.
         const { assert!(N <= 250, "requires <= 256 u64 buckets") };
 
         let settings = Settings::new(

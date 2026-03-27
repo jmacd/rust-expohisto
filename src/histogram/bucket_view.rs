@@ -25,7 +25,7 @@ impl<const N: usize> BucketView<'_, N> {
     /// Number of logical buckets in use.
     #[inline]
     pub fn bucket_count(&self) -> u32 {
-        self.hist.slot_count()
+        self.hist.current_slot_count()
     }
 
     /// Returns the current counter width.
