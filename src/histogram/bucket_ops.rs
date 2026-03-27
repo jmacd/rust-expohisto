@@ -21,14 +21,17 @@ impl<const N: usize> Histogram<N> {
         if to_u64_widen != 0 {
             let new_width = width.wider_by(first_widen_by).expect("checked");
 
-            let mut group_count = 0;
+            let mut combined: u64 = 0;
 
             for widx in self.word_start..=self.word_end {
                 let di = widx as usize % N;
 
                 super::swar::widen_into(width, new_width, &mut self.data[di]);
-                group_count += self.data[di];
+                combined |= self.data[di];
             }
+
+            let max_representative = super::swar::or_fold_lanes(new_width, combined);
+            max_group_count = max_group_count.max(max_representative);
 
             width = new_width;
         }

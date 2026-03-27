@@ -102,6 +102,42 @@ pub(crate) fn widen_into(before: Width, after: Width, word: &mut u64) {
     };
 }
 
+/// OR-fold all SWAR lanes within a word into a single representative
+/// value.  The result has the same highest-set-bit as the true
+/// maximum lane, so `Width::from_max_value(or_fold_lanes(w, word))`
+/// gives the exact minimum width needed to hold any lane.
+#[inline]
+pub(crate) fn or_fold_lanes(width: Width, w: u64) -> u64 {
+    use Width::*;
+    match width {
+        B1 => (w != 0) as u64,
+        B2 => {
+            let w = w | (w >> 2);
+            let w = w | (w >> 4);
+            let w = w | (w >> 8);
+            let w = w | (w >> 16);
+            (w | (w >> 32)) & 0x3
+        }
+        B4 => {
+            let w = w | (w >> 4);
+            let w = w | (w >> 8);
+            let w = w | (w >> 16);
+            (w | (w >> 32)) & 0xF
+        }
+        U8 => {
+            let w = w | (w >> 8);
+            let w = w | (w >> 16);
+            (w | (w >> 32)) & 0xFF
+        }
+        U16 => {
+            let w = w | (w >> 16);
+            (w | (w >> 32)) & 0xFFFF
+        }
+        U32 => (w | (w >> 32)) & 0xFFFF_FFFF,
+        U64 => w,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +274,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Verify or_fold_lanes gives the same from_max_value as true max extraction.
+    #[test]
+    fn or_fold_matches_true_max() {
+        use crate::histogram::width::Width;
+
+        let widths = [B2, B4, U8, U16, U32, U64];
+        let test_words: &[u64] = &[
+            0,
+            1,
+            u64::MAX,
+            0xDEAD_BEEF_CAFE_BABE,
+            0x5555_5555_5555_5555,
+            0xAAAA_AAAA_AAAA_AAAA,
+            0x0100_0000_0000_0000,
+            0x8000_0000_0000_0001,
+        ];
+
+        for &width in &widths {
+            let bps = width.bits_per_slot();
+            let spw = width.slots_per_u64();
+            let mask = width.counter_max();
+
+            for &raw in test_words {
+                // Mask to valid lane values.
+                let mut word = 0u64;
+                for s in 0..spw {
+                    word |= ((raw >> (s * bps)) & mask) << (s * bps);
+                }
+
+                // True max: extract each lane, take max.
+                let mut true_max = 0u64;
+                for s in 0..spw {
+                    let lane = (word >> (s * bps)) & mask;
+                    true_max = true_max.max(lane);
+                }
+
+                let folded = or_fold_lanes(width, word);
+
+                // from_max_value should agree.
+                assert_eq!(
+                    Width::from_max_value(folded),
+                    Width::from_max_value(true_max),
+                    "width={width:?} word={word:#018X}: folded={folded}, true_max={true_max}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn or_fold_b1() {
+        assert_eq!(or_fold_lanes(B1, 0), 0);
+        assert_eq!(or_fold_lanes(B1, 1), 1);
+        assert_eq!(or_fold_lanes(B1, u64::MAX), 1);
+    }
+
+    #[test]
+    fn or_fold_u64() {
+        assert_eq!(or_fold_lanes(U64, 42), 42);
+        assert_eq!(or_fold_lanes(U64, 0), 0);
     }
 }
