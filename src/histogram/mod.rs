@@ -124,36 +124,6 @@ struct HighLow {
 }
 
 impl HighLow {
-    // #[inline]
-    // const fn empty() -> Self {
-    //     Self { low: 0, high: -1 }
-    // }
-
-    // #[inline]
-    // const fn is_empty(&self) -> bool {
-    //     self.low > self.high
-    // }
-
-    // #[inline]
-    // const fn merge(self, other: Self) -> Self {
-    //     match (self.is_empty(), other.is_empty()) {
-    //         (true, _) => other,
-    //         (_, true) => self,
-    //         _ => Self {
-    //             low: if self.low < other.low {
-    //                 self.low
-    //             } else {
-    //                 other.low
-    //             },
-    //             high: if self.high > other.high {
-    //                 self.high
-    //             } else {
-    //                 other.high
-    //             },
-    //         },
-    //     }
-    // }
-
     /// Computes how much downscaling is needed.
     #[inline]
     const fn change_steps(mut self, size: usize) -> u32 {
@@ -419,7 +389,7 @@ impl<const N: usize> Histogram<N> {
         self.word_start = 0;
         self.word_end = 0;
         self.stats = Stats::EMPTY;
-        self.data.fill(0); // TODO: is this required?
+        self.data.fill(0);
     }
 
     /// Records a single value.
@@ -454,7 +424,7 @@ impl<const N: usize> Histogram<N> {
                 return Err(Error::Extreme);
             }
             _ => {
-                // Normal exponents
+                // Normal exponents, only positive.
                 if value.is_sign_negative() {
                     return Err(Error::Extreme);
                 }
@@ -492,9 +462,6 @@ impl<const N: usize> Histogram<N> {
         mut index_fn: impl FnMut(&Self) -> i32,
     ) -> Result<(), Error> {
         loop {
-            // This ? will catch 0, Inf and NaN cases. Sign is ignored.
-            // so if the user manages to pass negatives they are counted
-            // as positive.
             let index = index_fn(self);
             let result = self.try_increment(index, incr);
             if self.resolve_increment(result)? {
