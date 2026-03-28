@@ -135,11 +135,40 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        // TODO: CASE TWO
-        // Compute group sums, bucket_set in correct location at output width.
+        // Cross-word group sums: current_width is U64, output_width
+        // is input_width. Sum groups of words and pack at output_width.
+        let aligned_start = self.word_start & !group_mask;
 
-        // Zero-fill the slots we have invalidated.
-        
+        // Pass 1: Compute group sums into temporary storage.
+        let mut sums = [0u64; N];
+        let mut num_groups = 0usize;
+
+        let mut gstart = aligned_start;
+        while gstart <= self.word_end {
+            let begin = gstart.max(self.word_start);
+            let gend = (gstart + group_size).min(self.word_end + 1);
+            sums[num_groups] = (begin..gend)
+                .fold(0u64, |s, idx| {
+                    s + self.data[idx.rem_euclid(N as i32) as usize]
+                });
+            num_groups += 1;
+            gstart += group_size;
+        }
+
+        // Pass 2: Zero data and write sums at output_width positions.
+        self.data.fill(0);
+
+        let first_slot = aligned_start >> second_widen_by;
+        for (i, &sum) in sums[..num_groups].iter().enumerate() {
+            let slot = first_slot + i as i32;
+            let addr = output_width.slot_addr(slot);
+            let di = addr.data_index(N);
+            self.data[di] = addr.update_counter_in_word(self.data[di], sum);
+        }
+
+        self.shift_indices(change);
+        self.current.width = output_width;
+
         Ok(())
     }
 }
