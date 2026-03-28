@@ -4,13 +4,13 @@
 //! Downscale operations.
 
 use super::Histogram;
-use super::swar::widen;
+use super::swar::{narrow, widen};
 use super::width::Width;
 
 impl<const N: usize> Histogram<N> {
     pub(super) fn do_downscale(&mut self, change: u32) -> Result<(), super::Error> {
         debug_assert!(change != 0);
-        debug_assert!(self.buckets_empty());
+        debug_assert!(!self.buckets_empty());
 
         let input_width = self.current.width;
         let input_to_u64_widen = input_width.to_u64_widen_steps();
@@ -124,15 +124,19 @@ impl<const N: usize> Histogram<N> {
             (wider_again, required_width)
         };
         
-        // TODO: CASE TWO
         if second_widen_by == 0 {
-            // No further summing needed.
-
-            // One word at a time, swar-narrow from current_width to required_width
-        } else {
-
-            // Compute group sums, bucket_set in correct location at output width.
+            // No cross-word summing needed. Narrow each word from
+            // current_width back to output_width.
+            for widx in self.word_start..=self.word_end {
+                let di = widx as usize % N;
+                self.data[di] = narrow(current_width, output_width, self.data[di]);
+            }
+            self.current.width = output_width;
+            return Ok(());
         }
+
+        // TODO: CASE TWO
+        // Compute group sums, bucket_set in correct location at output width.
 
         // Zero-fill the slots we have invalidated.
         
