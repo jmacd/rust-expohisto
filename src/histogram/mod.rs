@@ -268,10 +268,16 @@ impl<const N: usize> Histogram<N> {
         self.word_base >>= by;
     }
 
+    /// Physical data index for a word index under the current mapping.
+    #[inline]
+    const fn data_idx(&self, widx: i32) -> usize {
+        (widx - self.word_base).rem_euclid(N as i32) as usize
+    }
+
     /// Gets the value at a slot address.
     #[inline]
     pub(super) const fn bucket_get(&self, addr: &SlotAddr) -> u64 {
-        let idx = addr.data_index(N);
+        let idx = addr.data_index(N, self.word_base);
         let word = self.data[idx];
         addr.retrieve_counter(word)
     }
@@ -279,7 +285,7 @@ impl<const N: usize> Histogram<N> {
     /// Attempts to add `incr` to a physical slot. Returns false on overflow.
     #[inline]
     fn bucket_try_increment(&mut self, addr: &SlotAddr, incr: u64) -> Result<(), u64> {
-        let idx = addr.data_index(N);
+        let idx = addr.data_index(N, self.word_base);
         let word = self.data[idx];
         let count = addr.retrieve_counter(word);
 
@@ -497,6 +503,9 @@ impl<const N: usize> Histogram<N> {
                     high: self.word_end,
                 });
             }
+            for w in word_index..self.word_start {
+                self.data[self.data_idx(w)] = 0;
+            }
             self.word_start = word_index;
         } else if word_index > self.word_end {
             let diff = (word_index - self.word_start) as usize;
@@ -505,6 +514,9 @@ impl<const N: usize> Histogram<N> {
                     low: self.word_start,
                     high: word_index,
                 });
+            }
+            for w in (self.word_end + 1)..=word_index {
+                self.data[self.data_idx(w)] = 0;
             }
             self.word_end = word_index;
         }

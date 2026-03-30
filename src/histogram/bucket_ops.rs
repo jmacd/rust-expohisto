@@ -13,12 +13,64 @@ impl<const N: usize> Histogram<N> {
     fn widen_words(&mut self, before: Width, after: Width) -> u64 {
         let mut total_or = 0u64;
         for widx in self.word_start..=self.word_end {
-            let di = widx as usize % N;
+            let di = self.data_idx(widx);
             self.data[di] = widen(before, after, self.data[di]);
             total_or |= after.or_fold_lanes(self.data[di]);
         }
         total_or
     }
+
+    /// Process one aligned group of `total_merge` input words into a
+    /// single packed output word.  Reads use the current physical mapping.
+    fn repack_group(
+        &self,
+        ostart: i32,
+        change: u32,
+        cross_steps: u32,
+        cur: Width,
+        output_width: Width,
+    ) -> (i32, u64) {
+        let narrow_steps = change - cross_steps;
+        let group = 1i32 << cross_steps;
+        let repack = 1i32 << narrow_steps;
+        let chunk_bits = 64u32 >> narrow_steps;
+
+        let out_widx = ostart >> change;
+        let mut acc = 0u64;
+        for r in 0..repack {
+            let gstart = ostart + r * group;
+            let mut value = 0u64;
+            for g in 0..group {
+                let widx = gstart + g;
+                if widx >= self.word_start && widx <= self.word_end {
+                    value += self.data[self.data_idx(widx)];
+                }
+            }
+            let narrowed = narrow(cur, output_width, value);
+            acc |= narrowed << (r as u32 * chunk_bits);
+        }
+        (out_widx, acc)
+    }
+
+    /// Process one aligned group for pure cross-word grouping (no narrowing).
+    fn repack_group_cross(
+        &self,
+        ostart: i32,
+        change: u32,
+    ) -> (i32, u64) {
+        let total_merge = 1i32 << change;
+
+        let out_widx = ostart >> change;
+        let mut sum = 0u64;
+        for g in 0..total_merge {
+            let widx = ostart + g;
+            if widx >= self.word_start && widx <= self.word_end {
+                sum += self.data[self.data_idx(widx)];
+            }
+        }
+        (out_widx, sum)
+    }
+
     /// Downscales the histogram by at least `change` scale steps.
     ///
     /// Returns the actual number of scale steps applied, which may
@@ -74,7 +126,7 @@ impl<const N: usize> Histogram<N> {
             if total_or == 0 {
                 // When width started at U64, phase 1 and 2 were skipped.
                 for widx in self.word_start..=self.word_end {
-                    total_or |= self.data[widx as usize % N];
+                    total_or |= self.data[self.data_idx(widx)];
                 }
             }
             let required = Width::from_max_value(total_or);
@@ -92,7 +144,7 @@ impl<const N: usize> Histogram<N> {
                         for g in 0..group_size {
                             let widx = gstart + g;
                             if widx >= self.word_start && widx <= self.word_end {
-                                sum += self.data[widx as usize % N];
+                                sum += self.data[self.data_idx(widx)];
                             }
                         }
                         or_sums |= sum;
@@ -107,57 +159,63 @@ impl<const N: usize> Histogram<N> {
             }
         }
 
-        // Phase 4: Narrow and repack.
+        // Phase 4: Narrow and repack with two-pass clobber prevention.
         //
-        // Word-level compression is always 2^change:
-        //   2^cross_steps words summed into one value, repeated
-        //   2^narrow_steps times and packed at output_width.
+        // Split at word_base into forward (toward word_end) and reverse
+        // (toward word_start) passes. Within each pass, output positions
+        // advance strictly behind the read frontier, preventing clobbering.
+        //
+        // Reads use the current physical mapping. Writes use a shifted
+        // mapping that re-centers word_base at physical slot 0, which is
+        // preserved by shift_indices after the repack completes.
         let narrow_steps = change - cross_steps;
         let output_width = ALL_WIDTHS[cur as usize - narrow_steps as usize];
 
-        let group = 1i32 << cross_steps;
         let total_merge = 1i32 << change;
-        let aligned = self.word_start & !(total_merge - 1);
-        let mut out_widx = aligned >> change;
-        let mut ostart = aligned;
+        let new_word_base = self.word_base >> change;
+
+        // Write physical index under the shifted mapping.
+        let write_idx = |out_widx: i32| -> usize {
+            (out_widx - new_word_base).rem_euclid(N as i32) as usize
+        };
+
+        // The aligned group that contains word_base.
+        let fwd_start = self.word_base & !(total_merge - 1);
+        let rev_start = fwd_start - total_merge;
+        let aligned_ws = self.word_start & !(total_merge - 1);
 
         if narrow_steps > 0 {
-            let repack = 1i32 << narrow_steps;
-            let chunk_bits = 64u32 >> narrow_steps;
-
+            // Forward pass: from the group containing word_base toward word_end.
+            let mut ostart = fwd_start;
             while ostart <= self.word_end {
-                let mut acc = 0u64;
-                for r in 0..repack {
-                    let gstart = ostart + r * group;
-                    let mut value = 0u64;
-                    for g in 0..group {
-                        let widx = gstart + g;
-                        if widx >= self.word_start && widx <= self.word_end {
-                            value += self.data[widx as usize % N];
-                            self.data[widx as usize % N] = 0;
-                        }
-                    }
-                    let narrowed = narrow(cur, output_width, value);
-                    acc |= narrowed << (r as u32 * chunk_bits);
-                }
-                self.data[out_widx as usize % N] = acc;
-                out_widx += 1;
+                let (out_widx, acc) =
+                    self.repack_group(ostart, change, cross_steps, cur, output_width);
+                self.data[write_idx(out_widx)] = acc;
                 ostart += total_merge;
+            }
+
+            // Reverse pass: from the group below word_base toward word_start.
+            let mut ostart = rev_start;
+            while ostart >= aligned_ws {
+                let (out_widx, acc) =
+                    self.repack_group(ostart, change, cross_steps, cur, output_width);
+                self.data[write_idx(out_widx)] = acc;
+                ostart -= total_merge;
             }
         } else {
             // Pure cross-word grouping, output stays at U64.
+            let mut ostart = fwd_start;
             while ostart <= self.word_end {
-                let mut sum = 0u64;
-                for g in 0..total_merge {
-                    let widx = ostart + g;
-                    if widx >= self.word_start && widx <= self.word_end {
-                        sum += self.data[widx as usize % N];
-                        self.data[widx as usize % N] = 0;
-                    }
-                }
-                self.data[out_widx as usize % N] = sum;
-                out_widx += 1;
+                let (out_widx, sum) = self.repack_group_cross(ostart, change);
+                self.data[write_idx(out_widx)] = sum;
                 ostart += total_merge;
+            }
+
+            let mut ostart = rev_start;
+            while ostart >= aligned_ws {
+                let (out_widx, sum) = self.repack_group_cross(ostart, change);
+                self.data[write_idx(out_widx)] = sum;
+                ostart -= total_merge;
             }
         }
 

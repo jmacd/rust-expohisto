@@ -75,10 +75,10 @@ impl<'a> SlotAddr<'a> {
         (word & !sub_mask) | (count << shift)
     }
 
-    /// Returns the next address, if valid.
+    /// Physical data index, offset so that `word_base` maps to slot 0.
     #[inline]
-    pub(crate) const fn data_index(&self, data_size: usize) -> usize {
-        self.word_index.rem_euclid(data_size as i32) as usize
+    pub(crate) const fn data_index(&self, data_size: usize, word_base: i32) -> usize {
+        (self.word_index - word_base).rem_euclid(data_size as i32) as usize
     }
 
     /// Returns the remaining size relative to this address.
