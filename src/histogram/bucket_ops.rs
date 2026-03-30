@@ -8,6 +8,17 @@ use super::swar::{narrow, widen};
 use super::width::{Width, ALL_WIDTHS};
 
 impl<const N: usize> Histogram<N> {
+    /// Widen every active word from `before` to `after` and return
+    /// the OR-fold of all lanes at the new width.
+    fn widen_words(&mut self, before: Width, after: Width) -> u64 {
+        let mut total_or = 0u64;
+        for widx in self.word_start..=self.word_end {
+            let di = widx as usize % N;
+            self.data[di] = widen(before, after, self.data[di]);
+            total_or |= after.or_fold_lanes(self.data[di]);
+        }
+        total_or
+    }
     /// Downscales the histogram by at least `change` scale steps.
     ///
     /// Returns the actual number of scale steps applied, which may
@@ -27,11 +38,7 @@ impl<const N: usize> Histogram<N> {
 
         if first_widen > 0 {
             cur = input_width.wider_by(first_widen).expect("capped at U64");
-            for widx in self.word_start..=self.word_end {
-                let di = widx as usize % N;
-                self.data[di] = widen(input_width, cur, self.data[di]);
-                total_or |= cur.or_fold_lanes(self.data[di]);
-            }
+            total_or = self.widen_words(input_width, cur);
         }
 
         // Phase 2: Widen one step at a time until the gap between
@@ -48,12 +55,7 @@ impl<const N: usize> Histogram<N> {
 
             let prev = cur;
             cur = cur.wider_by(1).expect("not yet U64");
-            total_or = 0;
-            for widx in self.word_start..=self.word_end {
-                let di = widx as usize % N;
-                self.data[di] = widen(prev, cur, self.data[di]);
-                total_or |= cur.or_fold_lanes(self.data[di]);
-            }
+            total_or = self.widen_words(prev, cur);
             total_widen += 1;
         }
 
