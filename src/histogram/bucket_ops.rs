@@ -71,7 +71,7 @@ impl<const N: usize> Histogram<N> {
         let mut cross_steps = 0u32;
 
         if cur == Width::U64 {
-            // Compute or recompute the gap at U64.
+            // When width started at U64, phase 1 was skipped.
             if total_or == 0 {
                 for widx in self.word_start..=self.word_end {
                     total_or |= self.data[widx as usize % N];
