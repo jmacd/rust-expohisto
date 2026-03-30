@@ -103,8 +103,8 @@ impl<const N: usize> Histogram<N> {
 
             if cur == Width::U64 {
                 // Sub-U64 widening exhausted; cross-word grouping
-                // is required (not yet implemented).
-                todo!("downscale: cross-word grouping (sub-U64 → U64 path)");
+                // is required for the remaining compression.
+                return self.downscale_cross_word(change, total_widen);
             }
 
             let prev = cur;
@@ -155,5 +155,116 @@ impl<const N: usize> Histogram<N> {
         self.shift_indices(change);
         self.current.width = output_width;
         Ok(total_widen)
+    }
+
+    /// Downscale when in-word widening reached U64 without sufficient
+    /// gap to narrow by `change` steps. Performs cross-word grouping
+    /// of U64 values followed by narrowing and repacking.
+    ///
+    /// At entry, data is at U64 width (1 value per word) after
+    /// `total_widen` in-word widen steps. Cross-word grouping sums
+    /// consecutive U64 words to reduce word count, then narrowing
+    /// repacks the sums at the tightest fitting width.
+    ///
+    /// The word-level compression is always 2^change:
+    ///   cross_steps of grouping (2^cross_steps : 1) +
+    ///   narrow_steps of narrow+repack (2^narrow_steps : 1).
+    ///
+    /// Returns the actual scale change (≥ `change`).
+    fn downscale_cross_word(
+        &mut self,
+        change: u32,
+        total_widen: u32,
+    ) -> Result<u32, super::Error> {
+        // Determine minimum cross_steps such that
+        // cross_steps + gap(cross_steps) >= change.
+        //
+        // gap(k) = U64 - required_width for the max group sum at
+        // group size 2^k. Each doubling adds at most 1 bit to the
+        // max, so gap decreases by at most 1 per step while
+        // cross_steps increases by 1 — the sum is non-decreasing.
+        let mut cross_steps = 0u32;
+        loop {
+            let group_size = 1i32 << cross_steps;
+            let group_mask = group_size - 1;
+            let aligned = self.word_start & !group_mask;
+            let mut max_sum = 0u64;
+            let mut gstart = aligned;
+            while gstart <= self.word_end {
+                let mut sum = 0u64;
+                for g in 0..group_size {
+                    let widx = gstart + g;
+                    if widx >= self.word_start && widx <= self.word_end {
+                        sum += self.data[widx as usize % N];
+                    }
+                }
+                max_sum = max_sum.max(sum);
+                gstart += group_size;
+            }
+            let required = Width::from_max_value(max_sum);
+            let gap = Width::U64.subtract(required) as u32;
+            if cross_steps + gap >= change {
+                break;
+            }
+            cross_steps += 1;
+        }
+
+        let narrow_steps = change - cross_steps;
+        let output_width = ALL_WIDTHS[Width::U64 as usize - narrow_steps as usize];
+
+        // Combined pass: group-sum + narrow + repack.
+        //
+        // Each output word holds 2^narrow_steps values at output_width,
+        // where each value is the sum of 2^cross_steps consecutive U64
+        // words. Total input words per output = 2^change.
+        let group = 1i32 << cross_steps;
+        let total_merge = 1i32 << change;
+        let aligned = self.word_start & !(total_merge - 1);
+        let mut out_widx = aligned >> change;
+        let mut ostart = aligned;
+
+        if narrow_steps > 0 {
+            let repack = 1i32 << narrow_steps;
+            let chunk_bits = 64u32 >> narrow_steps;
+
+            while ostart <= self.word_end {
+                let mut acc = 0u64;
+                for r in 0..repack {
+                    let gstart = ostart + r * group;
+                    let mut sum = 0u64;
+                    for g in 0..group {
+                        let widx = gstart + g;
+                        if widx >= self.word_start && widx <= self.word_end {
+                            sum += self.data[widx as usize % N];
+                            self.data[widx as usize % N] = 0;
+                        }
+                    }
+                    let narrowed = narrow(Width::U64, output_width, sum);
+                    acc |= narrowed << (r as u32 * chunk_bits);
+                }
+                self.data[out_widx as usize % N] = acc;
+                out_widx += 1;
+                ostart += total_merge;
+            }
+        } else {
+            // Pure cross-word grouping, output stays U64.
+            while ostart <= self.word_end {
+                let mut sum = 0u64;
+                for g in 0..total_merge {
+                    let widx = ostart + g;
+                    if widx >= self.word_start && widx <= self.word_end {
+                        sum += self.data[widx as usize % N];
+                        self.data[widx as usize % N] = 0;
+                    }
+                }
+                self.data[out_widx as usize % N] = sum;
+                out_widx += 1;
+                ostart += total_merge;
+            }
+        }
+
+        self.shift_indices(change);
+        self.current.width = output_width;
+        Ok(total_widen + cross_steps)
     }
 }
