@@ -5,7 +5,7 @@
 
 use super::Histogram;
 use super::swar::{narrow, widen};
-use super::width::{Width, ALL_WIDTHS};
+use super::width::{ALL_WIDTHS, Width};
 
 impl<const N: usize> Histogram<N> {
     /// Widen every active word from `before` to `after` and return
@@ -71,8 +71,8 @@ impl<const N: usize> Histogram<N> {
         let mut cross_steps = 0u32;
 
         if cur == Width::U64 {
-            // When width started at U64, phase 1 was skipped.
             if total_or == 0 {
+                // When width started at U64, phase 1 and 2 were skipped.
                 for widx in self.word_start..=self.word_end {
                     total_or |= self.data[widx as usize % N];
                 }
@@ -85,7 +85,7 @@ impl<const N: usize> Histogram<N> {
                     cross_steps += 1;
                     let group_size = 1i32 << cross_steps;
                     let aligned = self.word_start & !(group_size - 1);
-                    let mut max_sum = 0u64;
+                    let mut or_sums = 0u64;
                     let mut gstart = aligned;
                     while gstart <= self.word_end {
                         let mut sum = 0u64;
@@ -95,10 +95,10 @@ impl<const N: usize> Histogram<N> {
                                 sum += self.data[widx as usize % N];
                             }
                         }
-                        max_sum = max_sum.max(sum);
+                        or_sums |= sum;
                         gstart += group_size;
                     }
-                    let required = Width::from_max_value(max_sum);
+                    let required = Width::from_max_value(or_sums);
                     let gap = Width::U64.subtract(required) as u32;
                     if cross_steps + gap >= change {
                         break;
