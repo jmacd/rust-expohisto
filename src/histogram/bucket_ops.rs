@@ -5,170 +5,155 @@
 
 use super::Histogram;
 use super::swar::{narrow, widen};
-use super::width::Width;
+use super::width::{Width, ALL_WIDTHS};
 
 impl<const N: usize> Histogram<N> {
-    pub(super) fn do_downscale(&mut self, change: u32) -> Result<(), super::Error> {
+    /// Downscales the histogram by at least `change` scale steps.
+    ///
+    /// Returns the actual number of scale steps applied, which may
+    /// exceed `change` when bucket sums require a wider output width.
+    pub(super) fn do_downscale(&mut self, change: u32) -> Result<u32, super::Error> {
         debug_assert!(change != 0);
         debug_assert!(!self.buckets_empty());
 
-        let input_width = self.current.width;
-        let input_to_u64_widen = input_width.to_u64_widen_steps();
-        let first_widen_by = change.min(input_to_u64_widen);
-        let second_widen_by = change - first_widen_by;
-        let group_size = 1 << second_widen_by;
-        let group_mask = group_size - 1;
-
-        // Handle the U64 case, where no sub-u64 widening occurs.
-        if input_to_u64_widen == 0 {
-
-            // Range of output group 0 is (from..to)
-            let from = self.word_base & !group_mask;
-            let to = from + group_size;
-
-            // Compute group 0.
-            self.data[0] = (from..to).fold(0, |s, idx| s + self.data[idx as usize % N]);
-
-            // Compute groups 1..end
-            let end_limit = self.word_end+1;
-            for slot in (to..end_limit).step_by(group_size as usize) {
-                let widx = slot >> second_widen_by;
-                let end = (slot + group_size).min(end_limit);
-                self.data[widx as usize] = (slot..end)
-                    .fold(0, |s, idx| s + self.data[idx as usize % N]);
-            }
-
-            // Compute groups start..0
-            let start_limit = self.word_start & !group_mask;
-            
-            for slot in (start_limit..from).step_by(group_size as usize)
-            {
-                let widx = slot >> second_widen_by;
-                let begin = slot.max(self.word_start);
-                self.data[widx as usize] = (begin..slot + group_size)
-                    .fold(0, |s, idx| s + self.data[idx as usize % N]);
-            }
-
-            // Clear the now-empty buckets.
-            let clear_from = (end_limit >> second_widen_by) as usize + 1;
-            let clear_to = start_limit as usize >> second_widen_by;
-            self.data[clear_from..clear_to].fill(0);
-
-            // Downscale the range.
-            self.shift_indices(change);
-            
-            return Ok(())
+        if self.current.width == Width::U64 {
+            self.downscale_u64(change);
+            return Ok(change);
         }
 
-        // Widen by up to the downscale factor. In some cases, we will
-        // be able to repack back down to the original width.
-        let wider_width = input_width.wider_by(first_widen_by).expect("checked");
-        
-        let mut total_combined = 0;
-        let mut group_combined = 0;
+        self.downscale_sub_u64(change)
+    }
+
+    /// Downscale when input is already at U64 width.
+    ///
+    /// Groups of 2^change consecutive words are summed in place,
+    /// processing outward from word_base to avoid overwriting
+    /// unread data.
+    fn downscale_u64(&mut self, change: u32) {
+        let group_size = 1i32 << change;
+        let group_mask = group_size - 1;
+
+        let from = self.word_base & !group_mask;
+        let to = from + group_size;
+
+        // Compute group containing word_base.
+        self.data[0] = (from..to)
+            .fold(0, |s, idx| s + self.data[idx as usize % N]);
+
+        // Compute groups above word_base.
+        let end_limit = self.word_end + 1;
+        for slot in (to..end_limit).step_by(group_size as usize) {
+            let widx = slot >> change;
+            let end = (slot + group_size).min(end_limit);
+            self.data[widx as usize % N] = (slot..end)
+                .fold(0, |s, idx| s + self.data[idx as usize % N]);
+        }
+
+        // Compute groups below word_base.
+        let start_limit = self.word_start & !group_mask;
+        for slot in (start_limit..from).step_by(group_size as usize) {
+            let widx = slot >> change;
+            let begin = slot.max(self.word_start);
+            self.data[widx as usize % N] = (begin..slot + group_size)
+                .fold(0, |s, idx| s + self.data[idx as usize % N]);
+        }
+
+        // Clear the vacated range.
+        let clear_from = (end_limit >> change) as usize + 1;
+        let clear_to = start_limit as usize >> change;
+        self.data[clear_from..clear_to].fill(0);
+
+        self.shift_indices(change);
+    }
+
+    /// Downscale from a sub-U64 width by iterative in-place widening,
+    /// then narrowing and repacking.
+    ///
+    /// Phase 1 widens by `change` steps so each lane holds the sum of
+    /// 2^change input buckets. Phase 2 widens further, one step at a
+    /// time, until the gap between lane width and required width
+    /// reaches `change` — meaning the values can be repacked into
+    /// 2^change fewer words. Phase 3 narrows and merges the words.
+    ///
+    /// Returns the actual scale change (≥ `change`).
+    fn downscale_sub_u64(&mut self, change: u32) -> Result<u32, super::Error> {
+        let input_width = self.current.width;
+        let to_u64 = input_width.to_u64_widen_steps();
+
+        // Phase 1: Widen by up to `change` steps (capped at U64).
+        let first_widen = change.min(to_u64);
+        let mut cur = input_width.wider_by(first_widen).expect("capped at U64");
+        let mut total_widen = first_widen;
+        let mut total_or = 0u64;
 
         for widx in self.word_start..=self.word_end {
             let di = widx as usize % N;
+            self.data[di] = widen(input_width, cur, self.data[di]);
+            total_or |= cur.or_fold_lanes(self.data[di]);
+        }
 
-            let word = widen(input_width, wider_width, self.data[di]);
-            
-            self.data[di] = word;
-            
-            if second_widen_by == 0 {
-                // When we are not combining u64 values, no sum required.
-                total_combined |= wider_width.or_fold_lanes(word);
-            } else {
-                group_combined += word;
+        // Phase 2: Widen one step at a time until the gap between
+        // current width and required width reaches `change`.
+        loop {
+            let required = Width::from_max_value(total_or);
+            let gap = cur.subtract(required);
+            if gap >= change as i32 {
+                break;
+            }
 
-                if (widx & group_mask) == group_mask {
-                    total_combined |= group_combined;
-                    group_combined = 0;
+            if cur == Width::U64 {
+                // Sub-U64 widening exhausted; cross-word grouping
+                // is required (not yet implemented).
+                todo!("downscale: cross-word grouping (sub-U64 → U64 path)");
+            }
+
+            let prev = cur;
+            cur = cur.wider_by(1).expect("not yet U64");
+            total_or = 0;
+            for widx in self.word_start..=self.word_end {
+                let di = widx as usize % N;
+                self.data[di] = widen(prev, cur, self.data[di]);
+                total_or |= cur.or_fold_lanes(self.data[di]);
+            }
+            total_widen += 1;
+        }
+
+        // Phase 3: Narrow and repack.
+        //
+        // The output width is `change` steps below `cur`. Since
+        // gap >= change, narrowing preserves all values.
+        let output_width = ALL_WIDTHS[cur as usize - change as usize];
+
+        // Merge 2^change words into one by narrowing each word
+        // (which packs values into the low 64>>change bits) and
+        // OR-ing them at successive offsets within the output word.
+        //
+        // Forward scan is safe: the output position for group g
+        // is always behind group g+1's first input word.
+        let merge = 1i32 << change;
+        let chunk_bits = 64u32 >> change;
+        let aligned = self.word_start & !(merge - 1);
+        let mut out_widx = aligned >> change;
+        let mut gstart = aligned;
+
+        while gstart <= self.word_end {
+            let mut acc = 0u64;
+            for i in 0..merge {
+                let widx = gstart + i;
+                if widx >= self.word_start && widx <= self.word_end {
+                    let di = widx as usize % N;
+                    let narrowed = narrow(cur, output_width, self.data[di]);
+                    acc |= narrowed << (i as u32 * chunk_bits);
+                    self.data[di] = 0;
                 }
             }
-        }
-        
-        total_combined |= group_combined;
-        
-        // We OR-folded the group totals.
-        let required_width = Width::from_max_value(wider_width.or_fold_lanes(total_combined));
-        
-        // The wider width has to be at least one greater than required.
-        debug_assert!(wider_width.subtract(required_width) > 0);
-        
-        // However, required can be more than, less than, or equal input_width.
-        let difference = required_width.subtract(input_width);
-        debug_assert!(difference >= 0);
-        
-        // When we change scale, sometimes require more in-word widening.
-        let (current_width, output_width) = if difference == 0 {
-            (wider_width, input_width)
-        } else {
-            // When required is greater than input width, it means
-            // we haven't widened enough. The wider_width must not be
-            // U64 or it implies an earlier overflow.
-            let overflow_widen = difference as u32;
-            let wider_to_u64_widen = wider_width.to_u64_widen_steps();
-            debug_assert!(overflow_widen <= wider_to_u64_widen);
-            
-            let wider_again = wider_width.wider_by(overflow_widen).expect("checked");
-            
-            // In this case, we have to do it again.
-            for widx in self.word_start..=self.word_end {
-                let di = widx as usize % N;
-                
-                let word = widen(wider_width, wider_again, self.data[di]);
-                
-                self.data[di] = word;
-            }
-            debug_assert!(wider_again as i32 - required_width as i32 == change as i32);
-            (wider_again, required_width)
-        };
-        
-        if second_widen_by == 0 {
-            // No cross-word summing needed. Narrow each word from
-            // current_width back to output_width.
-            for widx in self.word_start..=self.word_end {
-                let di = widx as usize % N;
-                self.data[di] = narrow(current_width, output_width, self.data[di]);
-            }
-            self.current.width = output_width;
-            return Ok(());
-        }
-
-        // Cross-word group sums: current_width is U64, output_width
-        // is input_width. Sum groups of words and pack at output_width.
-        let aligned_start = self.word_start & !group_mask;
-
-        // Pass 1: Compute group sums into temporary storage.
-        let mut sums = [0u64; N];
-        let mut num_groups = 0usize;
-
-        let mut gstart = aligned_start;
-        while gstart <= self.word_end {
-            let begin = gstart.max(self.word_start);
-            let gend = (gstart + group_size).min(self.word_end + 1);
-            sums[num_groups] = (begin..gend)
-                .fold(0u64, |s, idx| {
-                    s + self.data[idx.rem_euclid(N as i32) as usize]
-                });
-            num_groups += 1;
-            gstart += group_size;
-        }
-
-        // Pass 2: Zero data and write sums at output_width positions.
-        self.data.fill(0);
-
-        let first_slot = aligned_start >> second_widen_by;
-        for (i, &sum) in sums[..num_groups].iter().enumerate() {
-            let slot = first_slot + i as i32;
-            let addr = output_width.slot_addr(slot);
-            let di = addr.data_index(N);
-            self.data[di] = addr.update_counter_in_word(self.data[di], sum);
+            self.data[out_widx as usize % N] = acc;
+            out_widx += 1;
+            gstart += merge;
         }
 
         self.shift_indices(change);
         self.current.width = output_width;
-
-        Ok(())
+        Ok(total_widen)
     }
 }

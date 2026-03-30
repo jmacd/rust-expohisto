@@ -470,8 +470,8 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        self.do_downscale(change)?;
-        self.change_scale(change);
+        let actual = self.do_downscale(change)?;
+        self.change_scale(actual);
         Ok(())
     }
 
