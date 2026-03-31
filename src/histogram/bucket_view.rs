@@ -13,16 +13,25 @@ pub struct BucketView<'a, const N: usize> {
 }
 
 impl<const N: usize> BucketView<'_, N> {
-    /// Returns the base bucket offset.
+    /// Returns the first slot index (bucket offset).
     #[inline]
     pub fn offset(&self) -> i32 {
-        self.hist.word_start
+        self.hist
+            .current
+            .width
+            .word_to_slot_index(self.hist.word_start)
     }
 
     /// Number of logical buckets in use.
     #[inline]
-    pub fn bucket_count(&self) -> u32 {
+    pub fn len(&self) -> u32 {
         self.hist.current_slot_count() as u32
+    }
+
+    /// Number of logical buckets in use (alias).
+    #[inline]
+    pub fn bucket_count(&self) -> u32 {
+        self.len()
     }
 
     /// Returns the current counter width.
@@ -42,7 +51,7 @@ impl<const N: usize> BucketView<'_, N> {
     pub fn iter(&self) -> BucketsIter<'_, N> {
         BucketsIter {
             hist: self.hist,
-            addr: self.is_empty().then(|| self.hist.start_addr()),
+            addr: (!self.is_empty()).then(|| self.hist.start_addr()),
         }
     }
 }

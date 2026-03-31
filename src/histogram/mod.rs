@@ -124,6 +124,32 @@ struct HighLow {
 }
 
 impl HighLow {
+    /// An empty range sentinel.
+    #[inline]
+    const fn empty() -> Self {
+        Self {
+            low: i32::MAX,
+            high: i32::MIN,
+        }
+    }
+
+    /// Union of two ranges.
+    #[inline]
+    const fn merge(self, other: Self) -> Self {
+        Self {
+            low: if self.low < other.low {
+                self.low
+            } else {
+                other.low
+            },
+            high: if self.high > other.high {
+                self.high
+            } else {
+                other.high
+            },
+        }
+    }
+
     /// Computes how much downscaling is needed.
     #[inline]
     const fn change_steps(mut self, size: usize) -> u32 {
@@ -241,6 +267,29 @@ impl<const N: usize> Histogram<N> {
         self.current
             .width
             .word_to_slot_index(self.current_word_count())
+    }
+
+    /// Returns the slot index range `[first_slot, last_slot]`.
+    #[inline]
+    fn slot_range(&self) -> HighLow {
+        if self.buckets_empty() {
+            return HighLow::empty();
+        }
+        HighLow {
+            low: self.current.width.word_to_slot_index(self.word_start),
+            high: self.current.width.word_to_slot_index(self.word_end + 1) - 1,
+        }
+    }
+
+    /// Projects the slot range to a (coarser) target scale.
+    #[inline]
+    fn slot_range_at_scale(&self, target_scale: i32) -> HighLow {
+        let shift = self.current.scale.scale() - target_scale;
+        let r = self.slot_range();
+        HighLow {
+            low: r.low >> shift,
+            high: r.high >> shift,
+        }
     }
 
     /// Returns the slot address of a bucket indx.
@@ -536,8 +585,13 @@ impl<const N: usize> Histogram<N> {
             IncrResult::Ok => Ok(true),
             IncrResult::CounterOverflow(total) => {
                 let new_width = Width::from_max_value(total);
-                let change = new_width.subtract(self.current.width);
-                self.downscale_by(change as u32)?;
+                if self.buckets_empty() {
+                    // No data to transform — just widen.
+                    self.current.width = new_width;
+                } else {
+                    let change = new_width.subtract(self.current.width);
+                    self.downscale_by(change as u32)?;
+                }
                 Ok(false)
             }
             IncrResult::NeedsDownscale(hl) => {

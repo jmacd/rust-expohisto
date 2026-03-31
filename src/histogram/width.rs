@@ -168,7 +168,7 @@ impl Width {
     /// Shifts a bucket index to its u64-word address.
     #[inline]
     #[must_use]
-    const fn slot_to_word_index(self, index: i32) -> i32 {
+    pub(crate) const fn slot_to_word_index(self, index: i32) -> i32 {
         index >> self.to_u64_widen_steps()
     }
 

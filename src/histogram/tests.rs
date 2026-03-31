@@ -1,8 +1,162 @@
 // Tests always run with std available, even when the crate is no_std.
 extern crate std;
 
-// use super::*;
-// use crate::mapping::Scale;
+use super::*;
+use crate::mapping::Scale;
+
+/// Helper: count total across all positive buckets.
+fn bucket_total<const N: usize>(h: &Histogram<N>) -> u64 {
+    h.view().positive().iter().sum()
+}
+
+fn assert_stats<const N: usize>(h: &Histogram<N>, count: u64, sum: f64, min: f64, max: f64) {
+    let s = h.view().stats();
+    assert_eq!(s.count, count, "count");
+    assert!((s.sum - sum).abs() < 1e-10, "sum: {} vs {}", s.sum, sum);
+    if count > 0 {
+        assert_eq!(s.min, min, "min");
+        assert_eq!(s.max, max, "max");
+    }
+}
+
+#[test]
+fn merge_both_empty() {
+    let mut h1: Histogram<8> = Histogram::new();
+    let h2: Histogram<8> = Histogram::new();
+    h1.merge_from(&h2).unwrap();
+    assert_eq!(h1.view().stats().count, 0);
+}
+
+#[test]
+fn merge_into_empty() {
+    let mut h1: Histogram<8> = Histogram::new();
+    let mut h2: Histogram<8> = Histogram::new();
+    h2.update(1.0).unwrap();
+    h2.update(2.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 2, 3.0, 1.0, 2.0);
+    assert_eq!(bucket_total(&h1), 2);
+}
+
+#[test]
+fn merge_from_empty() {
+    let mut h1: Histogram<8> = Histogram::new();
+    h1.update(1.0).unwrap();
+    let h2: Histogram<8> = Histogram::new();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 1, 1.0, 1.0, 1.0);
+}
+
+#[test]
+fn merge_same_scale() {
+    let mut h1: Histogram<16> = Histogram::new();
+    let mut h2: Histogram<16> = Histogram::new();
+
+    h1.update(1.0).unwrap();
+    h1.update(2.0).unwrap();
+    h2.update(3.0).unwrap();
+    h2.update(4.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 4, 10.0, 1.0, 4.0);
+    assert_eq!(bucket_total(&h1), 4);
+}
+
+#[test]
+fn merge_different_pool_sizes() {
+    let mut h1: Histogram<8> = Histogram::new();
+    let mut h2: Histogram<16> = Histogram::new();
+
+    h1.update(1.0).unwrap();
+    h2.update(2.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 2, 3.0, 1.0, 2.0);
+}
+
+#[test]
+fn merge_with_zeros() {
+    let mut h1: Histogram<8> = Histogram::new();
+    let mut h2: Histogram<8> = Histogram::new();
+
+    h1.update(0.0).unwrap();
+    h1.update(1.0).unwrap();
+    h2.update(0.0).unwrap();
+    h2.update(2.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 4, 3.0, 1.0, 2.0);
+    // Two zeros + two bucketed values
+    assert_eq!(bucket_total(&h1), 2);
+}
+
+#[test]
+fn merge_triggers_downscale() {
+    // Use small pool to force downscale on merge.
+    let mut h1: Histogram<2> = Histogram::new();
+    let mut h2: Histogram<2> = Histogram::new();
+
+    // Fill h1 and h2 with values at distant bucket indices.
+    h1.update(1.0).unwrap();
+    h2.update(1000.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 2, 1001.0, 1.0, 1000.0);
+    assert_eq!(bucket_total(&h1), 2);
+}
+
+#[test]
+fn merge_oracle_basic() {
+    // Verify bucket-level correctness against an oracle.
+    let mut h1: Histogram<16> = Histogram::new();
+    let mut h2: Histogram<16> = Histogram::new();
+
+    let vals1 = [1.0, 1.5, 2.0, 3.0];
+    let vals2 = [0.5, 1.0, 4.0, 8.0];
+
+    for &v in &vals1 {
+        h1.update(v).unwrap();
+    }
+    for &v in &vals2 {
+        h2.update(v).unwrap();
+    }
+
+    h1.merge_from(&h2).unwrap();
+
+    let v = h1.view();
+    let scale = Scale::new(v.scale()).unwrap();
+    let buckets = v.positive();
+
+    // Every value must land in the correct bucket.
+    let all_vals: std::vec::Vec<f64> = vals1.iter().chain(&vals2).copied().collect();
+    for &val in &all_vals {
+        let idx = scale.map_to_index(val);
+        let pos = (idx - buckets.offset()) as usize;
+        assert!(
+            pos < buckets.len() as usize,
+            "val {val} at idx {idx} out of range"
+        );
+    }
+
+    assert_eq!(v.stats().count, 8);
+    assert_eq!(bucket_total(&h1), 8);
+}
+
+#[test]
+fn merge_high_incr() {
+    // Merge with large increments that trigger width overflow.
+    let mut h1: Histogram<8> = Histogram::new();
+    let mut h2: Histogram<8> = Histogram::new();
+
+    h1.record_incr(1.0, 1000).unwrap();
+    h2.record_incr(1.0, 2000).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_eq!(h1.view().stats().count, 3000);
+    assert_eq!(bucket_total(&h1), 3000);
+}
 // use rand::rngs::StdRng;
 // use rand::{Rng, SeedableRng};
 // use std::{format, vec, vec::Vec};
