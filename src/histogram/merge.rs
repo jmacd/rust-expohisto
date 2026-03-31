@@ -3,7 +3,7 @@
 
 //! Merge logic for combining histograms.
 
-use super::swar::widen;
+use super::swar::{swar_add_checked, widen};
 use super::width::Width;
 use super::{Error, HighLow, Histogram, Stats};
 
@@ -98,6 +98,29 @@ impl<const N: usize> Histogram<N> {
         Ok(())
     }
 
+    /// Pre-extend the word range to cover `[lo_widx, hi_widx]` and
+    /// zero-fill any newly exposed words.
+    fn extend_word_range(&mut self, lo_widx: i32, hi_widx: i32) {
+        if self.buckets_empty() {
+            self.word_start = lo_widx;
+            self.word_end = hi_widx;
+            self.word_base = lo_widx;
+            return;
+        }
+        if lo_widx < self.word_start {
+            for w in lo_widx..self.word_start {
+                self.data[self.data_idx(w)] = 0;
+            }
+            self.word_start = lo_widx;
+        }
+        if hi_widx > self.word_end {
+            for w in (self.word_end + 1)..=hi_widx {
+                self.data[self.data_idx(w)] = 0;
+            }
+            self.word_end = hi_widx;
+        }
+    }
+
     /// Merge when the scale shift fits entirely within a single source word.
     /// Each source word is widened by `in_word_steps`, producing multiple
     /// destination-slot contributions per word.
@@ -113,6 +136,83 @@ impl<const N: usize> Histogram<N> {
         } else {
             src_width
         };
+
+        // Fast path: when widened source width matches dest width, the
+        // 1:1 word mapping lets us add whole SWAR words directly.
+        if widened_width == self.current.width {
+            self.extend_word_range(other.word_start, other.word_end);
+            return self.merge_in_word_fast(
+                other,
+                src_width,
+                widened_width,
+            );
+        }
+
+        // Slow path: extract lanes one by one via retry_increment.
+        self.merge_in_word_slow(other, src_width, src_scale, in_word_steps, widened_width)
+    }
+
+    /// Word-level fast path: swar_add_checked per source word.
+    /// On overflow, widen all dest words in place and retry.
+    fn merge_in_word_fast<const M: usize>(
+        &mut self,
+        other: &Histogram<M>,
+        src_width: Width,
+        mut widened_width: Width,
+    ) -> Result<(), Error> {
+        for src_widx in other.word_start..=other.word_end {
+            let word = other.data[other.data_idx(src_widx)];
+            if word == 0 {
+                continue;
+            }
+
+            // Use widened_width (not in_word_steps) since overflow
+            // handling may have changed it.
+            let mut widened = if widened_width != src_width {
+                widen(src_width, widened_width, word)
+            } else {
+                word
+            };
+
+            let didx = self.data_idx(src_widx);
+
+            loop {
+                match swar_add_checked(self.data[didx], widened, self.current.width) {
+                    Some(result) => {
+                        self.data[didx] = result;
+                        break;
+                    }
+                    None => {
+                        // Determine the minimum width to hold the sum.
+                        let max_a = self.current.width.or_fold_lanes(self.data[didx]);
+                        let max_b = self.current.width.or_fold_lanes(widened);
+                        let new_width = Width::from_max_value(max_a + max_b);
+                        let change = new_width.subtract(self.current.width) as u32;
+
+                        // Widen all dest words in place.
+                        self.widen_words(self.current.width, new_width);
+                        self.change_scale(change);
+                        self.current.width = new_width;
+
+                        // Widen the source contribution to match.
+                        widened = widen(widened_width, new_width, widened);
+                        widened_width = new_width;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lane-by-lane slow path for merge_in_word.
+    fn merge_in_word_slow<const M: usize>(
+        &mut self,
+        other: &Histogram<M>,
+        src_width: Width,
+        src_scale: i32,
+        in_word_steps: u32,
+        widened_width: Width,
+    ) -> Result<(), Error> {
         let lanes = widened_width.slots_per_u64();
         let lane_bits = widened_width.bits_per_slot();
         let lane_mask = widened_width.counter_max();

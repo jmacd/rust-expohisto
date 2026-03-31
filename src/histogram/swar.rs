@@ -203,7 +203,51 @@ pub(crate) fn narrow(before: Width, after: Width, w: u64) -> u64 {
     }
 }
 
+/// SWAR addition with per-lane overflow detection.
+///
+/// Returns `Some(a + b)` if no lane overflows, or `None` if any lane
+/// would exceed its maximum value.  Neither input is modified on failure.
+///
+/// Algorithm: zero the MSB of each lane, add the lower bits (which
+/// cannot carry across lanes), then detect overflow via the majority
+/// function of (a_msb, b_msb, carry_from_below).
+#[inline]
+pub(crate) fn swar_add_checked(a: u64, b: u64, width: Width) -> Option<u64> {
+    if width == Width::U64 {
+        return a.checked_add(b);
+    }
+    let msb = width.msb_mask();
+    let a_lo = a & !msb;
+    let b_lo = b & !msb;
+    let sum_lo = a_lo + b_lo; // no inter-lane carry (MSB was zeroed)
+    let carry = sum_lo & msb;
+    let a_hi = a & msb;
+    let b_hi = b & msb;
+    // Overflow in a lane iff at least 2 of {a_msb, b_msb, carry} are set.
+    let overflow = (a_hi & b_hi) | (a_hi & carry) | (b_hi & carry);
+    if overflow != 0 {
+        return None;
+    }
+    Some(sum_lo ^ a_hi ^ b_hi)
+}
+
 impl Width {
+    /// Mask with the MSB of each SWAR lane set.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn msb_mask(self) -> u64 {
+        use Width::{B1, B2, B4, U8, U16, U32, U64};
+        match self {
+            B1 => 0xFFFF_FFFF_FFFF_FFFF,
+            B2 => 0xAAAA_AAAA_AAAA_AAAA,
+            B4 => 0x8888_8888_8888_8888,
+            U8 => 0x8080_8080_8080_8080,
+            U16 => 0x8000_8000_8000_8000,
+            U32 => 0x8000_0000_8000_0000,
+            U64 => 0x8000_0000_0000_0000,
+        }
+    }
+
     /// OR-fold all SWAR lanes within a word into a single representative
     /// value.  The result has the same highest-set-bit as the true
     /// maximum lane, so `Width::from_max_value(or_fold_lanes(w, word))`
@@ -417,6 +461,149 @@ mod tests {
 
             let short = (result >> (i as u64 * 16)) & 0xFFFF;
             assert_eq!(short, 42, "short {i}");
+        }
+    }
+
+    // ── msb_mask tests ─────────────────────────────────────────────
+
+    #[test]
+    fn msb_mask_b1() {
+        assert_eq!(Width::B1.msb_mask(), u64::MAX);
+    }
+
+    #[test]
+    fn msb_mask_b2() {
+        // Bit 1 of every 2-bit lane
+        assert_eq!(Width::B2.msb_mask(), 0xAAAA_AAAA_AAAA_AAAA);
+    }
+
+    #[test]
+    fn msb_mask_u8() {
+        // Bit 7 of every byte
+        assert_eq!(Width::U8.msb_mask(), 0x8080_8080_8080_8080);
+    }
+
+    // ── swar_add_checked tests ─────────────────────────────────────
+
+    #[test]
+    fn swar_add_checked_u8_no_overflow() {
+        let a = pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]);
+        let b = pack_u8x8([5, 10, 15, 20, 25, 30, 35, 40]);
+        let expected = pack_u8x8([15, 30, 45, 60, 75, 90, 105, 120]);
+        assert_eq!(swar_add_checked(a, b, Width::U8), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_u8_overflow() {
+        let a = pack_u8x8([200, 0, 0, 0, 0, 0, 0, 0]);
+        let b = pack_u8x8([100, 0, 0, 0, 0, 0, 0, 0]);
+        // 200 + 100 = 300 > 255
+        assert_eq!(swar_add_checked(a, b, Width::U8), None);
+    }
+
+    #[test]
+    fn swar_add_checked_u8_at_max() {
+        let a = pack_u8x8([127, 128, 255, 0, 0, 0, 0, 0]);
+        let b = pack_u8x8([128, 127, 0, 0, 0, 0, 0, 0]);
+        let expected = pack_u8x8([255, 255, 255, 0, 0, 0, 0, 0]);
+        assert_eq!(swar_add_checked(a, b, Width::U8), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_b4_no_overflow() {
+        let a = pack_b4x16([1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let b = pack_b4x16([1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let expected = pack_b4x16([2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(swar_add_checked(a, b, Width::B4), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_b4_overflow() {
+        let a = pack_b4x16([15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let b = pack_b4x16([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(swar_add_checked(a, b, Width::B4), None);
+    }
+
+    #[test]
+    fn swar_add_checked_u16() {
+        let a = pack_u16x4([1000, 2000, 3000, 4000]);
+        let b = pack_u16x4([500, 1000, 1500, 2000]);
+        let expected = pack_u16x4([1500, 3000, 4500, 6000]);
+        assert_eq!(swar_add_checked(a, b, Width::U16), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_u32() {
+        let a = pack_u32x2(100_000, 200_000);
+        let b = pack_u32x2(50_000, 100_000);
+        let expected = pack_u32x2(150_000, 300_000);
+        assert_eq!(swar_add_checked(a, b, Width::U32), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_u64() {
+        assert_eq!(swar_add_checked(10, 20, Width::U64), Some(30));
+        assert_eq!(swar_add_checked(u64::MAX, 1, Width::U64), None);
+    }
+
+    #[test]
+    fn swar_add_checked_b1() {
+        // B1: 0+0=0, 0+1=1, 1+0=1, 1+1=overflow
+        assert_eq!(swar_add_checked(0, 0, Width::B1), Some(0));
+        assert_eq!(swar_add_checked(1, 0, Width::B1), Some(1));
+        // Two bits set in non-overlapping positions
+        assert_eq!(swar_add_checked(0b0101, 0b1010, Width::B1), Some(0b1111));
+        // Same bit set in both → overflow
+        assert_eq!(swar_add_checked(0b0001, 0b0001, Width::B1), None);
+    }
+
+    #[test]
+    fn swar_add_checked_b2() {
+        // B2 lanes: max 3.  2+1=3 ok, 3+1=4 overflow
+        let a = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 2;
+            v[1] = 3;
+            v
+        });
+        let b = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 1;
+            v[1] = 0;
+            v
+        });
+        let expected = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 3;
+            v[1] = 3;
+            v
+        });
+        assert_eq!(swar_add_checked(a, b, Width::B2), Some(expected));
+
+        // 3+1 overflows
+        let c = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 1;
+            v
+        });
+        assert_eq!(swar_add_checked(expected, c, Width::B2), None);
+    }
+
+    #[test]
+    fn swar_add_checked_zero_identity() {
+        // Adding zero always succeeds at any width
+        for &w in &[
+            Width::B1,
+            Width::B2,
+            Width::B4,
+            Width::U8,
+            Width::U16,
+            Width::U32,
+            Width::U64,
+        ] {
+            assert_eq!(swar_add_checked(0, 0, w), Some(0));
+            assert_eq!(swar_add_checked(42, 0, w), Some(42));
+            assert_eq!(swar_add_checked(0, 42, w), Some(42));
         }
     }
 }

@@ -514,7 +514,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Decreases the scale by `decrease` steps.
-    fn change_scale(&mut self, decrease: u32) {
+    pub(crate) fn change_scale(&mut self, decrease: u32) {
         let new_scale = self.current.scale.scale() - decrease as i32;
         self.current.scale =
             Scale::new(new_scale).expect("two buckets fit entire range at min_scale");

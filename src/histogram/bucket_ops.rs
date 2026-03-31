@@ -10,7 +10,7 @@ use super::width::{ALL_WIDTHS, Width};
 impl<const N: usize> Histogram<N> {
     /// Widen every active word from `before` to `after` and return
     /// the OR-fold of all lanes at the new width.
-    fn widen_words(&mut self, before: Width, after: Width) -> u64 {
+    pub(crate) fn widen_words(&mut self, before: Width, after: Width) -> u64 {
         let mut total_or = 0u64;
         for widx in self.word_start..=self.word_end {
             let di = self.data_idx(widx);
