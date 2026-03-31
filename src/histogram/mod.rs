@@ -11,13 +11,10 @@ use core::fmt;
 use crate::float64::{NAN_INF_BIASED, get_biased_exponent, get_significand, unbias_exponent};
 use crate::mapping::{Scale, ScaleError, table_scale};
 
-mod bucket_ops;
+mod downscale;
 mod merge;
 mod swar;
 pub mod width;
-
-mod bucket_view;
-pub use bucket_view::{BucketView, BucketsIter};
 
 #[cfg(feature = "quantile")]
 mod quantile;
@@ -25,7 +22,8 @@ mod quantile;
 pub use quantile::{QuantileIter, QuantileValue};
 
 mod view;
-pub use view::HistogramView;
+pub use view::{BucketView, BucketsIter, HistogramView};
+
 pub use width::{SlotAddr, Width};
 
 /// Compact histogram configuration.
