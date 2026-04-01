@@ -267,6 +267,43 @@ impl<const N: usize> Histogram<N> {
             .word_to_slot_index(self.current_word_count())
     }
 
+    /// Number of leading zero lanes in the first used word.
+    #[inline]
+    fn leading_zero_lanes(&self) -> u32 {
+        let word = self.data[self.data_idx(self.word_start)];
+        word.trailing_zeros() / self.current.width.bits_per_slot()
+    }
+
+    /// Number of trailing zero lanes in the last used word.
+    #[inline]
+    fn trailing_zero_lanes(&self) -> u32 {
+        let word = self.data[self.data_idx(self.word_end)];
+        word.leading_zeros() / self.current.width.bits_per_slot()
+    }
+
+    /// Slot index of the first non-zero bucket.
+    #[inline]
+    pub(crate) fn first_slot(&self) -> i32 {
+        self.current.width.word_to_slot_index(self.word_start)
+            + self.leading_zero_lanes() as i32
+    }
+
+    /// Slot index of the last non-zero bucket.
+    #[inline]
+    pub(crate) fn last_slot(&self) -> i32 {
+        self.current.width.word_to_slot_index(self.word_end + 1) - 1
+            - self.trailing_zero_lanes() as i32
+    }
+
+    /// Number of slots from first to last non-zero bucket (inclusive).
+    #[inline]
+    pub(crate) fn trimmed_slot_count(&self) -> u32 {
+        if self.buckets_empty() {
+            return 0;
+        }
+        (self.last_slot() - self.first_slot() + 1) as u32
+    }
+
     /// Returns the slot index range `[first_slot, last_slot]`.
     #[inline]
     fn slot_range(&self) -> HighLow {
@@ -274,8 +311,8 @@ impl<const N: usize> Histogram<N> {
             return HighLow::empty();
         }
         HighLow {
-            low: self.current.width.word_to_slot_index(self.word_start),
-            high: self.current.width.word_to_slot_index(self.word_end + 1) - 1,
+            low: self.first_slot(),
+            high: self.last_slot(),
         }
     }
 
@@ -294,17 +331,6 @@ impl<const N: usize> Histogram<N> {
     #[inline]
     const fn slot_addr(&self, slot: i32) -> SlotAddr<'_> {
         self.current.width.slot_addr(slot)
-    }
-
-    /// Returns the for a physical slot.
-    #[inline]
-    const fn start_addr(&self) -> SlotAddr<'_> {
-        self.slot_addr(self.current.width.word_to_slot_index(self.word_start))
-    }
-
-    #[inline]
-    pub(crate) const fn size_hint(&self, addr: &SlotAddr) -> usize {
-        addr.size_hint(self.word_end)
     }
 
     /// Shifts all three index fields right by `by` positions.
@@ -519,11 +545,22 @@ impl<const N: usize> Histogram<N> {
     }
 
     fn downscale_by(&mut self, change: u32) -> Result<(), Error> {
+        self.downscale_by_min(change, self.current.width)
+    }
+
+    /// Like `downscale_by` but guarantees the output width is at least
+    /// `min_output_width`. Used by merge to prevent the narrow step
+    /// from undoing the widening the merge path needs.
+    fn downscale_by_min(
+        &mut self,
+        change: u32,
+        min_output_width: Width,
+    ) -> Result<(), Error> {
         if change == 0 {
             return Ok(());
         }
 
-        let actual = self.do_downscale(change)?;
+        let actual = self.do_downscale(change, min_output_width)?;
         self.change_scale(actual);
         Ok(())
     }
@@ -582,13 +619,17 @@ impl<const N: usize> Histogram<N> {
         match result {
             IncrResult::Ok => Ok(true),
             IncrResult::CounterOverflow(total) => {
+                // Widen counters directly — do NOT use do_downscale,
+                // which would widen then narrow back to the same width,
+                // burning scale without fixing the overflow.
                 let new_width = Width::from_max_value(total);
+                let change = new_width.subtract(self.current.width) as u32;
                 if self.buckets_empty() {
-                    // No data to transform — just widen.
                     self.current.width = new_width;
                 } else {
-                    let change = new_width.subtract(self.current.width);
-                    self.downscale_by(change as u32)?;
+                    self.widen_words(self.current.width, new_width);
+                    self.change_scale(change);
+                    self.current.width = new_width;
                 }
                 Ok(false)
             }

@@ -73,9 +73,18 @@ impl<const N: usize> Histogram<N> {
 
     /// Downscales the histogram by at least `change` scale steps.
     ///
+    /// The output width will be at least `min_output_width`. This
+    /// prevents the narrow step from undoing widening that the caller
+    /// needs (e.g., the merge path needs counters wide enough for the
+    /// source data).
+    ///
     /// Returns the actual number of scale steps applied, which may
     /// exceed `change` when bucket sums require a wider output width.
-    pub(super) fn do_downscale(&mut self, change: u32) -> Result<u32, super::Error> {
+    pub(super) fn do_downscale(
+        &mut self,
+        change: u32,
+        min_output_width: Width,
+    ) -> Result<u32, super::Error> {
         debug_assert!(change != 0);
         debug_assert!(!self.buckets_empty());
 
@@ -94,14 +103,15 @@ impl<const N: usize> Histogram<N> {
         }
 
         // Phase 2: Widen one step at a time until the gap between
-        // current width and required width reaches `change`, or we
-        // exhaust in-word widening at U64.
+        // current width and required width reaches `change` AND
+        // we've reached at least min_output_width, or we exhaust
+        // in-word widening at U64.
         loop {
             if cur == Width::U64 {
                 break;
             }
             let required = Width::from_max_value(total_or);
-            if cur.subtract(required) >= change as i32 {
+            if cur.subtract(required) >= change as i32 && cur >= min_output_width {
                 break;
             }
 
@@ -120,6 +130,11 @@ impl<const N: usize> Histogram<N> {
         // so gap decreases by at most 1 per step while cross_steps
         // increases by 1 — the sum is non-decreasing and the loop
         // always terminates.
+        //
+        // The narrow cap from min_output_width relaxes the fit condition
+        // (gap >= capped narrow_steps), but we also need enough total
+        // scale steps (total_widen + cross_steps >= change).
+        let max_narrow = cur as u32 - min_output_width.max(input_width) as u32;
         let mut cross_steps = 0u32;
 
         if cur == Width::U64 {
@@ -132,7 +147,9 @@ impl<const N: usize> Histogram<N> {
             let required = Width::from_max_value(total_or);
             let gap = cur.subtract(required) as u32;
 
-            if gap < change {
+            let narrow_needed = change.min(max_narrow);
+            let scale_ok = total_widen >= change;
+            if !scale_ok || gap < narrow_needed {
                 loop {
                     cross_steps += 1;
                     let group_size = 1i32 << cross_steps;
@@ -152,7 +169,11 @@ impl<const N: usize> Histogram<N> {
                     }
                     let required = Width::from_max_value(or_sums);
                     let gap = Width::U64.subtract(required) as u32;
-                    if cross_steps + gap >= change {
+                    let narrow_needed =
+                        (change - cross_steps).min(max_narrow);
+                    let scale_ok =
+                        total_widen + cross_steps >= change;
+                    if scale_ok && gap >= narrow_needed {
                         break;
                     }
                 }
@@ -161,18 +182,15 @@ impl<const N: usize> Histogram<N> {
 
         // Phase 4: Narrow and repack with two-pass clobber prevention.
         //
-        // Split at word_base into forward (toward word_end) and reverse
-        // (toward word_start) passes. Within each pass, output positions
-        // advance strictly behind the read frontier, preventing clobbering.
-        //
-        // Reads use the current physical mapping. Writes use a shifted
-        // mapping that re-centers word_base at physical slot 0, which is
-        // preserved by shift_indices after the repack completes.
-        let narrow_steps = change - cross_steps;
+        // narrow_steps is capped by max_narrow so that the output width
+        // never drops below min_output_width. word_shift is the actual
+        // word-level compression (may be < change when capped).
+        let narrow_steps = (change - cross_steps).min(max_narrow);
+        let word_shift = cross_steps + narrow_steps;
         let output_width = ALL_WIDTHS[cur as usize - narrow_steps as usize];
 
-        let total_merge = 1i32 << change;
-        let new_word_base = self.word_base >> change;
+        let total_merge = 1i32 << word_shift;
+        let new_word_base = self.word_base >> word_shift;
 
         // Write physical index under the shifted mapping.
         let write_idx = |out_widx: i32| -> usize {
@@ -189,7 +207,7 @@ impl<const N: usize> Histogram<N> {
             let mut ostart = fwd_start;
             while ostart <= self.word_end {
                 let (out_widx, acc) =
-                    self.repack_group(ostart, change, cross_steps, cur, output_width);
+                    self.repack_group(ostart, word_shift, cross_steps, cur, output_width);
                 self.data[write_idx(out_widx)] = acc;
                 ostart += total_merge;
             }
@@ -198,7 +216,7 @@ impl<const N: usize> Histogram<N> {
             let mut ostart = rev_start;
             while ostart >= aligned_ws {
                 let (out_widx, acc) =
-                    self.repack_group(ostart, change, cross_steps, cur, output_width);
+                    self.repack_group(ostart, word_shift, cross_steps, cur, output_width);
                 self.data[write_idx(out_widx)] = acc;
                 ostart -= total_merge;
             }
@@ -206,20 +224,20 @@ impl<const N: usize> Histogram<N> {
             // Pure cross-word grouping, output stays at U64.
             let mut ostart = fwd_start;
             while ostart <= self.word_end {
-                let (out_widx, sum) = self.repack_group_cross(ostart, change);
+                let (out_widx, sum) = self.repack_group_cross(ostart, word_shift);
                 self.data[write_idx(out_widx)] = sum;
                 ostart += total_merge;
             }
 
             let mut ostart = rev_start;
             while ostart >= aligned_ws {
-                let (out_widx, sum) = self.repack_group_cross(ostart, change);
+                let (out_widx, sum) = self.repack_group_cross(ostart, word_shift);
                 self.data[write_idx(out_widx)] = sum;
                 ostart -= total_merge;
             }
         }
 
-        self.shift_indices(change);
+        self.shift_indices(word_shift);
         self.current.width = output_width;
         Ok(total_widen + cross_steps)
     }

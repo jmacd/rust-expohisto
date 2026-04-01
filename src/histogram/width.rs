@@ -81,15 +81,6 @@ impl<'a> SlotAddr<'a> {
         (self.word_index - word_base).rem_euclid(data_size as i32) as usize
     }
 
-    /// Returns the remaining size relative to this address.
-    #[inline]
-    pub(crate) const fn size_hint(&self, end_word_index: i32) -> usize {
-        let words = end_word_index - self.word_index + 1;
-        let buckets = words << self.width.to_u64_widen_steps();
-        let remaining = buckets as u32 - self.sub_offset;
-        remaining as usize
-    }
-
     /// Returns the next address, if valid.
     #[inline]
     pub(crate) fn next_addr(mut self, end_word_index: i32) -> Option<Self> {
@@ -98,7 +89,7 @@ impl<'a> SlotAddr<'a> {
             self.word_index += 1;
             self.sub_offset = 0;
         }
-        (self.word_index <= end_word_index).then(|| self)
+        (self.word_index <= end_word_index).then_some(self)
     }
 }
 

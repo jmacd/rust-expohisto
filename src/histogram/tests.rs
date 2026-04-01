@@ -157,6 +157,97 @@ fn merge_high_incr() {
     assert_eq!(h1.view().stats().count, 3000);
     assert_eq!(bucket_total(&h1), 3000);
 }
+
+#[test]
+fn merge_phase15_dest_wider() {
+    // h1 starts with a wider minimum width (U8) than h2 (B1 default).
+    // With same scale and shift=0, tm_log = 0 + 0 - 3 = -3 < 0,
+    // triggering Phase 1.5 to downscale h1.
+    let mut h1: Histogram<8> = Histogram::new().with_min_width(Width::U8);
+    let mut h2: Histogram<8> = Histogram::new();
+
+    h1.update(1.0).unwrap();
+    h2.update(2.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 2, 3.0, 1.0, 2.0);
+    assert_eq!(bucket_total(&h1), 2);
+}
+
+#[test]
+fn merge_same_slot_overflow() {
+    // Both histograms have B1 counters at the same slot.
+    // swar_add_checked(1, 1, B1) overflows → triggers widen during merge.
+    let mut h1: Histogram<16> = Histogram::new();
+    let mut h2: Histogram<16> = Histogram::new();
+
+    h1.update(1.0).unwrap();
+    h2.update(1.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_eq!(h1.view().stats().count, 2);
+    assert_eq!(bucket_total(&h1), 2);
+}
+
+#[test]
+fn merge_cross_scale_different_pools() {
+    // h2 has a lower scale from wide-range values; h1 at high scale.
+    // The scale difference exercises the repack decomposition.
+    let mut h1: Histogram<8> = Histogram::new();
+    let mut h2: Histogram<2> = Histogram::new();
+
+    h1.update(1.0).unwrap();
+    h2.update(1.0).unwrap();
+    h2.update(1000.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_eq!(h1.view().stats().count, 3);
+    assert_eq!(bucket_total(&h1), 3);
+}
+
+#[test]
+fn merge_into_empty_wider_source() {
+    // Merge a wide-counter histogram into an empty one.
+    let mut h1: Histogram<8> = Histogram::new();
+    let mut h2: Histogram<8> = Histogram::new();
+
+    h2.record_incr(1.0, 500).unwrap();
+    h2.record_incr(2.0, 500).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_eq!(h1.view().stats().count, 1000);
+    assert_eq!(bucket_total(&h1), 1000);
+}
+
+#[test]
+fn merge_bidirectional_consistency() {
+    // merge(h1, h2) and merge(h2, h1) should produce same count/sum.
+    let mut h1a: Histogram<8> = Histogram::new();
+    let mut h1b: Histogram<8> = Histogram::new();
+    let mut h2a: Histogram<8> = Histogram::new();
+    let mut h2b: Histogram<8> = Histogram::new();
+
+    for &v in &[1.0, 1.5, 2.0] {
+        h1a.update(v).unwrap();
+        h1b.update(v).unwrap();
+    }
+    for &v in &[100.0, 200.0, 300.0] {
+        h2a.update(v).unwrap();
+        h2b.update(v).unwrap();
+    }
+
+    h1a.merge_from(&h2a).unwrap();
+    h2b.merge_from(&h1b).unwrap();
+
+    let s1 = h1a.view().stats();
+    let s2 = h2b.view().stats();
+    assert_eq!(s1.count, s2.count);
+    assert!((s1.sum - s2.sum).abs() < 1e-10);
+    assert_eq!(s1.min, s2.min);
+    assert_eq!(s1.max, s2.max);
+    assert_eq!(bucket_total(&h1a), bucket_total(&h2b));
+}
+
 // use rand::rngs::StdRng;
 // use rand::{Rng, SeedableRng};
 // use std::{format, vec, vec::Vec};
@@ -1944,3 +2035,27 @@ fn merge_high_incr() {
 //     // This may fail with Overflow — exercise the path.
 //     let _ = h.record_incr(v3, 8388608);
 // }
+
+#[test]
+fn test_crash_1d7f7c() {
+    let value = f64::from_le_bytes([255, 251, 122, 0, 0, 0, 0, 0]);
+    // value ≈ 3.98e-317 (subnormal)
+    
+    let mut h1 = Histogram::<8>::new().with_min_width(Width::B1);
+    h1.record_incr(value, 1).unwrap();
+    
+    let mut h2 = Histogram::<8>::new().with_min_width(Width::B1);
+    h2.record_incr(value, 4).unwrap();
+    h2.record_incr(value, 64).unwrap();
+    h2.record_incr(value, 1024).unwrap();
+    
+    eprintln!("h1: scale={}, width={:?}", h1.view().scale(), h1.view().positive().width());
+    eprintln!("h2: scale={}, width={:?}", h2.view().scale(), h2.view().positive().width());
+    
+    h1.merge_from(&h2).unwrap();
+    
+    let v = h1.view();
+    let stats = v.stats();
+    assert_eq!(stats.count, 1 + 4 + 64 + 1024);
+    eprintln!("Merged: scale={}, width={:?}", v.scale(), v.positive().width());
+}

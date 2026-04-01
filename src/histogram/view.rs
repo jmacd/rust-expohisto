@@ -145,18 +145,24 @@ pub struct BucketView<'a, const N: usize> {
 
 impl<const N: usize> BucketView<'_, N> {
     /// Returns the first slot index (bucket offset).
+    ///
+    /// This is the index of the first non-zero bucket, trimmed
+    /// to sub-word granularity.
     #[inline]
     pub fn offset(&self) -> i32 {
-        self.hist
-            .current
-            .width
-            .word_to_slot_index(self.hist.word_start)
+        if self.hist.buckets_empty() {
+            return 0;
+        }
+        self.hist.first_slot()
     }
 
     /// Number of logical buckets in use.
+    ///
+    /// This is the count from the first non-zero bucket to the last
+    /// non-zero bucket (inclusive), trimmed to sub-word granularity.
     #[inline]
     pub fn len(&self) -> u32 {
-        self.hist.current_slot_count() as u32
+        self.hist.trimmed_slot_count()
     }
 
     /// Number of logical buckets in use (alias).
@@ -178,11 +184,20 @@ impl<const N: usize> BucketView<'_, N> {
     }
 
     /// Returns an iterator over bucket counts.
+    ///
+    /// Iterates from the first non-zero slot to the last non-zero
+    /// slot, matching [`offset`](Self::offset) and [`len`](Self::len).
     #[inline]
     pub fn iter(&self) -> BucketsIter<'_, N> {
+        let remaining = self.hist.trimmed_slot_count() as usize;
         BucketsIter {
             hist: self.hist,
-            addr: (!self.is_empty()).then(|| self.hist.start_addr()),
+            addr: if remaining > 0 {
+                Some(self.hist.slot_addr(self.hist.first_slot()))
+            } else {
+                None
+            },
+            remaining,
         }
     }
 }
@@ -202,6 +217,7 @@ impl<'a, const N: usize> IntoIterator for &'a BucketView<'a, N> {
 pub struct BucketsIter<'a, const N: usize> {
     hist: &'a Histogram<N>,
     addr: Option<SlotAddr<'a>>,
+    remaining: usize,
 }
 
 impl<const N: usize> Iterator for BucketsIter<'_, N> {
@@ -209,22 +225,25 @@ impl<const N: usize> Iterator for BucketsIter<'_, N> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let count = self.addr.as_ref().map(|addr| self.hist.bucket_get(&addr));
-        if let Some(addr) = self.addr.take() {
-            self.addr = addr.next_addr(self.hist.word_end);
+        if self.remaining == 0 {
+            return None;
         }
-        count
+        let addr = self.addr.as_ref()?;
+        let count = self.hist.bucket_get(addr);
+        self.remaining -= 1;
+        if self.remaining > 0 {
+            if let Some(a) = self.addr.take() {
+                self.addr = a.next_addr(self.hist.word_end);
+            }
+        } else {
+            self.addr = None;
+        }
+        Some(count)
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match &self.addr {
-            None => (0, None),
-            Some(addr) => {
-                let remaining = self.hist.size_hint(addr);
-                (remaining, Some(remaining))
-            }
-        }
+        (self.remaining, Some(self.remaining))
     }
 }
 

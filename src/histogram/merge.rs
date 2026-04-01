@@ -2,8 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Merge logic for combining histograms.
+//!
+//! Uses a unified word-by-word merge with on-the-fly repacking:
+//!
+//! 1. **Phase 1** — Downscale self so the combined slot range fits in N words.
+//! 2. **Phase 1.5** — Further downscale if needed so that `tm_log ≥ 0`
+//!    (at least one source word maps to each dest word).
+//! 3. **Phase 2** — For each dest word, repack its contributing source words
+//!    (widen → cross-word sum → narrow → pack) then `swar_add_checked`.
+//!    Overflow triggers iterative widening of self; `tm_log` is invariant
+//!    under widening so group boundaries never change.
 
-use super::swar::{swar_add_checked, widen};
+use super::swar::{narrow, swar_add_checked, widen};
 use super::width::Width;
 use super::{Error, HighLow, Histogram, Stats};
 
@@ -11,8 +21,6 @@ impl<const N: usize> Histogram<N> {
     /// Merges another histogram into this one.
     ///
     /// The source histogram may have a different pool size (`M`).
-    /// Uses snapshot/rollback for atomicity: a failed merge leaves
-    /// `self` unchanged.
     ///
     /// # Errors
     ///
@@ -25,77 +33,91 @@ impl<const N: usize> Histogram<N> {
 
         let new_count = self.checked_add_count(other.stats.count).ok_or(Error::Overflow)?;
 
-        let snapshot = self.clone();
-        match self.merge_buckets(other) {
-            Ok(()) => {
-                self.commit_stats(&Stats {
-                    count: new_count,
-                    sum: self.stats.sum + other.stats.sum,
-                    min: other.stats.min,
-                    max: other.stats.max,
-                });
-                Ok(())
-            }
-            Err(e) => {
-                *self = snapshot;
-                Err(e)
-            }
-        }
+        self.merge_buckets(other);
+
+        self.commit_stats(&Stats {
+            count: new_count,
+            sum: self.stats.sum + other.stats.sum,
+            min: other.stats.min,
+            max: other.stats.max,
+        });
+        Ok(())
     }
 
-    /// Core merge: downscale self, then word-by-word merge from source.
-    fn merge_buckets<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
+    /// Core merge: downscale self for range, ensure `tm_log ≥ 0`,
+    /// then word-by-word merge with on-the-fly repacking.
+    ///
+    /// Infallible: count overflow is checked by the caller, and all
+    /// internal operations (downscale, widen) always succeed.
+    fn merge_buckets<const M: usize>(&mut self, other: &Histogram<M>) {
         if other.buckets_empty() {
-            return Ok(());
+            return;
         }
 
-        let other_scale = other.current.scale.scale();
-        let other_width = other.current.width;
+        let src_scale = other.current.scale.scale();
+        let src_width = other.current.width;
 
         // When self is empty, adopt the source's width and scale
         // directly — there is no data to transform.
         if self.buckets_empty() {
-            self.current.width = self.current.width.max(other_width);
-            let target = self.current.scale.scale().min(other_scale);
+            self.current.width = self.current.width.max(src_width);
+            let target = self.current.scale.scale().min(src_scale);
             self.current.scale =
                 crate::mapping::Scale::new(target).expect("valid scale");
         }
 
         // Phase 1: determine target scale from the combined range.
-        let min_scale = self.current.scale.scale().min(other_scale);
+        //
+        // Use the wider of the two widths for word-range calculation
+        // so that Phase 1 accounts for the slot capacity the merge
+        // will actually need. downscale_by_min prevents do_downscale
+        // from narrowing back below src_width.
+        let merge_width = self.current.width.max(src_width);
+        let min_scale = self.current.scale.scale().min(src_scale);
 
         let self_hl = self.slot_range_at_scale(min_scale);
         let other_hl = other.slot_range_at_scale(min_scale);
         let combined = self_hl.merge(other_hl);
 
         let word_hl = HighLow {
-            low: self.current.width.slot_to_word_index(combined.low),
-            high: self.current.width.slot_to_word_index(combined.high),
+            low: merge_width.slot_to_word_index(combined.low),
+            high: merge_width.slot_to_word_index(combined.high),
         };
         let extra = word_hl.change_steps(N);
         let target_scale = min_scale - extra as i32;
 
         let self_change = self.current.scale.scale() - target_scale;
         if self_change > 0 && !self.buckets_empty() {
-            self.downscale_by(self_change as u32)?;
+            self.downscale_by_min(self_change as u32, src_width)
+                .expect("downscale is infallible");
         } else if self_change > 0 {
             // Empty histogram: just set the scale.
             self.current.scale =
                 crate::mapping::Scale::new(target_scale).expect("valid scale");
         }
 
-        // Phase 2: word-by-word merge from source.
-        let shift = (other_scale - self.current.scale.scale()) as u32;
-        let in_word_steps = shift.min(other_width.to_u64_widen_steps());
-        let cross_steps = shift - in_word_steps;
-
-        if cross_steps == 0 {
-            self.merge_in_word(other, other_width, other_scale, in_word_steps)?;
-        } else {
-            self.merge_cross_word(other, other_width, other_scale, cross_steps)?;
+        // Phase 1.5: ensure tm_log ≥ 0 (every dest word has ≥ 1
+        // source word mapping to it).
+        //
+        // tm_log = shift + src_w - dest_w (all in log₂-of-bits).
+        // downscale_by(d) increases tm_log by exactly d.
+        let shift = (src_scale - self.current.scale.scale()) as u32;
+        let src_w = src_width as u32;
+        let dest_w = self.current.width as u32;
+        if shift + src_w < dest_w {
+            let deficit = dest_w - shift - src_w;
+            if !self.buckets_empty() {
+                self.downscale_by_min(deficit, src_width)
+                    .expect("downscale is infallible");
+            } else {
+                let new_scale = self.current.scale.scale() - deficit as i32;
+                self.current.scale =
+                    crate::mapping::Scale::new(new_scale).expect("valid scale");
+            }
         }
 
-        Ok(())
+        // Phase 2: word-by-word merge with on-the-fly repacking.
+        self.merge_words(other, src_width, src_scale);
     }
 
     /// Pre-extend the word range to cover `[lo_widx, hi_widx]` and
@@ -121,170 +143,169 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    /// Merge when the scale shift fits entirely within a single source word.
-    /// Each source word is widened by `in_word_steps`, producing multiple
-    /// destination-slot contributions per word.
-    fn merge_in_word<const M: usize>(
+    /// Word-by-word merge with on-the-fly repacking.
+    ///
+    /// For each dest word, gathers its contributing source words,
+    /// widens/sums/narrows them into a dest-width SWAR word, and adds
+    /// via `swar_add_checked`. On overflow, widens self and retries.
+    ///
+    /// `tm_log = shift + src_w - dest_w` (the log₂ of source words
+    /// per dest word) is invariant under self-widening, so group
+    /// boundaries never change across retries.
+    fn merge_words<const M: usize>(
         &mut self,
         other: &Histogram<M>,
         src_width: Width,
         src_scale: i32,
-        in_word_steps: u32,
-    ) -> Result<(), Error> {
-        let widened_width = if in_word_steps > 0 {
-            src_width.wider_by(in_word_steps).expect("capped by to_u64")
-        } else {
-            src_width
-        };
+    ) {
+        // tm_log is invariant: widening self increases both shift and
+        // dest_w by the same amount, so they cancel.
+        let shift0 = (src_scale - self.current.scale.scale()) as u32;
+        let tm_log = shift0 + src_width as u32 - self.current.width as u32;
 
-        // Fast path: when widened source width matches dest width, the
-        // 1:1 word mapping lets us add whole SWAR words directly.
-        if widened_width == self.current.width {
-            self.extend_word_range(other.word_start, other.word_end);
-            return self.merge_in_word_fast(
-                other,
-                src_width,
-                widened_width,
-            );
+        // When tm_log ≥ 31, total_merge overflows i32. Since source
+        // has at most M ≤ 250 words, ALL source words collapse into a
+        // single dest slot. Fall back to retry_increment which handles
+        // widening/downscaling naturally.
+        if tm_log >= 31 {
+            self.merge_words_collapsed(other, src_width, src_scale);
+            return;
         }
 
-        // Slow path: extract lanes one by one via retry_increment.
-        self.merge_in_word_slow(other, src_width, src_scale, in_word_steps, widened_width)
-    }
+        let total_merge = 1i32 << tm_log;
 
-    /// Word-level fast path: swar_add_checked per source word.
-    /// On overflow, widen all dest words in place and retry.
-    fn merge_in_word_fast<const M: usize>(
-        &mut self,
-        other: &Histogram<M>,
-        src_width: Width,
-        mut widened_width: Width,
-    ) -> Result<(), Error> {
-        for src_widx in other.word_start..=other.word_end {
-            let word = other.data[other.data_idx(src_widx)];
-            if word == 0 {
-                continue;
-            }
+        // dest_word = src_word >> tm_log.
+        let aligned_start = other.word_start & !(total_merge - 1);
+        let dest_lo = aligned_start >> tm_log;
+        let dest_hi = other.word_end >> tm_log;
 
-            // Use widened_width (not in_word_steps) since overflow
-            // handling may have changed it.
-            let mut widened = if widened_width != src_width {
-                widen(src_width, widened_width, word)
-            } else {
-                word
-            };
+        self.extend_word_range(dest_lo, dest_hi);
 
-            let didx = self.data_idx(src_widx);
+        for dest_widx in dest_lo..=dest_hi {
+            let src_start = dest_widx << tm_log;
 
-            loop {
-                match swar_add_checked(self.data[didx], widened, self.current.width) {
+            'retry: loop {
+                // Recompute decomposition (changes after widen).
+                let shift = (src_scale - self.current.scale.scale()) as u32;
+                let in_word_steps = shift.min(src_width.to_u64_widen_steps());
+                let cross_steps = shift - in_word_steps;
+                let cur = if in_word_steps > 0 {
+                    src_width.wider_by(in_word_steps).expect("capped at U64")
+                } else {
+                    src_width
+                };
+                let dest_width = self.current.width;
+                let narrow_steps = cur as u32 - dest_width as u32;
+                let group = 1i32 << cross_steps;
+                let repack_count = 1i32 << narrow_steps;
+                let need_widen_src = in_word_steps > 0;
+
+                // Pass 1: compute sub-group sums at `cur` width.
+                // Track the or-fold to detect pre-narrow overflow.
+                let mut sums = [0u64; 64]; // max repack_count = 2^6
+                let mut or_sums = 0u64;
+
+                for r in 0..repack_count {
+                    let gstart = src_start + r * group;
+                    let mut value = 0u64;
+                    for g in 0..group {
+                        let widx = gstart + g;
+                        if widx >= other.word_start && widx <= other.word_end {
+                            let word = other.data[other.data_idx(widx)];
+                            value += if need_widen_src {
+                                widen(src_width, cur, word)
+                            } else {
+                                word
+                            };
+                        }
+                    }
+                    sums[r as usize] = value;
+                    or_sums |= cur.or_fold_lanes(value);
+                }
+
+                // Pre-narrow overflow: source sums exceed dest counter
+                // capacity. Widen self so they fit, then retry.
+                if or_sums > dest_width.counter_max() {
+                    let new_width = Width::from_max_value(or_sums);
+                    let change = new_width.subtract(dest_width) as u32;
+                    self.widen_words(dest_width, new_width);
+                    self.change_scale(change);
+                    self.current.width = new_width;
+                    continue 'retry;
+                }
+
+                // Pass 2: narrow and pack into one dest-width SWAR word.
+                let acc = if narrow_steps > 0 {
+                    let chunk_bits = 64u32 >> narrow_steps;
+                    let mut a = 0u64;
+                    for r in 0..repack_count {
+                        a |= narrow(cur, dest_width, sums[r as usize])
+                            << (r as u32 * chunk_bits);
+                    }
+                    a
+                } else {
+                    sums[0]
+                };
+
+                if acc == 0 {
+                    break;
+                }
+
+                // Add to dest word.
+                let didx = self.data_idx(dest_widx);
+                match swar_add_checked(self.data[didx], acc, dest_width) {
                     Some(result) => {
                         self.data[didx] = result;
                         break;
                     }
                     None => {
-                        // Determine the minimum width to hold the sum.
-                        let max_a = self.current.width.or_fold_lanes(self.data[didx]);
-                        let max_b = self.current.width.or_fold_lanes(widened);
+                        // Widen self to fit the sum of dest + source.
+                        let max_a = dest_width.or_fold_lanes(self.data[didx]);
+                        let max_b = dest_width.or_fold_lanes(acc);
                         let new_width = Width::from_max_value(max_a + max_b);
-                        let change = new_width.subtract(self.current.width) as u32;
-
-                        // Widen all dest words in place.
-                        self.widen_words(self.current.width, new_width);
+                        let change = new_width.subtract(dest_width) as u32;
+                        self.widen_words(dest_width, new_width);
                         self.change_scale(change);
                         self.current.width = new_width;
-
-                        // Widen the source contribution to match.
-                        widened = widen(widened_width, new_width, widened);
-                        widened_width = new_width;
+                        // Retry: repack at wider dest width.
                     }
                 }
             }
         }
-        Ok(())
     }
 
-    /// Lane-by-lane slow path for merge_in_word.
-    fn merge_in_word_slow<const M: usize>(
+    /// Fallback for extreme tm_log (≥ 31): all source words map to a
+    /// single dest slot. Widen source to U64, sum, and retry_increment.
+    fn merge_words_collapsed<const M: usize>(
         &mut self,
         other: &Histogram<M>,
         src_width: Width,
         src_scale: i32,
-        in_word_steps: u32,
-        widened_width: Width,
-    ) -> Result<(), Error> {
-        let lanes = widened_width.slots_per_u64();
-        let lane_bits = widened_width.bits_per_slot();
-        let lane_mask = widened_width.counter_max();
-        let src_slots_per_lane = 1i32 << in_word_steps;
-
-        for src_widx in other.word_start..=other.word_end {
-            let word = other.data[other.data_idx(src_widx)];
-            if word == 0 {
-                continue;
-            }
-
-            let widened = if in_word_steps > 0 {
-                widen(src_width, widened_width, word)
+    ) {
+        let need_widen = src_width != Width::U64;
+        let mut sum = 0u64;
+        for widx in other.word_start..=other.word_end {
+            let word = other.data[other.data_idx(widx)];
+            sum += if need_widen {
+                widen(src_width, Width::U64, word)
             } else {
                 word
             };
-
-            let first_src_slot = src_width.word_to_slot_index(src_widx);
-
-            for lane in 0..lanes {
-                let count = (widened >> (lane * lane_bits)) & lane_mask;
-                if count == 0 {
-                    continue;
-                }
-                let src_slot = first_src_slot + (lane as i32) * src_slots_per_lane;
-                self.retry_increment(count, |h| {
-                    let actual_shift = src_scale - h.current.scale.scale();
-                    src_slot >> actual_shift
-                })?;
-            }
         }
-        Ok(())
-    }
-
-    /// Merge when the scale shift requires cross-word grouping.
-    /// Source words are widened to U64 and accumulated in aligned groups.
-    fn merge_cross_word<const M: usize>(
-        &mut self,
-        other: &Histogram<M>,
-        src_width: Width,
-        src_scale: i32,
-        cross_steps: u32,
-    ) -> Result<(), Error> {
-        let group_size = 1i32 << cross_steps;
-        let aligned_start = other.word_start & !(group_size - 1);
-        let need_widen = src_width != Width::U64;
-
-        let mut gstart = aligned_start;
-        while gstart <= other.word_end {
-            let mut sum = 0u64;
-            for w in 0..group_size {
-                let widx = gstart + w;
-                if widx >= other.word_start && widx <= other.word_end {
-                    let word = other.data[other.data_idx(widx)];
-                    sum += if need_widen {
-                        widen(src_width, Width::U64, word)
-                    } else {
-                        word
-                    };
-                }
-            }
-
-            if sum > 0 {
-                let first_src_slot = src_width.word_to_slot_index(gstart);
-                self.retry_increment(sum, |h| {
-                    let actual_shift = src_scale - h.current.scale.scale();
-                    first_src_slot >> actual_shift
-                })?;
-            }
-
-            gstart += group_size;
+        if sum == 0 {
+            return;
         }
-        Ok(())
+        let first_src_slot = src_width.word_to_slot_index(other.word_start);
+        self.retry_increment(sum, |h| {
+            let shift = src_scale - h.current.scale.scale();
+            if shift <= 0 {
+                first_src_slot << (-shift)
+            } else if shift >= 31 {
+                if first_src_slot >= 0 { 0 } else { -1 }
+            } else {
+                first_src_slot >> shift
+            }
+        })
+        .expect("retry_increment is infallible after count check");
     }
 }
