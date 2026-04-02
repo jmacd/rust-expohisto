@@ -163,14 +163,17 @@ impl<const N: usize> Histogram<N> {
         let shift0 = (src_scale - self.current.scale.scale()) as u32;
         let tm_log = shift0 + src_width as u32 - self.current.width as u32;
 
-        // When tm_log ≥ 31, total_merge overflows i32. Since source
-        // has at most M ≤ 250 words, ALL source words collapse into a
-        // single dest slot. Fall back to retry_increment which handles
-        // widening/downscaling naturally.
-        if tm_log >= 31 {
-            self.merge_words_collapsed(other, src_width, src_scale);
-            return;
-        }
+        // tm_log < 31 is guaranteed by the scale/width design:
+        // MIN_SCALE and MAX_SCALE are set so the full value range
+        // fits in 2 words at MIN_SCALE, so scale never exceeds
+        // these bounds and tm_log stays bounded.
+        debug_assert!(
+            tm_log < 31,
+            "tm_log={tm_log} (shift={shift0}, src_w={}, dest_w={}): \
+             scale bounds violated",
+            src_width as u32,
+            self.current.width as u32,
+        );
 
         let total_merge = 1i32 << tm_log;
 
@@ -274,38 +277,4 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
-    /// Fallback for extreme tm_log (≥ 31): all source words map to a
-    /// single dest slot. Widen source to U64, sum, and retry_increment.
-    fn merge_words_collapsed<const M: usize>(
-        &mut self,
-        other: &Histogram<M>,
-        src_width: Width,
-        src_scale: i32,
-    ) {
-        let need_widen = src_width != Width::U64;
-        let mut sum = 0u64;
-        for widx in other.word_start..=other.word_end {
-            let word = other.data[other.data_idx(widx)];
-            sum += if need_widen {
-                widen(src_width, Width::U64, word)
-            } else {
-                word
-            };
-        }
-        if sum == 0 {
-            return;
-        }
-        let first_src_slot = src_width.word_to_slot_index(other.word_start);
-        self.retry_increment(sum, |h| {
-            let shift = src_scale - h.current.scale.scale();
-            if shift <= 0 {
-                first_src_slot << (-shift)
-            } else if shift >= 31 {
-                if first_src_slot >= 0 { 0 } else { -1 }
-            } else {
-                first_src_slot >> shift
-            }
-        })
-        .expect("retry_increment is infallible after count check");
-    }
 }
