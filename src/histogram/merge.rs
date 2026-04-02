@@ -56,23 +56,26 @@ impl<const N: usize> Histogram<N> {
 
         let src_scale = other.current.scale.scale();
         let src_width = other.current.width;
+        let merge_width = self.current.width.max(src_width);
 
-        // When self is empty, adopt the source's width and scale
+        // When self is empty, adopt the merge width and scale
         // directly — there is no data to transform.
         if self.buckets_empty() {
-            self.current.width = self.current.width.max(src_width);
+            self.current.width = merge_width;
             let target = self.current.scale.scale().min(src_scale);
             self.current.scale =
                 crate::mapping::Scale::new(target).expect("valid scale");
         }
 
-        // Phase 1: determine target scale from the combined range.
+        // Phase 1: determine the outcome width and target scale,
+        // then downscale in one step.
         //
-        // Use the wider of the two widths for word-range calculation
-        // so that Phase 1 accounts for the slot capacity the merge
-        // will actually need. downscale_by_min prevents do_downscale
-        // from narrowing back below src_width.
-        let merge_width = self.current.width.max(src_width);
+        // The outcome width is max(self_width, src_width). The target
+        // scale accounts for the combined slot range at that width.
+        // self_change includes both the range-based downscale and the
+        // width upgrade cost (whichever is larger), since widening
+        // self to merge_width consumes scale steps that also compress
+        // the range.
         let min_scale = self.current.scale.scale().min(src_scale);
 
         let self_hl = self.slot_range_at_scale(min_scale);
@@ -86,28 +89,33 @@ impl<const N: usize> Histogram<N> {
         let extra = word_hl.change_steps(N);
         let target_scale = min_scale - extra as i32;
 
-        let self_change = self.current.scale.scale() - target_scale;
+        let range_change = (self.current.scale.scale() - target_scale).max(0) as u32;
+        let width_upgrade = merge_width as u32 - self.current.width.min(merge_width) as u32;
+        let self_change = range_change.max(width_upgrade);
+
         if self_change > 0 && !self.buckets_empty() {
-            self.downscale_by_min(self_change as u32, src_width)
+            self.downscale_by_min(self_change, merge_width)
                 .expect("downscale is infallible");
         } else if self_change > 0 {
-            // Empty histogram: just set the scale.
+            let new_scale = self.current.scale.scale() - self_change as i32;
             self.current.scale =
-                crate::mapping::Scale::new(target_scale).expect("valid scale");
+                crate::mapping::Scale::new(new_scale).expect("valid scale");
+            self.current.width = merge_width;
         }
 
         // Phase 1.5: ensure tm_log ≥ 0 (every dest word has ≥ 1
         // source word mapping to it).
         //
-        // tm_log = shift + src_w - dest_w (all in log₂-of-bits).
-        // downscale_by(d) increases tm_log by exactly d.
+        // This handles the case where self was already wider than
+        // source — the width gap means dest has more slots per word,
+        // so we need additional shift to fill them.
         let shift = (src_scale - self.current.scale.scale()) as u32;
         let src_w = src_width as u32;
         let dest_w = self.current.width as u32;
         if shift + src_w < dest_w {
             let deficit = dest_w - shift - src_w;
             if !self.buckets_empty() {
-                self.downscale_by_min(deficit, src_width)
+                self.downscale_by_min(deficit, merge_width)
                     .expect("downscale is infallible");
             } else {
                 let new_scale = self.current.scale.scale() - deficit as i32;
