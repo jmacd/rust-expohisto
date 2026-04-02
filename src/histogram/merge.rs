@@ -3,15 +3,13 @@
 
 //! Merge logic for combining histograms.
 //!
-//! Uses a unified word-by-word merge with on-the-fly repacking:
-//!
-//! 1. **Phase 1** — Downscale self so the combined slot range fits in N words.
-//! 2. **Phase 1.5** — Further downscale if needed so that `tm_log ≥ 0`
-//!    (at least one source word maps to each dest word).
-//! 3. **Phase 2** — For each dest word, repack its contributing source words
-//!    (widen → cross-word sum → narrow → pack) then `swar_add_checked`.
-//!    Overflow triggers iterative widening of self; `tm_log` is invariant
-//!    under widening so group boundaries never change.
+//! 1. **Prepare** — Set width to `max(W_self, W_src)` and downscale
+//!    self so the combined slot range fits in N words.
+//! 2. **Merge** — For each dest word, repack its contributing source
+//!    words (widen, cross-word sum, narrow, pack) then
+//!    `swar_add_checked`. Overflow widens self and retries;
+//!    `tm_log` is invariant under widening so group boundaries are
+//!    stable.
 
 use super::swar::{narrow, swar_add_checked, widen};
 use super::width::Width;
@@ -31,7 +29,9 @@ impl<const N: usize> Histogram<N> {
             return Ok(());
         }
 
-        let new_count = self.checked_add_count(other.stats.count).ok_or(Error::Overflow)?;
+        let new_count = self
+            .checked_add_count(other.stats.count)
+            .ok_or(Error::Overflow)?;
 
         self.merge_buckets(other);
 
@@ -44,8 +44,8 @@ impl<const N: usize> Histogram<N> {
         Ok(())
     }
 
-    /// Core merge: downscale self for range, ensure `tm_log ≥ 0`,
-    /// then word-by-word merge with on-the-fly repacking.
+    /// Core merge: prepare self (width + scale), then word-by-word
+    /// merge with on-the-fly repacking.
     ///
     /// Infallible: count overflow is checked by the caller, and all
     /// internal operations (downscale, widen) always succeed.
@@ -57,27 +57,10 @@ impl<const N: usize> Histogram<N> {
         let src_scale = other.current.scale.scale();
         let src_width = other.current.width;
         let merge_width = self.current.width.max(src_width);
-
-        // When self is empty, adopt the merge width and scale
-        // directly — there is no data to transform.
-        if self.buckets_empty() {
-            self.current.width = merge_width;
-            let target = self.current.scale.scale().min(src_scale);
-            self.current.scale =
-                crate::mapping::Scale::new(target).expect("valid scale");
-        }
-
-        // Phase 1: determine the outcome width and target scale,
-        // then downscale in one step.
-        //
-        // The outcome width is max(self_width, src_width). The target
-        // scale accounts for the combined slot range at that width.
-        // self_change includes both the range-based downscale and the
-        // width upgrade cost (whichever is larger), since widening
-        // self to merge_width consumes scale steps that also compress
-        // the range.
         let min_scale = self.current.scale.scale().min(src_scale);
 
+        // Combined slot range at min_scale, using merge_width for
+        // word capacity.
         let self_hl = self.slot_range_at_scale(min_scale);
         let other_hl = other.slot_range_at_scale(min_scale);
         let combined = self_hl.merge(other_hl);
@@ -89,42 +72,44 @@ impl<const N: usize> Histogram<N> {
         let extra = word_hl.change_steps(N);
         let target_scale = min_scale - extra as i32;
 
+        // Three requirements on self_change:
+        //  - range: enough to fit combined range in N words
+        //  - width: enough to widen self to merge_width
+        //  - tm_log >= 0: enough shift so each dest word has >= 1
+        //    source word (only matters when self is wider than source)
         let range_change = (self.current.scale.scale() - target_scale).max(0) as u32;
-        let width_upgrade = merge_width as u32 - self.current.width.min(merge_width) as u32;
-        let self_change = range_change.max(width_upgrade);
+        let width_change = (merge_width as u32).saturating_sub(self.current.width as u32);
+        let self_change = range_change.max(width_change);
 
-        if self_change > 0 && !self.buckets_empty() {
-            self.downscale_by_min(self_change, merge_width)
-                .expect("downscale is infallible");
-        } else if self_change > 0 {
+        if self.buckets_empty() {
+            // No data to transform — just set scale and width.
             let new_scale = self.current.scale.scale() - self_change as i32;
             self.current.scale =
                 crate::mapping::Scale::new(new_scale).expect("valid scale");
             self.current.width = merge_width;
+        } else if self_change > 0 {
+            self.downscale_by_min(self_change, merge_width)
+                .expect("downscale is infallible");
         }
 
-        // Phase 1.5: ensure tm_log ≥ 0 (every dest word has ≥ 1
-        // source word mapping to it).
-        //
-        // This handles the case where self was already wider than
-        // source — the width gap means dest has more slots per word,
-        // so we need additional shift to fill them.
+        // Ensure tm_log >= 0: after downscale, self's width and scale
+        // are final. If self is wider than source + shift, we need
+        // more shift so each dest word has at least one source word.
         let shift = (src_scale - self.current.scale.scale()) as u32;
-        let src_w = src_width as u32;
         let dest_w = self.current.width as u32;
-        if shift + src_w < dest_w {
-            let deficit = dest_w - shift - src_w;
-            if !self.buckets_empty() {
-                self.downscale_by_min(deficit, merge_width)
-                    .expect("downscale is infallible");
-            } else {
+        if shift + (src_width as u32) < dest_w {
+            let deficit = dest_w - shift - src_width as u32;
+            if self.buckets_empty() {
                 let new_scale = self.current.scale.scale() - deficit as i32;
                 self.current.scale =
                     crate::mapping::Scale::new(new_scale).expect("valid scale");
+            } else {
+                self.downscale_by_min(deficit, merge_width)
+                    .expect("downscale is infallible");
             }
         }
 
-        // Phase 2: word-by-word merge with on-the-fly repacking.
+        // Word-by-word merge with on-the-fly repacking.
         self.merge_words(other, src_width, src_scale);
     }
 
@@ -153,28 +138,18 @@ impl<const N: usize> Histogram<N> {
 
     /// Word-by-word merge with on-the-fly repacking.
     ///
-    /// For each dest word, gathers its contributing source words,
-    /// widens/sums/narrows them into a dest-width SWAR word, and adds
-    /// via `swar_add_checked`. On overflow, widens self and retries.
-    ///
-    /// `tm_log = shift + src_w - dest_w` (the log₂ of source words
-    /// per dest word) is invariant under self-widening, so group
-    /// boundaries never change across retries.
+    /// `tm_log = shift + src_w - dest_w` is the log2 of source words
+    /// per dest word. It is invariant under self-widening, so group
+    /// boundaries are stable across overflow retries.
     fn merge_words<const M: usize>(
         &mut self,
         other: &Histogram<M>,
         src_width: Width,
         src_scale: i32,
     ) {
-        // tm_log is invariant: widening self increases both shift and
-        // dest_w by the same amount, so they cancel.
         let shift0 = (src_scale - self.current.scale.scale()) as u32;
         let tm_log = shift0 + src_width as u32 - self.current.width as u32;
 
-        // tm_log < 31 is guaranteed by the scale/width design:
-        // MIN_SCALE and MAX_SCALE are set so the full value range
-        // fits in 2 words at MIN_SCALE, so scale never exceeds
-        // these bounds and tm_log stays bounded.
         debug_assert!(
             tm_log < 31,
             "tm_log={tm_log} (shift={shift0}, src_w={}, dest_w={}): \
@@ -184,8 +159,6 @@ impl<const N: usize> Histogram<N> {
         );
 
         let total_merge = 1i32 << tm_log;
-
-        // dest_word = src_word >> tm_log.
         let aligned_start = other.word_start & !(total_merge - 1);
         let dest_lo = aligned_start >> tm_log;
         let dest_hi = other.word_end >> tm_log;
@@ -195,94 +168,110 @@ impl<const N: usize> Histogram<N> {
         for dest_widx in dest_lo..=dest_hi {
             let src_start = dest_widx << tm_log;
 
-            'retry: loop {
-                // Recompute decomposition (changes after widen).
-                let shift = (src_scale - self.current.scale.scale()) as u32;
-                let in_word_steps = shift.min(src_width.to_u64_widen_steps());
-                let cross_steps = shift - in_word_steps;
-                let cur = if in_word_steps > 0 {
-                    src_width.wider_by(in_word_steps).expect("capped at U64")
-                } else {
-                    src_width
+            loop {
+                let acc = match Self::repack_source(
+                    other, src_width, src_scale,
+                    self.current.scale.scale(), self.current.width,
+                    src_start,
+                ) {
+                    Err(or_sums) => {
+                        self.widen_to(Width::from_max_value(or_sums));
+                        continue;
+                    }
+                    Ok(0) => break,
+                    Ok(acc) => acc,
                 };
+
                 let dest_width = self.current.width;
-                let narrow_steps = cur as u32 - dest_width as u32;
-                let group = 1i32 << cross_steps;
-                let repack_count = 1i32 << narrow_steps;
-                let need_widen_src = in_word_steps > 0;
-
-                // Pass 1: compute sub-group sums at `cur` width.
-                // Track the or-fold to detect pre-narrow overflow.
-                let mut sums = [0u64; 64]; // max repack_count = 2^6
-                let mut or_sums = 0u64;
-
-                for r in 0..repack_count {
-                    let gstart = src_start + r * group;
-                    let mut value = 0u64;
-                    for g in 0..group {
-                        let widx = gstart + g;
-                        if widx >= other.word_start && widx <= other.word_end {
-                            let word = other.data[other.data_idx(widx)];
-                            value += if need_widen_src {
-                                widen(src_width, cur, word)
-                            } else {
-                                word
-                            };
-                        }
-                    }
-                    sums[r as usize] = value;
-                    or_sums |= cur.or_fold_lanes(value);
-                }
-
-                // Pre-narrow overflow: source sums exceed dest counter
-                // capacity. Widen self so they fit, then retry.
-                if or_sums > dest_width.counter_max() {
-                    let new_width = Width::from_max_value(or_sums);
-                    let change = new_width.subtract(dest_width) as u32;
-                    self.widen_words(dest_width, new_width);
-                    self.change_scale(change);
-                    self.current.width = new_width;
-                    continue 'retry;
-                }
-
-                // Pass 2: narrow and pack into one dest-width SWAR word.
-                let acc = if narrow_steps > 0 {
-                    let chunk_bits = 64u32 >> narrow_steps;
-                    let mut a = 0u64;
-                    for r in 0..repack_count {
-                        a |= narrow(cur, dest_width, sums[r as usize])
-                            << (r as u32 * chunk_bits);
-                    }
-                    a
-                } else {
-                    sums[0]
-                };
-
-                if acc == 0 {
+                let didx = self.data_idx(dest_widx);
+                if let Some(result) = swar_add_checked(self.data[didx], acc, dest_width) {
+                    self.data[didx] = result;
                     break;
                 }
 
-                // Add to dest word.
-                let didx = self.data_idx(dest_widx);
-                match swar_add_checked(self.data[didx], acc, dest_width) {
-                    Some(result) => {
-                        self.data[didx] = result;
-                        break;
-                    }
-                    None => {
-                        // Widen self to fit the sum of dest + source.
-                        let max_a = dest_width.or_fold_lanes(self.data[didx]);
-                        let max_b = dest_width.or_fold_lanes(acc);
-                        let new_width = Width::from_max_value(max_a + max_b);
-                        let change = new_width.subtract(dest_width) as u32;
-                        self.widen_words(dest_width, new_width);
-                        self.change_scale(change);
-                        self.current.width = new_width;
-                        // Retry: repack at wider dest width.
-                    }
-                }
+                // Overflow: widen self and retry.
+                let max_a = dest_width.or_fold_lanes(self.data[didx]);
+                let max_b = dest_width.or_fold_lanes(acc);
+                self.widen_to(Width::from_max_value(max_a + max_b));
             }
         }
     }
 
+    /// Repack source words `[src_start .. src_start + total_merge)`
+    /// into a single dest-width SWAR word.
+    ///
+    /// Decomposes the scale shift into in-word widening (src lanes
+    /// toward U64) and cross-word grouping (sum adjacent words), then
+    /// narrows the result to dest_width.
+    ///
+    /// Returns `Err(or_sums)` if the source sums overflow dest_width
+    /// lanes (caller must widen self and retry).
+    fn repack_source<const M: usize>(
+        other: &Histogram<M>,
+        src_width: Width,
+        src_scale: i32,
+        dest_scale: i32,
+        dest_width: Width,
+        src_start: i32,
+    ) -> Result<u64, u64> {
+        let shift = (src_scale - dest_scale) as u32;
+        let in_word = shift.min(src_width.to_u64_widen_steps());
+        let cross = shift - in_word;
+        let cur = if in_word > 0 {
+            src_width.wider_by(in_word).expect("capped at U64")
+        } else {
+            src_width
+        };
+        let narrow_steps = cur as u32 - dest_width as u32;
+        let group = 1i32 << cross;
+        let repack_count = 1i32 << narrow_steps;
+
+        // Gather sub-group sums at `cur` width.
+        let mut sums = [0u64; 64];
+        let mut or_sums = 0u64;
+        for r in 0..repack_count {
+            let gstart = src_start + r * group;
+            let mut value = 0u64;
+            for g in 0..group {
+                let widx = gstart + g;
+                if widx >= other.word_start && widx <= other.word_end {
+                    let word = other.data[other.data_idx(widx)];
+                    value += if in_word > 0 {
+                        widen(src_width, cur, word)
+                    } else {
+                        word
+                    };
+                }
+            }
+            sums[r as usize] = value;
+            or_sums |= cur.or_fold_lanes(value);
+        }
+
+        // Source sums exceed dest counter capacity.
+        if or_sums > dest_width.counter_max() {
+            return Err(or_sums);
+        }
+
+        // Narrow and pack into one dest-width SWAR word.
+        Ok(if narrow_steps > 0 {
+            let chunk_bits = 64u32 >> narrow_steps;
+            let mut acc = 0u64;
+            for r in 0..repack_count {
+                acc |= narrow(cur, dest_width, sums[r as usize])
+                    << (r as u32 * chunk_bits);
+            }
+            acc
+        } else {
+            sums[0]
+        })
+    }
+
+    /// Widen self to `new_width`, updating scale and all words.
+    fn widen_to(&mut self, new_width: Width) {
+        let old_width = self.current.width;
+        let change = new_width.subtract(old_width) as u32;
+        self.widen_words(old_width, new_width);
+        self.change_scale(change);
+        self.current.width = new_width;
+    }
 }
