@@ -58,10 +58,21 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
 
     let scale = Scale::new(scale).expect("reported scale should be valid");
     let mut expected: BTreeMap<i32, u64> = BTreeMap::new();
+
+    // record_incr rounds subnormals to (biased_exp=1, significand=1).
+    // Construct the f64 that results from this rounding so the oracle
+    // maps it through the same code path as the histogram.
+    const SUBNORMAL_ROUNDED: f64 =
+        f64::from_bits((1u64 << otel_expohisto::float64::SIGNIFICAND_WIDTH) | 1);
+
     for &(value, incr) in ops {
         if value != 0.0 {
-            let idx = scale.map_to_index(value);
-            *expected.entry(idx).or_insert(0) += incr;
+            let mapped = if value.to_bits() >> 52 == 0 {
+                scale.map_to_index(SUBNORMAL_ROUNDED)
+            } else {
+                scale.map_to_index(value)
+            };
+            *expected.entry(mapped).or_insert(0) += incr;
         }
     }
 

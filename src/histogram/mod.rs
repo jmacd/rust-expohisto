@@ -481,9 +481,12 @@ impl<const N: usize> Histogram<N> {
                     self.stats.count = new_count;
                     return Ok(());
                 } else {
-                    // Round up to MIN_VALUE.
+                    // Round subnormals into the first bucket that
+                    // contains normal values (just above MIN_VALUE).
+                    // significand = 1 avoids the power-of-two special
+                    // case (significand 0 = exact 2^exp boundary).
                     biased_exp = 1;
-                    significand = 0;
+                    significand = 1;
                 }
             }
             NAN_INF_BIASED => {
