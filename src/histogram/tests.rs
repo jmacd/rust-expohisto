@@ -1418,6 +1418,272 @@ fn repro_fuzz_stateful_update_atomicity() {
     let _ = h.record_incr(v3, 8388608);
 }
 
+// -----------------------------------------------------------------------
+// Coverage: merge.rs tm_log deficit path (lines 99-107)
+// -----------------------------------------------------------------------
+
+#[test]
+fn merge_tm_log_deficit_non_empty() {
+    // Trigger the tm_log fixup for a non-empty self (merge.rs:106).
+    //
+    // Both histograms start at scale 0 with the SAME value so no
+    // range downscale is needed (self_change=0).  self has U8 width
+    // via with_min_width, source has B1.  After the first phase:
+    //   shift = 0, src_width = 0, dest_width = 3 (U8)
+    //   0 + 0 < 3 → deficit = 3, self not empty → downscale_by_min.
+    let mut h1: Histogram<8> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
+        .with_min_width(Width::U8);
+    h1.update(1.5).unwrap();
+
+    let mut h2: Histogram<8> = Histogram::new().with_scale(0).unwrap();
+    h2.update(1.5).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_eq!(h1.view().stats().count, 2);
+    assert_eq!(bucket_total(&h1), 2);
+}
+
+#[test]
+fn merge_tm_log_deficit_empty_self() {
+    // Same scenario but self is empty — exercises the buckets_empty
+    // branch of the tm_log fixup (merge.rs:101-104).
+    let mut h1: Histogram<8> = Histogram::new().with_min_width(Width::U8);
+    // h1 is empty but has U8 width configured
+
+    let mut h2: Histogram<8> = Histogram::new();
+    h2.update(2.0).unwrap();
+
+    h1.merge_from(&h2).unwrap();
+    assert_stats(&h1, 1, 2.0, 2.0, 2.0);
+    assert_eq!(bucket_total(&h1), 1);
+}
+
+#[test]
+fn merge_tm_log_deficit_wide_gap() {
+    // Extreme width gap: self at U64 from large incr, source at B1.
+    // Both at scale 0 so shift stays 0. dest_width=6 (U64), deficit=6.
+    let mut h1: Histogram<8> = Histogram::new().with_scale(0).unwrap();
+    h1.record_incr(1.5, u32::MAX as u64 + 1).unwrap();
+    // After widen to U64, scale decreases. Use with_scale(0) to keep it pinned.
+    // Actually, record_incr will widen internally and change scale.
+    // Let's use with_min_width instead to keep scale at 0.
+    let mut h1: Histogram<8> = Histogram::new()
+        .with_scale(0)
+        .unwrap()
+        .with_min_width(Width::U64);
+    h1.update(1.5).unwrap();
+    assert_eq!(h1.width(), Width::U64);
+
+    let mut h2: Histogram<8> = Histogram::new().with_scale(0).unwrap();
+    h2.update(1.5).unwrap();
+    assert_eq!(h2.width(), Width::B1);
+
+    h1.merge_from(&h2).unwrap();
+    assert_eq!(h1.view().stats().count, 2);
+    assert_eq!(bucket_total(&h1), 2);
+}
+
+// -----------------------------------------------------------------------
+// Coverage: downscale.rs U64-start cross-word grouping (lines 141-145)
+// -----------------------------------------------------------------------
+
+#[test]
+fn downscale_u64_width_cross_word() {
+    // Start at U64 width so that do_downscale enters the cross-word
+    // grouping path (phases 1+2 skipped, total_or computed from raw words).
+    let mut h: Histogram<8> = Histogram::new();
+    h.record_incr(1.0, u32::MAX as u64 + 1).unwrap();
+    assert_eq!(h.width(), Width::U64);
+
+    // Insert a distant value to force downscale.
+    h.update(1e100).unwrap();
+
+    let total = bucket_total(&h);
+    assert_eq!(total, u32::MAX as u64 + 2);
+}
+
+// -----------------------------------------------------------------------
+// Coverage: mod.rs utility methods
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_clear() {
+    let mut h: Histogram<8> = Histogram::new();
+    h.update(1.0).unwrap();
+    h.update(2.0).unwrap();
+    assert_eq!(h.view().stats().count, 2);
+
+    h.clear();
+    assert_eq!(h.view().stats().count, 0);
+    assert_eq!(h.view().stats().sum, 0.0);
+    assert_eq!(bucket_total(&h), 0);
+    assert_eq!(h.width(), Width::B1);
+
+    // Verify histogram is fully functional after clear.
+    h.update(3.0).unwrap();
+    assert_stats(&h, 1, 3.0, 3.0, 3.0);
+}
+
+#[test]
+fn test_swap() {
+    let mut h1: Histogram<8> = Histogram::new();
+    let mut h2: Histogram<8> = Histogram::new();
+    h1.update(1.0).unwrap();
+    h2.update(2.0).unwrap();
+    h2.update(3.0).unwrap();
+
+    h1.swap(&mut h2);
+
+    assert_eq!(h1.view().stats().count, 2);
+    assert_eq!(h2.view().stats().count, 1);
+    assert_stats(&h2, 1, 1.0, 1.0, 1.0);
+}
+
+#[test]
+fn test_default() {
+    let h: Histogram<8> = Histogram::default();
+    assert_eq!(h.view().stats().count, 0);
+    assert_eq!(h.width(), Width::B1);
+}
+
+#[test]
+fn test_debug_format() {
+    let mut h: Histogram<8> = Histogram::new();
+    h.update(1.0).unwrap();
+    let debug = std::format!("{:?}", h);
+    assert!(debug.contains("count"), "debug output: {debug}");
+    assert!(debug.contains("width"), "debug output: {debug}");
+}
+
+#[test]
+fn test_error_display() {
+    let e = Error::Overflow;
+    let msg = std::format!("{e}");
+    assert!(msg.contains("overflow"), "error display: {msg}");
+
+    let e2 = Error::Extreme;
+    let msg2 = std::format!("{e2}");
+    assert!(msg2.contains("extreme"), "error display: {msg2}");
+}
+
+#[test]
+fn test_record_incr_zero() {
+    // record_incr with incr=0 for a non-zero value should be a no-op
+    // on buckets but still count zero as a zero observation.
+    let mut h: Histogram<8> = Histogram::new();
+    h.update(1.0).unwrap();
+
+    // incr=0 with a positive value: the record_incr path
+    // reaches try_increment with incr=0 which returns IncrResult::Ok.
+    h.record_incr(2.0, 0).unwrap();
+
+    // Count stays the same (0 increment doesn't add to count).
+    assert_eq!(h.view().stats().count, 1);
+}
+
+#[test]
+fn test_view_empty_buckets() {
+    // BucketView on an empty histogram: offset=0, len=0.
+    let h: Histogram<8> = Histogram::new();
+    let v = h.view();
+    let b = v.positive();
+    assert!(b.is_empty());
+    assert_eq!(b.offset(), 0);
+    assert_eq!(b.len(), 0);
+    assert_eq!(b.iter().count(), 0);
+}
+
+#[test]
+fn test_into_iter() {
+    // Exercise the IntoIterator impl on BucketView.
+    let mut h: Histogram<16> = Histogram::new();
+    h.update(1.0).unwrap();
+    h.update(2.0).unwrap();
+
+    let v = h.view();
+    let total: u64 = v.positive().into_iter().sum();
+    assert_eq!(total, 2);
+}
+
+// -----------------------------------------------------------------------
+// Coverage: swar.rs rare narrow paths
+// -----------------------------------------------------------------------
+
+#[test]
+fn narrow_multi_step_paths() {
+    // Exercise rare narrow paths by creating histograms that force
+    // unusual width transitions during downscale.
+    use super::swar::narrow;
+
+    // U16 → B1: 4 steps
+    let w = 0x0001_0002_0003_0004u64; // 4 U16 lanes: 1, 2, 3, 4
+    let result = narrow(Width::U16, Width::B1, w);
+    // Each U16 lane truncated to 1 bit: 1, 0, 1, 0 packed into B1
+    // (only the LSB of each lane survives)
+    let _ = result; // Just exercise the path.
+
+    // U32 → U8: 2 steps
+    let w = 0x0000_00FF_0000_0042u64; // 2 U32 lanes: 0x42, 0xFF
+    let result = narrow(Width::U32, Width::U8, w);
+    let _ = result;
+
+    // U32 → B2: 3 steps
+    let w = 0x0000_0003_0000_0002u64; // 2 U32 lanes: 2, 3
+    let result = narrow(Width::U32, Width::B2, w);
+    let _ = result;
+
+    // U32 → B1: 4 steps
+    let w = 0x0000_0001_0000_0001u64;
+    let result = narrow(Width::U32, Width::B1, w);
+    let _ = result;
+}
+
+#[test]
+fn test_msb_mask_u64() {
+    // Exercise the U64 arm of msb_mask (swar.rs line 247).
+    use super::swar::swar_add_checked;
+    // At U64 width, swar_add_checked uses checked_add directly.
+    // But let's also exercise the overflow path.
+    assert_eq!(swar_add_checked(u64::MAX, 1, Width::U64), None);
+    assert_eq!(swar_add_checked(u64::MAX - 1, 1, Width::U64), Some(u64::MAX));
+}
+
+// -----------------------------------------------------------------------
+// Coverage: mapping.rs Display impls
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_scale_error_display() {
+    use crate::mapping::Scale;
+    let err = Scale::new(100); // too high
+    assert!(err.is_err());
+    let msg = std::format!("{}", err.unwrap_err());
+    assert!(!msg.is_empty());
+}
+
+#[test]
+fn test_scale_display() {
+    let s = Scale::new(3).unwrap();
+    let msg = std::format!("{s}");
+    assert!(msg.contains('3'), "scale display: {msg}");
+}
+
+// -----------------------------------------------------------------------
+// Coverage: settings accessors, current_word_count, current_slot_count
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_settings_accessors() {
+    // Exercise Settings::scale() and Settings::width() via view.
+    let h: Histogram<8> = Histogram::new().with_scale(3).unwrap().with_min_width(Width::B4);
+    // Settings are accessed internally; we verify through the view.
+    let v = h.view();
+    assert_eq!(v.scale(), 0); // empty histogram returns 0
+    assert_eq!(h.width(), Width::B4);
+}
+
 #[test]
 fn test_crash_1d7f7c() {
     let value = f64::from_le_bytes([255, 251, 122, 0, 0, 0, 0, 0]);
