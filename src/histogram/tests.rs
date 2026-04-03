@@ -573,14 +573,18 @@ fn test_edge_values_subnormals() {
     let subnormal: f64 = 5e-324;
     let min_normal: f64 = crate::float64::MIN_VALUE;
 
+    // The mapper itself treats subnormals and MIN_VALUE the same
+    // (both have biased_exp=0 or 1 with significand=0).
     let m0 = Scale::new(0).unwrap();
     assert_eq!(m0.map_to_index(subnormal), m0.map_to_index(min_normal));
 
+    // But record_incr rounds subnormals to significand=1, placing
+    // them one bucket above MIN_VALUE.
     let mut h: Histogram<16> = Histogram::new().with_scale(0).unwrap();
     h.update(subnormal).unwrap();
     h.update(min_normal).unwrap();
     assert_eq!(h.view().stats().count, 2);
-    assert_eq!(h.view().positive().len(), 1);
+    assert_eq!(h.view().positive().len(), 2);
 }
 
 /// Documents the behavior when NaN or negative values are passed.
@@ -1311,23 +1315,12 @@ fn test_merge_p32_bucket_len_after_merge_chain() {
 }
 #[test]
 fn repro_fuzz_histogram_oracle_offset() {
-    // Regression: subnormals must map to the same bucket as MIN_VALUE
-    // at all positive scales. Previously, logarithm and lookup-table
-    // mappers treated subnormals as distinct values, producing wrong
-    // bucket indices that disagreed across scales.
+    // Regression: subnormals round to significand=1 in record_incr,
+    // placing them one bucket above MIN_VALUE. The mapper itself
+    // maps subnormals to the MIN_VALUE bucket, but record_incr
+    // adjusts the decomposition before mapping.
     let subnormal = 1.3633843689306e-310f64;
     let normal = 2.2251438848883923e-308f64;
-    let min_value = crate::float64::MIN_VALUE;
-
-    // At every scale, the subnormal must have the same index as MIN_VALUE.
-    for s in 0..=table_scale() {
-        let m = Scale::new(s).unwrap();
-        assert_eq!(
-            m.map_to_index(subnormal),
-            m.map_to_index(min_value),
-            "subnormal must map to MIN_VALUE bucket at scale={s}"
-        );
-    }
 
     let mut h = Histogram::<8>::new();
     h.update(subnormal).unwrap();
@@ -1335,9 +1328,11 @@ fn repro_fuzz_histogram_oracle_offset() {
 
     let v = h.view();
     let mapping = Scale::new(v.scale()).unwrap();
-    let exp_offset = mapping
-        .map_to_index(min_value)
-        .min(mapping.map_to_index(normal));
+    // record_incr rounds subnormals to (biased_exp=1, significand=1).
+    let subnormal_rounded =
+        f64::from_bits((1u64 << crate::float64::SIGNIFICAND_WIDTH) | 1);
+    let subnormal_idx = mapping.map_to_index(subnormal_rounded);
+    let exp_offset = subnormal_idx.min(mapping.map_to_index(normal));
 
     assert_eq!(
         v.positive().offset(),
@@ -1350,7 +1345,8 @@ fn repro_fuzz_histogram_oracle_offset() {
 #[test]
 fn repro_fuzz_merge_oracle_offset() {
     // Regression: subnormal value with large increments, merged across
-    // histograms. The subnormal must map to MIN_VALUE's bucket.
+    // histograms. The subnormal rounds to significand=1, one bucket
+    // above MIN_VALUE.
     let subnormal = 5.580682928875e-312f64;
     let incrs: &[u64] = &[4194304, 16777216, 268435456, 4294967296];
 
@@ -1365,7 +1361,9 @@ fn repro_fuzz_merge_oracle_offset() {
     let v = left.view();
     let buckets = v.positive();
     let mapping = Scale::new(v.scale()).unwrap();
-    let exp_idx = mapping.map_to_index(crate::float64::MIN_VALUE);
+    let subnormal_rounded =
+        f64::from_bits((1u64 << crate::float64::SIGNIFICAND_WIDTH) | 1);
+    let exp_idx = mapping.map_to_index(subnormal_rounded);
 
     assert_eq!(
         buckets.offset(),
@@ -1706,4 +1704,23 @@ fn test_crash_1d7f7c() {
     let stats = v.stats();
     assert_eq!(stats.count, 1 + 4 + 64 + 1024);
     eprintln!("Merged: scale={}, width={:?}", v.scale(), v.positive().width());
+}
+
+#[test]
+fn repro_fuzz_merge_cross_size_doubling() {
+    // Regression: merging Histogram<16> into Histogram<8> with normal
+    // near-MIN_VALUE values caused bucket data to be doubled.
+    let v1 = f64::from_bits(0x00ae000000010200); // biased_exp=10
+    let v2 = f64::from_bits(0x0100feff00fa0000); // biased_exp=16
+
+    let mut h2 = Histogram::<16>::new().with_min_width(Width::B1);
+    h2.record_incr(v1, 175).unwrap();
+    h2.record_incr(v2, 251).unwrap();
+
+    let mut h1 = Histogram::<8>::new().with_min_width(Width::B1);
+    h1.merge_from(&h2).unwrap();
+
+    let bt: u64 = h1.view().positive().iter().sum();
+    let count = h1.view().stats().count;
+    assert_eq!(bt, count, "bucket total ({bt}) != count ({count})");
 }

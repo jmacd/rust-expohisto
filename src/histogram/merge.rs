@@ -59,23 +59,22 @@ impl<const N: usize> Histogram<N> {
         let merge_width = self.current.width.max(src_width);
         let min_scale = self.current.scale.scale().min(src_scale);
 
-        // Combined slot range at min_scale, measured in self's
-        // current width.  Using the current (possibly narrow) width
-        // ensures the downscale budget covers the actual word span
-        // that do_downscale will see; merge_words handles any
-        // additional widening on the fly.
+        // Combined slot range at min_scale, using merge_width for
+        // word capacity.
         let self_hl = self.slot_range_at_scale(min_scale);
         let other_hl = other.slot_range_at_scale(min_scale);
         let combined = self_hl.merge(other_hl);
 
         let word_hl = HighLow {
-            low: self.current.width.slot_to_word_index(combined.low),
-            high: self.current.width.slot_to_word_index(combined.high),
+            low: merge_width.slot_to_word_index(combined.low),
+            high: merge_width.slot_to_word_index(combined.high),
         };
         let extra = word_hl.change_steps(N);
         let target_scale = min_scale - extra as i32;
 
-        let self_change = (self.current.scale.scale() - target_scale).max(0) as u32;
+        let range_change = (self.current.scale.scale() - target_scale).max(0) as u32;
+        let width_change = (merge_width as u32).saturating_sub(self.current.width as u32);
+        let self_change = range_change.max(width_change);
         // Clamp: the two-bucket invariant guarantees that at MIN_SCALE
         // the entire exponent range fits.
         let budget = (self.current.scale.scale()
@@ -91,7 +90,7 @@ impl<const N: usize> Histogram<N> {
                 crate::mapping::Scale::new(new_scale).expect("valid scale");
             self.current.width = merge_width;
         } else if self_change > 0 {
-            self.downscale_by(self_change);
+            self.downscale_by_min(self_change, merge_width);
         }
 
         // Ensure headroom: merge_words may need to widen to U64 on
@@ -421,12 +420,7 @@ impl<const N: usize> Histogram<N> {
         let old_width = self.current.width;
         let change = new_width.subtract(old_width) as u32;
         self.widen_words(old_width, new_width);
-        // At MIN_SCALE, widening in place is correct because the
-        // data already fits in ≤ 2 words at the coarsest scale.
-        // Pay only what the budget allows.
-        let budget = (self.current.scale.scale()
-            - crate::mapping::MIN_SCALE) as u32;
-        self.change_scale(change.min(budget));
+        self.change_scale(change);
         self.current.width = new_width;
     }
 }
