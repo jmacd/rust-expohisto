@@ -538,6 +538,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Decreases the scale by `decrease` steps.
+    /// Decreases the scale by `decrease` steps.
     pub(crate) fn change_scale(&mut self, decrease: u32) {
         let new_scale = self.current.scale.scale() - decrease as i32;
         self.current.scale =
@@ -618,17 +619,16 @@ impl<const N: usize> Histogram<N> {
         match result {
             IncrResult::Ok => Ok(true),
             IncrResult::CounterOverflow(total) => {
-                // Widen counters directly — do NOT use do_downscale,
-                // which would widen then narrow back to the same width,
-                // burning scale without fixing the overflow.
                 let new_width = Width::from_max_value(total);
                 let change = new_width.subtract(self.current.width) as u32;
                 if self.buckets_empty() {
-                    self.current.width = new_width;
-                } else {
-                    self.widen_words(self.current.width, new_width);
                     self.change_scale(change);
                     self.current.width = new_width;
+                } else {
+                    // Route through do_downscale so the headroom
+                    // invariant is maintained (narrowing is capped
+                    // to leave room for future widening).
+                    self.downscale_by_min(change, new_width);
                 }
                 Ok(false)
             }

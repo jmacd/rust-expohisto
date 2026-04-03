@@ -91,8 +91,13 @@ impl<const N: usize> Histogram<N> {
         let input_width = self.current.width;
         let to_u64 = input_width.to_u64_widen_steps();
 
-        // Phase 1: Widen by up to `change` steps (capped at U64).
-        let first_widen = change.min(to_u64);
+        // Absolute budget: total scale steps must not push below
+        // MIN_SCALE.
+        let abs_budget = (self.current.scale.scale()
+            - crate::mapping::MIN_SCALE) as u32;
+
+        // Phase 1: Widen by up to `change` steps (capped at U64 and budget).
+        let first_widen = change.min(to_u64).min(abs_budget);
         let mut cur = input_width;
         let mut total_widen = first_widen;
         let mut total_or = 0u64;
@@ -108,6 +113,9 @@ impl<const N: usize> Histogram<N> {
         // in-word widening at U64.
         loop {
             if cur == Width::U64 {
+                break;
+            }
+            if total_widen >= abs_budget {
                 break;
             }
             let required = Width::from_max_value(total_or);
@@ -134,7 +142,7 @@ impl<const N: usize> Histogram<N> {
         // The narrow cap from min_output_width relaxes the fit condition
         // (gap >= capped narrow_steps), but we also need enough total
         // scale steps (total_widen + cross_steps >= change).
-        let max_narrow = cur as u32 - min_output_width.max(input_width) as u32;
+        let max_narrow = (cur as u32).saturating_sub(min_output_width.max(input_width) as u32);
         let mut cross_steps = 0u32;
 
         if cur == Width::U64 {
@@ -151,6 +159,10 @@ impl<const N: usize> Histogram<N> {
             let scale_ok = total_widen >= change;
             if !scale_ok || gap < narrow_needed {
                 loop {
+                    if total_widen + cross_steps >= abs_budget {
+                        // Hard floor: cannot consume more scale.
+                        break;
+                    }
                     cross_steps += 1;
                     let group_size = 1i32 << cross_steps;
                     let aligned = self.word_start & !(group_size - 1);
@@ -185,7 +197,17 @@ impl<const N: usize> Histogram<N> {
         // narrow_steps is capped by max_narrow so that the output width
         // never drops below min_output_width. word_shift is the actual
         // word-level compression (may be < change when capped).
-        let narrow_steps = (change - cross_steps).min(max_narrow);
+        //
+        // Also cap so the resulting scale can still afford widening to
+        // U64: new_scale >= MIN_SCALE + (U64 - output_width), which
+        // gives narrow_steps <= old_scale - total_widen - cross_steps
+        //                       - MIN_SCALE.
+        let headroom_cap = (self.current.scale.scale()
+            - (total_widen + cross_steps) as i32
+            - crate::mapping::MIN_SCALE) as u32;
+        let narrow_steps = (change - cross_steps)
+            .min(max_narrow)
+            .min(headroom_cap);
         let word_shift = cross_steps + narrow_steps;
         let output_width = ALL_WIDTHS[cur as usize - narrow_steps as usize];
 

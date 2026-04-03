@@ -59,51 +59,51 @@ impl<const N: usize> Histogram<N> {
         let merge_width = self.current.width.max(src_width);
         let min_scale = self.current.scale.scale().min(src_scale);
 
-        // Combined slot range at min_scale, using merge_width for
-        // word capacity.
+        // Combined slot range at min_scale, measured in self's
+        // current width.  Using the current (possibly narrow) width
+        // ensures the downscale budget covers the actual word span
+        // that do_downscale will see; merge_words handles any
+        // additional widening on the fly.
         let self_hl = self.slot_range_at_scale(min_scale);
         let other_hl = other.slot_range_at_scale(min_scale);
         let combined = self_hl.merge(other_hl);
 
         let word_hl = HighLow {
-            low: merge_width.slot_to_word_index(combined.low),
-            high: merge_width.slot_to_word_index(combined.high),
+            low: self.current.width.slot_to_word_index(combined.low),
+            high: self.current.width.slot_to_word_index(combined.high),
         };
         let extra = word_hl.change_steps(N);
         let target_scale = min_scale - extra as i32;
 
-        // Three requirements on self_change:
-        //  - range: enough to fit combined range in N words
-        //  - width: enough to widen self to merge_width
-        //  - tm_log >= 0: enough shift so each dest word has >= 1
-        //    source word (only matters when self is wider than source)
-        let range_change = (self.current.scale.scale() - target_scale).max(0) as u32;
-        let width_change = (merge_width as u32).saturating_sub(self.current.width as u32);
-        let self_change = range_change.max(width_change);
+        let self_change = (self.current.scale.scale() - target_scale).max(0) as u32;
+        // Clamp: the two-bucket invariant guarantees that at MIN_SCALE
+        // the entire exponent range fits.
+        let budget = (self.current.scale.scale()
+            - crate::mapping::MIN_SCALE) as u32;
+        let self_change = self_change.min(budget);
 
         if self.buckets_empty() {
             // No data to transform — just set scale and width.
-            let new_scale = self.current.scale.scale() - self_change as i32;
+            // Cap at MIN_SCALE since the empty dest has no data constraints.
+            let new_scale = (self.current.scale.scale() - self_change as i32)
+                .max(crate::mapping::MIN_SCALE);
             self.current.scale =
                 crate::mapping::Scale::new(new_scale).expect("valid scale");
             self.current.width = merge_width;
         } else if self_change > 0 {
-            self.downscale_by_min(self_change, merge_width);
+            self.downscale_by(self_change);
         }
 
-        // Ensure tm_log >= 0: after downscale, self's width and scale
-        // are final. If self is wider than source + shift, we need
-        // more shift so each dest word has at least one source word.
-        let shift = (src_scale - self.current.scale.scale()) as u32;
-        let dest_w = self.current.width as u32;
-        if shift + (src_width as u32) < dest_w {
-            let deficit = dest_w - shift - src_width as u32;
-            if self.buckets_empty() {
-                let new_scale = self.current.scale.scale() - deficit as i32;
-                self.current.scale =
-                    crate::mapping::Scale::new(new_scale).expect("valid scale");
-            } else {
-                self.downscale_by_min(deficit, merge_width);
+        // Ensure headroom: merge_words may need to widen to U64 on
+        // overflow.  If the remaining scale budget can't afford that,
+        // downscale further now (the headroom cap in do_downscale
+        // prevents this from exceeding MIN_SCALE).
+        if !self.buckets_empty() {
+            let headroom_needed = Width::U64 as i32 - self.current.width as i32;
+            let headroom_have = self.current.scale.scale()
+                - crate::mapping::MIN_SCALE;
+            if headroom_needed > headroom_have {
+                self.downscale_by((headroom_needed - headroom_have) as u32);
             }
         }
 
@@ -137,23 +137,40 @@ impl<const N: usize> Histogram<N> {
     /// Word-by-word merge with on-the-fly repacking.
     ///
     /// `tm_log = shift + src_w - dest_w` is the log2 of source words
-    /// per dest word. It is invariant under self-widening, so group
+    /// per dest word.  It is invariant under self-widening, so group
     /// boundaries are stable across overflow retries.
+    ///
+    /// When `tm_log >= 0`, each dest word maps to `2^tm_log` source
+    /// words (the normal case).  When `tm_log < 0`, each source word
+    /// spans `2^(-tm_log)` dest words — this happens when the dest is
+    /// much wider than the source after downscaling.
     fn merge_words<const M: usize>(
         &mut self,
         other: &Histogram<M>,
         src_width: Width,
         src_scale: i32,
     ) {
-        let shift0 = (src_scale - self.current.scale.scale()) as u32;
-        let tm_log = shift0 + src_width as u32 - self.current.width as u32;
+        let shift = src_scale - self.current.scale.scale();
+        let tm_log = shift + src_width as i32 - self.current.width as i32;
 
+        if tm_log >= 0 {
+            self.merge_words_positive(other, src_width, src_scale, tm_log as u32);
+        } else {
+            self.merge_words_negative(other, src_width, src_scale, (-tm_log) as u32);
+        }
+    }
+
+    /// Merge when `tm_log >= 0`: each dest word ← `2^tm_log` source words.
+    fn merge_words_positive<const M: usize>(
+        &mut self,
+        other: &Histogram<M>,
+        src_width: Width,
+        src_scale: i32,
+        tm_log: u32,
+    ) {
         debug_assert!(
             tm_log < 31,
-            "tm_log={tm_log} (shift={shift0}, src_w={}, dest_w={}): \
-             scale bounds violated",
-            src_width as u32,
-            self.current.width as u32,
+            "tm_log={tm_log}: scale bounds violated",
         );
 
         let total_merge = 1i32 << tm_log;
@@ -195,6 +212,141 @@ impl<const N: usize> Histogram<N> {
         }
     }
 
+    /// Merge when `tm_log < 0`: each source word → `2^neg_tm` dest words.
+    ///
+    /// After widening the source by `in_word` steps to `cur`, each
+    /// cur-lane equals one dest slot.  Since `cur < dest_width`, each
+    /// source word's cur-lanes are split across multiple dest words.
+    /// We iterate over source words and distribute lane groups to
+    /// their respective dest words.
+    fn merge_words_negative<const M: usize>(
+        &mut self,
+        other: &Histogram<M>,
+        src_width: Width,
+        src_scale: i32,
+        neg_tm: u32,
+    ) {
+        let dests_per_src = 1i32 << neg_tm;
+
+        for src_widx in other.word_start..=other.word_end {
+            let raw = other.data[other.data_idx(src_widx)];
+            if raw == 0 {
+                continue;
+            }
+
+            for k in 0..dests_per_src {
+                let dest_widx = src_widx * dests_per_src + k;
+
+                loop {
+                    let acc = match Self::extract_source_chunk(
+                        other, src_width, src_scale,
+                        self.current.scale.scale(), self.current.width,
+                        src_widx, k,
+                    ) {
+                        Err(or_val) => {
+                            self.widen_to(Width::from_max_value(or_val));
+                            continue;
+                        }
+                        Ok(0) => break,
+                        Ok(acc) => acc,
+                    };
+
+                    // Extend word range only for non-zero contributions
+                    // to avoid clobbering data in the circular buffer.
+                    self.extend_word_range(dest_widx, dest_widx);
+
+                    let dest_width = self.current.width;
+                    let didx = self.data_idx(dest_widx);
+                    if let Some(result) = swar_add_checked(self.data[didx], acc, dest_width) {
+                        self.data[didx] = result;
+                        break;
+                    }
+
+                    let max_a = dest_width.or_fold_lanes(self.data[didx]);
+                    let max_b = dest_width.or_fold_lanes(acc);
+                    self.widen_to(Width::from_max_value(max_a + max_b));
+                }
+            }
+        }
+    }
+
+    /// Extract one dest word's worth of data from a single source word
+    /// for the `tm_log < 0` case.
+    ///
+    /// Widens the source word by `in_word` steps to `cur`, then
+    /// extracts the cur-lanes belonging to dest word `chunk_index`
+    /// and packs them into a dest-width SWAR word.
+    ///
+    /// Returns `Err(max_lane)` if any lane value exceeds
+    /// `dest_width.counter_max()`.
+    fn extract_source_chunk<const M: usize>(
+        other: &Histogram<M>,
+        src_width: Width,
+        src_scale: i32,
+        dest_scale: i32,
+        dest_width: Width,
+        src_widx: i32,
+        chunk_index: i32,
+    ) -> Result<u64, u64> {
+        let shift = (src_scale - dest_scale).max(0) as u32;
+        let in_word = shift.min(src_width.to_u64_widen_steps());
+
+        let cur = if in_word > 0 {
+            src_width.wider_by(in_word).expect("capped at U64")
+        } else {
+            src_width
+        };
+
+        // Read and widen source word.
+        let raw = if src_widx >= other.word_start && src_widx <= other.word_end {
+            other.data[other.data_idx(src_widx)]
+        } else {
+            return Ok(0);
+        };
+        let widened = if in_word > 0 {
+            widen(src_width, cur, raw)
+        } else {
+            raw
+        };
+
+        // Lane geometry at cur width.
+        let cur_lane_bits = 1u32 << (cur as u32);
+        let cur_lane_mask = if cur_lane_bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << cur_lane_bits) - 1
+        };
+        let lanes_per_cur = 1u32 << (6 - cur as u32);
+
+        // Lane geometry at dest width.
+        let dest_lane_bits = 1u32 << (dest_width as u32);
+        let lanes_per_dest = 1u32 << (6 - dest_width as u32);
+
+        // Extract the lanes belonging to this chunk and pack into
+        // a dest-width SWAR word.  Each cur-lane value equals one
+        // dest slot count (the in-word widening handled the scale
+        // shift), so we just zero-extend into the wider dest lanes.
+        let start_lane = chunk_index as u32 * lanes_per_dest;
+        let mut packed = 0u64;
+        let mut or_val = 0u64;
+
+        for j in 0..lanes_per_dest {
+            let lane_idx = start_lane + j;
+            if lane_idx >= lanes_per_cur {
+                break;
+            }
+            let val = (widened >> (lane_idx * cur_lane_bits)) & cur_lane_mask;
+            or_val |= val;
+            packed |= val << (j * dest_lane_bits);
+        }
+
+        if or_val > dest_width.counter_max() {
+            return Err(or_val);
+        }
+
+        Ok(packed)
+    }
+
     /// Repack source words `[src_start .. src_start + total_merge)`
     /// into a single dest-width SWAR word.
     ///
@@ -212,7 +364,7 @@ impl<const N: usize> Histogram<N> {
         dest_width: Width,
         src_start: i32,
     ) -> Result<u64, u64> {
-        let shift = (src_scale - dest_scale) as u32;
+        let shift = (src_scale - dest_scale).max(0) as u32;
         let in_word = shift.min(src_width.to_u64_widen_steps());
         let cross = shift - in_word;
         let cur = if in_word > 0 {
@@ -269,7 +421,12 @@ impl<const N: usize> Histogram<N> {
         let old_width = self.current.width;
         let change = new_width.subtract(old_width) as u32;
         self.widen_words(old_width, new_width);
-        self.change_scale(change);
+        // At MIN_SCALE, widening in place is correct because the
+        // data already fits in ≤ 2 words at the coarsest scale.
+        // Pay only what the budget allows.
+        let budget = (self.current.scale.scale()
+            - crate::mapping::MIN_SCALE) as u32;
+        self.change_scale(change.min(budget));
         self.current.width = new_width;
     }
 }
