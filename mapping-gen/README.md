@@ -308,22 +308,25 @@ Table size is approximately:
 This crate is used at build time by `otel-expohisto` to generate lookup tables:
 
 ```rust
-use expohisto_mapping_gen::LookupTables;
+use expohisto_mapping_gen::{generate_boundaries, write_boundaries, write_index_table};
 
-// Generate tables for scale 10 (1024 buckets per power of 2)
-let tables = LookupTables::generate(10);
+let scale = 10; // 1024 buckets per power of 2
 
-// Write as Rust source code
+// Compute exact boundaries once (expensive bignum arithmetic).
+let boundaries = generate_boundaries(scale);
+
+// Write as Rust source code.
 let mut output = std::fs::File::create("lookup_tables.rs").unwrap();
-tables.write_rust_source(&mut output).unwrap();
+write_boundaries(&mut output, scale, &boundaries).unwrap();
+write_index_table(&mut output, scale, &boundaries).unwrap();
 ```
 
 The generated file contains:
 ```rust
-pub const LOOKUP_SCALE: i32 = 10;
-pub const SIGNIFICAND_SHIFT: u32 = ...;
-pub const LOG_BUCKET_INDEX: [u16; 2048] = [...];
-pub const LOG_BUCKET_END: [u64; 1025] = [...];
+pub const TABLE_SCALE: i32 = 10;
+pub const INDEX_SHIFT: u32 = ...;
+pub static BOUNDARIES: [u64; 1027] = [...];
+pub static INDEX_TABLE: [u16; 2048] = [...];
 ```
 
 ## Mathematical Details

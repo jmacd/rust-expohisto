@@ -171,12 +171,12 @@ pub fn write_boundaries<W: Write>(
 fn derive_index_table(boundaries: &[u64], count: usize, shift: u32) -> Vec<u16> {
     let mut table = vec![0u16; count];
     let mut j: u16 = 0;
-    for i in 0..count {
+    for (i, entry) in table.iter_mut().enumerate() {
         let lower_bound = (i as u64) << shift;
         while lower_bound >= boundaries[j as usize + 1] {
             j += 1;
         }
-        table[i] = j;
+        *entry = j;
     }
     table
 }
