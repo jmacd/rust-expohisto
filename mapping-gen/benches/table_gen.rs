@@ -14,11 +14,9 @@ fn bench_boundary_generation(c: &mut Criterion) {
 
     // index_bits=10 takes ~61ms, 12 takes 2s, 14 takes 45s, etc.
     for index_bits in [4, 6, 8, 10] {
-        let n = 1usize << index_bits;
         group.bench_function(BenchmarkId::new("compute_boundaries", index_bits), |b| {
             b.iter(|| {
                 black_box(compute_boundaries_exact(
-                    black_box(n),
                     black_box(index_bits),
                 ));
             })

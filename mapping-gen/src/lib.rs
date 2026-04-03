@@ -1,6 +1,8 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+#![deny(missing_docs)]
+
 //! Lookup table generation for exponential histogram mapping.
 //!
 //! This crate computes exact bucket boundary significands and derives
@@ -13,11 +15,11 @@
 // maintaining a duplicate copy. The `pub` visibility on items there is
 // restricted to `pub(crate)` in the main crate via its lib.rs.
 #[path = "../../src/float64.rs"]
+#[allow(dead_code)]
 mod float64;
 mod table;
 
-pub use float64::*;
-pub use table::*;
+pub use table::{compute_boundaries_exact, map_to_index};
 
 use std::io::Write;
 
@@ -48,7 +50,13 @@ pub fn generate_inverse_factors() -> Vec<f64> {
 /// `factors` must have `MAX_SCALE` entries as returned by
 /// [`generate_inverse_factors`].
 pub fn write_inverse_factors<W: Write>(w: &mut W, factors: &[f64]) -> std::io::Result<()> {
-    debug_assert_eq!(factors.len(), MAX_SCALE as usize);
+    assert_eq!(
+        factors.len(),
+        MAX_SCALE as usize,
+        "expected {} factors, got {}",
+        MAX_SCALE,
+        factors.len()
+    );
 
     writeln!(w, "// Auto-generated inverse factor table: ln(2) / 2^scale")?;
     writeln!(
@@ -91,12 +99,12 @@ pub fn write_inverse_factors<W: Write>(w: &mut W, factors: &[f64]) -> std::io::R
 /// computed via bignum arithmetic.
 pub fn generate_boundaries(table_scale: u32) -> Vec<u64> {
     let n = 1usize << table_scale;
-    let mut raw = compute_boundaries_exact(n, table_scale);
+    let mut raw = compute_boundaries_exact(table_scale);
 
     // Upper-inclusive adjustment: boundary[0] = 1 instead of 0, so
     // significand == 0 (exact powers of two) falls below, matching
     // OTel's upper-inclusive bucket semantics.
-    debug_assert_eq!(raw[0], 0);
+    assert_eq!(raw[0], 0, "boundary[0] must be 0 before upper-inclusive adjustment");
     raw[0] = 1;
 
     let mut boundaries = Vec::with_capacity(n + 3);
@@ -117,7 +125,13 @@ pub fn write_boundaries<W: Write>(
     boundaries: &[u64],
 ) -> std::io::Result<()> {
     let n = 1usize << table_scale;
-    debug_assert_eq!(boundaries.len(), n + 3);
+    assert_eq!(
+        boundaries.len(),
+        n + 3,
+        "expected {} sentinel-wrapped boundaries, got {}",
+        n + 3,
+        boundaries.len()
+    );
 
     writeln!(
         w,
@@ -168,15 +182,22 @@ pub fn write_boundaries<W: Write>(
 /// For `count` equidistant linear buckets (each of width `1 << shift`
 /// in significand space), stores the approximate log bucket containing
 /// each linear bucket's lower bound.
+///
+/// Panics if any index value exceeds `u16::MAX` (i.e. `table_scale > 16`).
 fn derive_index_table(boundaries: &[u64], count: usize, shift: u32) -> Vec<u16> {
     let mut table = vec![0u16; count];
-    let mut j: u16 = 0;
+    let mut j: u32 = 0;
     for (i, entry) in table.iter_mut().enumerate() {
         let lower_bound = (i as u64) << shift;
         while lower_bound >= boundaries[j as usize + 1] {
             j += 1;
         }
-        *entry = j;
+        *entry = u16::try_from(j).unwrap_or_else(|_| {
+            panic!(
+                "index table value {j} at position {i} exceeds u16::MAX; \
+                 table_scale > 16 requires wider index type"
+            )
+        });
     }
     table
 }

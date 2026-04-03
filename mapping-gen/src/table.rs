@@ -14,11 +14,14 @@ use rug::{Float, Integer};
 
 /// Computes log bucket end boundaries as 52-bit significands using exact arithmetic.
 ///
-/// Returns `N` entries where `boundaries[k]` is the 52-bit significand of
-/// `2^(k/N)`, with `boundaries[0] == 0`.  Each non-zero boundary is the
-/// smallest integer significand `S` such that `S^N >= 2^(52*N + k)`,
-/// verified by exact integer arithmetic.
-pub fn compute_boundaries_exact(n: usize, index_bits: u32) -> Vec<u64> {
+/// `index_bits` is the scale parameter; the function computes `N = 2^index_bits`
+/// boundaries.  `boundaries[k]` is the 52-bit significand of `2^(k/N)`,
+/// with `boundaries[0] == 0`.  Each non-zero boundary is the smallest
+/// integer significand `S` such that `S^N >= 2^(52*N + k)`, verified by
+/// exact integer arithmetic.
+pub fn compute_boundaries_exact(index_bits: u32) -> Vec<u64> {
+    let n = 1usize << index_bits;
+
     // 128-bit precision is sufficient for index_bits up to 20:
     // repeated sqrt accumulates ~index_bits * 2^-128 error, well
     // below the 1-ULP threshold at 52-bit significand width.
@@ -43,11 +46,12 @@ pub fn compute_boundaries_exact(n: usize, index_bits: u32) -> Vec<u64> {
 
         // Scale by 2^52 to get the IEEE significand + 2^52
         x <<= 52;
-        let mut ieee_normalized = x
+        let integer = x
             .to_integer()
-            .expect("boundary float is not NaN/Inf")
+            .unwrap_or_else(|| panic!("boundary float at position {position} is NaN/Inf"));
+        let mut ieee_normalized = integer
             .to_u64()
-            .expect("scaled boundary fits in u64");
+            .unwrap_or_else(|| panic!("boundary at position {position} does not fit in u64: {integer}"));
 
         // Verify using exact integer arithmetic:
         // We need the smallest significand S such that S^N >= 2^(52*N + position).
@@ -88,21 +92,9 @@ pub fn map_to_index(value: f64, scale: i32, boundaries: &[u64]) -> i32 {
         return (exponent << scale) - 1;
     }
 
-    let n = boundaries.len();
-
-    // Binary search for the smallest k such that significand < boundaries[k].
-    // We search in 1..=n because boundaries[0] = 0 and significand > 0.
-    let mut lo = 1usize;
-    let mut hi = n;
-
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if significand >= boundaries[mid] {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
+    // Find the first k in 1..=n where significand < boundaries[k].
+    // boundaries[0] = 0 and significand > 0, so we search from index 1.
+    let lo = boundaries[1..].partition_point(|&b| b <= significand) + 1;
 
     // lo is the first k where significand < boundaries[k],
     // so significand is in [boundaries[lo-1], boundaries[lo]).
@@ -118,8 +110,7 @@ mod tests {
     fn test_boundaries_position_0() {
         // Position 0 should always be 0 (2^0 = 1.0, significand = 0)
         for index_bits in 1..=10 {
-            let n = 1usize << index_bits;
-            let boundaries = compute_boundaries_exact(n, index_bits);
+            let boundaries = compute_boundaries_exact(index_bits);
             assert_eq!(
                 boundaries[0], 0,
                 "boundary[0] should be 0 at index_bits {}",
@@ -131,8 +122,7 @@ mod tests {
     #[test]
     fn test_boundaries_monotonic() {
         for index_bits in 1..=10 {
-            let n = 1usize << index_bits;
-            let boundaries = compute_boundaries_exact(n, index_bits);
+            let boundaries = compute_boundaries_exact(index_bits);
             for i in 1..boundaries.len() {
                 assert!(
                     boundaries[i] > boundaries[i - 1],
@@ -151,7 +141,7 @@ mod tests {
         // Bucket 0 contains (1, sqrt(2)]
         // Bucket 1 contains (sqrt(2), 2]
 
-        let boundaries = compute_boundaries_exact(2, 1);
+        let boundaries = compute_boundaries_exact(1);
 
         // Power of two: 2^0 = 1.0 at scale 1 -> index = (0 << 1) - 1 = -1
         assert_eq!(map_to_index(1.0, 1, &boundaries), -1);
