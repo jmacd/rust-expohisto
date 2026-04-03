@@ -88,8 +88,7 @@ impl<const N: usize> Histogram<N> {
                 crate::mapping::Scale::new(new_scale).expect("valid scale");
             self.current.width = merge_width;
         } else if self_change > 0 {
-            self.downscale_by_min(self_change, merge_width)
-                .expect("downscale is infallible");
+            self.downscale_by_min(self_change, merge_width);
         }
 
         // Ensure tm_log >= 0: after downscale, self's width and scale
@@ -104,8 +103,7 @@ impl<const N: usize> Histogram<N> {
                 self.current.scale =
                     crate::mapping::Scale::new(new_scale).expect("valid scale");
             } else {
-                self.downscale_by_min(deficit, merge_width)
-                    .expect("downscale is infallible");
+                self.downscale_by_min(deficit, merge_width);
             }
         }
 

@@ -544,8 +544,8 @@ impl<const N: usize> Histogram<N> {
             Scale::new(new_scale).expect("two buckets fit entire range at min_scale");
     }
 
-    fn downscale_by(&mut self, change: u32) -> Result<(), Error> {
-        self.downscale_by_min(change, self.current.width)
+    fn downscale_by(&mut self, change: u32) {
+        self.downscale_by_min(change, self.current.width);
     }
 
     /// Like `downscale_by` but guarantees the output width is at least
@@ -555,14 +555,13 @@ impl<const N: usize> Histogram<N> {
         &mut self,
         change: u32,
         min_output_width: Width,
-    ) -> Result<(), Error> {
+    ) {
         if change == 0 {
-            return Ok(());
+            return;
         }
 
-        let actual = self.do_downscale(change, min_output_width)?;
+        let actual = self.do_downscale(change, min_output_width);
         self.change_scale(actual);
-        Ok(())
     }
 
     /// Attempts to add `incr` into the bucket at `index`.
@@ -635,7 +634,7 @@ impl<const N: usize> Histogram<N> {
             }
             IncrResult::NeedsDownscale(hl) => {
                 let change = hl.change_steps(N);
-                self.downscale_by(change)?;
+                self.downscale_by(change);
                 Ok(false)
             }
         }

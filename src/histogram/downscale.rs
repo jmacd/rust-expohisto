@@ -84,7 +84,7 @@ impl<const N: usize> Histogram<N> {
         &mut self,
         change: u32,
         min_output_width: Width,
-    ) -> Result<u32, super::Error> {
+    ) -> u32 {
         debug_assert!(change != 0);
         debug_assert!(!self.buckets_empty());
 
@@ -239,6 +239,6 @@ impl<const N: usize> Histogram<N> {
 
         self.shift_indices(word_shift);
         self.current.width = output_width;
-        Ok(total_widen + cross_steps)
+        total_widen + cross_steps
     }
 }
