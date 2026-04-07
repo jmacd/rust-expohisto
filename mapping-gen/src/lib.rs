@@ -104,7 +104,10 @@ pub fn generate_boundaries(table_scale: u32) -> Vec<u64> {
     // Upper-inclusive adjustment: boundary[0] = 1 instead of 0, so
     // significand == 0 (exact powers of two) falls below, matching
     // OTel's upper-inclusive bucket semantics.
-    assert_eq!(raw[0], 0, "boundary[0] must be 0 before upper-inclusive adjustment");
+    assert_eq!(
+        raw[0], 0,
+        "boundary[0] must be 0 before upper-inclusive adjustment"
+    );
     raw[0] = 1;
 
     let mut boundaries = Vec::with_capacity(n + 3);

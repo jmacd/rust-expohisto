@@ -49,9 +49,9 @@ pub fn compute_boundaries_exact(index_bits: u32) -> Vec<u64> {
         let integer = x
             .to_integer()
             .unwrap_or_else(|| panic!("boundary float at position {position} is NaN/Inf"));
-        let mut ieee_normalized = integer
-            .to_u64()
-            .unwrap_or_else(|| panic!("boundary at position {position} does not fit in u64: {integer}"));
+        let mut ieee_normalized = integer.to_u64().unwrap_or_else(|| {
+            panic!("boundary at position {position} does not fit in u64: {integer}")
+        });
 
         // Verify using exact integer arithmetic:
         // We need the smallest significand S such that S^N >= 2^(52*N + position).
