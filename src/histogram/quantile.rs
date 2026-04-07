@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Quantile estimation — CDF walk over bucket view.
+//!
+//! This module is gated behind `#[cfg(feature = "quantile")]`.
 
 use crate::mapping::Scale;
 
+use super::view::HistogramView;
 use super::Histogram;
 
 /// A quantile–value pair estimated from a histogram's bucket distribution.
@@ -18,14 +21,14 @@ pub struct QuantileValue {
 
 /// Iterator that walks the histogram CDF and yields [`QuantileValue`]s.
 ///
-/// Created by [`HistogramView::quantiles`](super::HistogramView::quantiles).
+/// Created by [`HistogramView::quantiles`].
 ///
 /// The iterator walks through zero-valued observations first, then through
 /// positive buckets in index order, using linear interpolation within the
 /// bucket that straddles each quantile threshold.
 ///
-/// By definition, quantile 0.0 yields [`HistogramView::min`](super::HistogramView::min)
-/// and quantile 1.0 yields [`HistogramView::max`](super::HistogramView::max).
+/// By definition, quantile 0.0 yields the minimum and quantile 1.0 yields
+/// the maximum.
 #[derive(Debug)]
 pub struct QuantileIter<'a, const N: usize> {
     hist: &'a Histogram<N>,
@@ -48,22 +51,57 @@ pub struct QuantileIter<'a, const N: usize> {
     max: f64,
 }
 
-impl<'a, const N: usize> QuantileIter<'a, N> {
-    /// Creates a new quantile iterator with pre-computed histogram state.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        hist: &'a Histogram<N>,
-        scale: Scale,
-        quantiles: &'a [f64],
-        bucket_len: u32,
-        offset: i32,
-        total_count: u64,
-        zero_count: u64,
-        min: f64,
-        max: f64,
-    ) -> Self {
-        Self {
-            hist,
+impl<const N: usize> HistogramView<'_, N> {
+    /// Returns an iterator that estimates values at the requested quantiles.
+    ///
+    /// Each quantile must be in `[0.0, 1.0]` and the slice must be sorted
+    /// in non-decreasing order. By definition, quantile 0.0 yields the
+    /// minimum and quantile 1.0 yields the maximum.
+    ///
+    /// The iterator walks the histogram's CDF exactly once, using linear
+    /// interpolation within the bucket that straddles each threshold.
+    /// Zero-valued observations contribute CDF mass at value 0.0 before
+    /// any positive buckets.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts that every quantile is in `[0.0, 1.0]` and that the
+    /// slice is sorted.
+    pub fn quantiles<'a>(&'a self, quantiles: &'a [f64]) -> QuantileIter<'a, N> {
+        debug_assert!(
+            quantiles.windows(2).all(|w| w[0] <= w[1]),
+            "quantiles must be sorted in non-decreasing order"
+        );
+        debug_assert!(
+            quantiles.iter().all(|&q| (0.0..=1.0).contains(&q)),
+            "quantiles must be in [0.0, 1.0]"
+        );
+
+        let stats = self.stats();
+        let total_count = stats.count;
+        let min = stats.min;
+        let max = stats.max;
+
+        let bucket_len = self.hist.trimmed_slot_count();
+        let offset = if self.hist.buckets_empty() {
+            0
+        } else {
+            self.hist.first_slot()
+        };
+
+        // Derive zero_count by subtracting positive bucket sum from total.
+        let positive_count: u64 = self.positive().iter().sum();
+        let zero_count = total_count.saturating_sub(positive_count);
+
+        let scale = if positive_count == 0 {
+            // Cannot fail: scale 0 is always valid.
+            Scale::new(0).unwrap()
+        } else {
+            self.hist.current.scale
+        };
+
+        QuantileIter {
+            hist: self.hist,
             scale,
             quantiles,
             qi: 0,
@@ -124,7 +162,8 @@ impl<const N: usize> Iterator for QuantileIter<'_, N> {
         // Walk positive buckets until cumulative count reaches the target.
         while self.pos < self.bucket_len {
             let index = self.offset + self.pos as i32;
-            let count = self.hist.bucket_get(self.hist.slot_for(index));
+            let addr = self.hist.slot_addr(index);
+            let count = self.hist.bucket_get(&addr);
 
             if count == 0 {
                 self.pos += 1;
@@ -336,7 +375,7 @@ mod tests {
 
     /// Computes reduced χ²/df of histogram bucket counts vs a theoretical
     /// CDF. Bins with expected count < 5 are merged with neighbours.
-    fn reduced_chi_squared<const N: usize>(h: &mut Histogram<N>, cdf: fn(f64) -> f64) -> f64 {
+    fn reduced_chi_squared<const N: usize>(h: &Histogram<N>, cdf: fn(f64) -> f64) -> f64 {
         let histogram_view = h.view();
         let scale = histogram_view.scale();
         let mapping = Scale::new(scale).unwrap();
@@ -346,11 +385,12 @@ mod tests {
         // Collect (observed, expected) per bucket, merging on the fly.
         let mut merged: Vec<(f64, f64)> = Vec::new();
         let (mut acc_o, mut acc_e) = (0.0, 0.0);
-        for pos in 0..view.len() {
-            let index = view.offset() + pos as i32;
+        let offset = view.offset();
+        for (pos, count) in view.iter().enumerate() {
+            let index = offset + pos as i32;
             let lower = mapping.lower_boundary(index).unwrap_or(0.0);
             let upper = mapping.lower_boundary(index + 1).unwrap_or(f64::INFINITY);
-            acc_o += view.at(pos) as f64;
+            acc_o += count as f64;
             acc_e += total * (cdf(upper) - cdf(lower));
             if acc_e >= 5.0 {
                 merged.push((acc_o, acc_e));
@@ -416,7 +456,7 @@ mod tests {
                 h.update((case.sample)(&mut rng)).unwrap();
             }
 
-            let reduced = reduced_chi_squared(&mut h, case.cdf);
+            let reduced = reduced_chi_squared(&h, case.cdf);
             eprintln!("{}: χ²/df={reduced:.4}", case.name);
             assert!(
                 reduced < 2.0,
@@ -436,15 +476,28 @@ mod tests {
                 case.name
             );
 
+            // Tolerance scales with bucket width: at coarse scales (heavy
+            // downscaling from counter widening), buckets are wide and
+            // linear interpolation has proportionally more error.
+            let scale = view.scale();
+            let rel_width = if scale >= 0 {
+                2.0_f64.powf(1.0 / (1u64 << scale) as f64) - 1.0
+            } else {
+                2.0_f64.powi(1 << (-scale)) - 1.0
+            };
+            let tol = (rel_width * 0.5).max(0.05);
+
             let p50_err = ((vals[1].value - case.p50_expected) / case.p50_expected).abs();
             assert!(
-                p50_err < 0.05,
-                "{}: p50={:.4} expected={:.4} err={:.2}%",
+                p50_err < tol,
+                "{}: p50={:.4} expected={:.4} err={:.2}% (tol={:.1}%, scale={})",
                 case.name,
                 vals[1].value,
                 case.p50_expected,
                 p50_err * 100.0,
+                tol * 100.0,
+                scale,
             );
         }
     }
-} // mod quantile_tests
+}
