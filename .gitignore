@@ -1,2 +1,4 @@
 target/
 Cargo.lock
+testharness/orchestrator/orchestrator
+testharness/go-cli/go-cli
