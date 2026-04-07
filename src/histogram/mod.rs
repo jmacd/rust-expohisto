@@ -371,7 +371,7 @@ impl<const N: usize> Histogram<N> {
     pub fn new() -> Self {
         // The limit at 2 ensures MIN_SCALE is sufficient to cover the
         // entire range.
-        const { assert!(N >= 2, "requires >= 2 u64 buckets") };
+        assert!(N >= 2, "requires >= 2 u64 buckets");
 
         // The limit at 250 allows up to 16k single-bit buckets and
         // limits the histogram struct to 2048 bytes, noting that the
@@ -380,7 +380,7 @@ impl<const N: usize> Histogram<N> {
         // Note that nothing breaks when we allow N to grow above this
         // limit, just performance. The algorithms here are designed
         // for cache-line sized data.
-        const { assert!(N <= 250, "requires <= 250 u64 buckets") };
+        assert!(N <= 250, "requires <= 250 u64 buckets");
 
         let settings = Settings::new(
             Scale::new(table_scale()).expect("table scale is valid"),

@@ -37,7 +37,7 @@ pub const MIN_VALUE: f64 = f64::MIN_POSITIVE;
 /// MSRV-compatible const `f64::to_bits()` (const-stable since 1.83;
 /// `transmute` has been const-stable since 1.56).
 #[inline]
-#[allow(unnecessary_transmutes)]
+#[allow(unknown_lints, unnecessary_transmutes)]
 pub const fn to_bits(v: f64) -> u64 {
     // SAFETY: f64 and u64 have the same size and alignment.
     unsafe { core::mem::transmute(v) }
@@ -46,7 +46,7 @@ pub const fn to_bits(v: f64) -> u64 {
 /// MSRV-compatible const `f64::from_bits()` (const-stable since 1.83;
 /// `transmute` has been const-stable since 1.56).
 #[inline]
-#[allow(unnecessary_transmutes)]
+#[allow(unknown_lints, unnecessary_transmutes)]
 pub const fn from_bits(bits: u64) -> f64 {
     // SAFETY: u64 and f64 have the same size and alignment.
     unsafe { core::mem::transmute(bits) }
