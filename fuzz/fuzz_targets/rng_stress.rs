@@ -228,7 +228,7 @@ fn run<const N: usize, const M: usize>(cfg: &Config) {
             }
         }
 
-        if hist.merge_from_other(&src).is_err() {
+        if hist.merge_from(&src).is_err() {
             return;
         }
     }
@@ -272,12 +272,10 @@ fn run<const N: usize, const M: usize>(cfg: &Config) {
     let scale = v.scale();
     let buckets = v.positive();
     if buckets.len() > 0 {
-        assert!(buckets.at(0) > 0, "leading zero bucket at scale={}", scale);
-        assert!(
-            buckets.at(buckets.len() - 1) > 0,
-            "trailing zero bucket at scale={}",
-            scale,
-        );
+        let first = buckets.iter().next().unwrap();
+        let last = buckets.iter().last().unwrap();
+        assert!(first > 0, "leading zero bucket at scale={}", scale);
+        assert!(last > 0, "trailing zero bucket at scale={}", scale);
     }
 }
 

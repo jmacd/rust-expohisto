@@ -5,16 +5,16 @@
 //! invariants after every operation.
 //!
 //! This targets risks that single-operation oracles miss:
-//!   - reset → reuse cycles (stale index_base, wrong bucket_width)
+//!   - reset → reuse cycles (stale index_base, wrong width)
 //!   - merge after partial inserts with different bucket widths
 //!   - swap correctness (does shadow state track?)
-//!   - cross-size merge (Histogram<8> → Histogram<16> via merge_from_other)
+//!   - cross-size merge (Histogram<8> → Histogram<16> via merge_from)
 //!   - cascading downscale/widen under odd-base + full-capacity pressure
 //!   - counter overflow recovery paths (NeedsDownscale vs CounterOverflow)
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::Histogram;
+use otel_expohisto::{Width, Histogram};
 
 #[path = "verify.rs"]
 mod verify;
@@ -130,8 +130,11 @@ fn decode_increment(sel: u8) -> u64 {
 
 fn try_insert(hist: &mut Histogram<8>, shadow: &mut Shadow, value_bits: u64, incr: u64) {
     if let Some(v) = decode_value(value_bits) {
-        if hist.record(v, incr).is_ok() && !shadow.poisoned {
-            shadow.ops.push(Obs { value: v, incr });
+        let snapshot = hist.clone();
+        match hist.record_incr(v, incr) {
+            Ok(()) if !shadow.poisoned => shadow.ops.push(Obs { value: v, incr }),
+            Err(_) => *hist = snapshot,
+            _ => {}
         }
     }
 }
@@ -174,17 +177,14 @@ fuzz_target!(|data: &[u8]| {
     }
     let mut u = Unstructured::new(data);
 
-    // Use first byte to decide literal mode for each pool member.
-    let lit_ctl: u8 = u.arbitrary().unwrap_or(0xFF);
-
     // Pool of histograms — small N to maximize pressure on downscale/widen.
-    let mut pool: [Histogram<8>; POOL] = core::array::from_fn(|i| {
-        Histogram::new().with_literal_mode(lit_ctl & (1 << i) != 0)
+    let mut pool: [Histogram<8>; POOL] = core::array::from_fn(|_| {
+        Histogram::new().with_min_width(Width::B1)
     });
     let mut shadows: [Shadow; POOL] = core::array::from_fn(|_| Shadow::default());
 
     // Also keep one Histogram<16> for cross-size merges.
-    let mut big: Histogram<16> = Histogram::new().with_literal_mode(lit_ctl & 0x80 != 0);
+    let mut big: Histogram<16> = Histogram::new().with_min_width(Width::B1);
     let mut big_shadow: Shadow = Shadow::default();
 
     // Cap operations to keep memory bounded.
@@ -213,21 +213,31 @@ fuzz_target!(|data: &[u8]| {
                 if d == s {
                     continue;
                 }
-                if big.merge_from_other(&pool[s]).is_ok() {
-                    let src_shadow = shadows[s].clone();
-                    big_shadow.merge_from(&src_shadow);
+                {
+                    let snapshot = big.clone();
+                    match big.merge_from(&pool[s]) {
+                        Ok(()) => {
+                            let src_shadow = shadows[s].clone();
+                            big_shadow.merge_from(&src_shadow);
+                        }
+                        Err(_) => big = snapshot,
+                    }
                 }
 
                 let (dst_hist, src_hist) = two_mut(&mut pool, d, s);
-                if dst_hist.merge_from(src_hist).is_ok() {
-                    let src_shadow = shadows[s].clone();
-                    shadows[d].merge_from(&src_shadow);
+                let snapshot = dst_hist.clone();
+                match dst_hist.merge_from(src_hist) {
+                    Ok(()) => {
+                        let src_shadow = shadows[s].clone();
+                        shadows[d].merge_from(&src_shadow);
+                    }
+                    Err(_) => *dst_hist = snapshot,
                 }
             }
 
             Op::Clear { idx } => {
                 let i = idx as usize % POOL;
-                pool[i] = Histogram::new().with_literal_mode(lit_ctl & (1 << i) != 0);
+                pool[i] = Histogram::new().with_min_width(Width::B1);
                 shadows[i].clear();
             }
 

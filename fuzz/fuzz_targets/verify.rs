@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use otel_expohisto::{Histogram, Mapping};
+use otel_expohisto::{Histogram, Scale};
 
 /// Verifies histogram state against expected (value, incr) operations.
 ///
@@ -10,18 +10,22 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
     let total_count: u64 = ops.iter().map(|&(_, incr)| incr).sum();
 
     let v = hist.view();
-    assert_eq!(v.count(), total_count, "{label}: count mismatch");
+    let stats = v.stats();
+    assert_eq!(stats.count, total_count, "{label}: count mismatch");
 
     if total_count == 0 {
         assert_eq!(v.positive().len(), 0, "{label}: should have no buckets");
         return;
     }
 
-    // min / max
-    let expected_min = ops.iter().map(|&(v, _)| v).fold(f64::INFINITY, f64::min);
-    let expected_max = ops.iter().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
-    assert_eq!(v.min(), expected_min, "{label}: min mismatch");
-    assert_eq!(v.max(), expected_max, "{label}: max mismatch");
+    // min / max — only covers non-zero (bucketed) values
+    let non_zero_ops = ops.iter().filter(|&&(v, _)| v != 0.0);
+    let expected_min = non_zero_ops.clone().map(|&(v, _)| v).fold(f64::INFINITY, f64::min);
+    let expected_max = non_zero_ops.clone().map(|&(v, _)| v).fold(f64::NEG_INFINITY, f64::max);
+    if expected_min != f64::INFINITY {
+        assert_eq!(stats.min, expected_min, "{label}: min mismatch");
+        assert_eq!(stats.max, expected_max, "{label}: max mismatch");
+    }
 
     // zero count
     let non_zero_total: u64 = ops
@@ -31,10 +35,10 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         .sum();
     let expected_zero_count = total_count - non_zero_total;
 
-    let count = v.count();
+    let count = stats.count;
     let scale = v.scale();
     let buckets = v.positive();
-    let bucket_total: u64 = (0..buckets.len()).map(|i| buckets.at(i)).sum();
+    let bucket_total: u64 = buckets.iter().sum();
 
     assert!(
         bucket_total <= count,
@@ -52,12 +56,23 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         return;
     }
 
-    let mapping = Mapping::new(scale).expect("reported scale should be valid");
+    let scale = Scale::new(scale).expect("reported scale should be valid");
     let mut expected: BTreeMap<i32, u64> = BTreeMap::new();
+
+    // record_incr rounds subnormals to (biased_exp=1, significand=1).
+    // Construct the f64 that results from this rounding so the oracle
+    // maps it through the same code path as the histogram.
+    // 52 is the IEEE 754 double-precision significand width.
+    const SUBNORMAL_ROUNDED: f64 = f64::from_bits((1u64 << 52) | 1);
+
     for &(value, incr) in ops {
         if value != 0.0 {
-            let idx = mapping.map_to_index(value);
-            *expected.entry(idx).or_insert(0) += incr;
+            let mapped = if value.to_bits() >> 52 == 0 {
+                scale.map_to_index(SUBNORMAL_ROUNDED)
+            } else {
+                scale.map_to_index(value)
+            };
+            *expected.entry(mapped).or_insert(0) += incr;
         }
     }
 
@@ -76,10 +91,9 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
         "{label}: bucket len mismatch (scale={scale})"
     );
 
-    for pos in 0..buckets.len() {
+    for (pos, act_count) in buckets.iter().enumerate() {
         let idx = exp_min_idx + pos as i32;
         let exp_count = expected.get(&idx).copied().unwrap_or(0);
-        let act_count = buckets.at(pos);
         assert_eq!(
             act_count,
             exp_count,

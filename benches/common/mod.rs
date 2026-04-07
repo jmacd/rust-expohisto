@@ -1,7 +1,7 @@
-use otel_expohisto::Mapping;
+use otel_expohisto::Scale;
 
 pub fn unique_values(scale: i32, count: usize) -> Vec<f64> {
-    let m = Mapping::new(scale).unwrap();
+    let m = Scale::new(scale).unwrap();
     let mut vals = Vec::with_capacity(count);
     for i in 0..count as i32 {
         let lo = m.lower_boundary(i).unwrap_or(1.0);

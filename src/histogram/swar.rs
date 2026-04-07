@@ -1,137 +1,607 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//! SWAR (SIMD Within A Register) — per-word parallel pairwise summation.
+//! SWAR: SIMD within a register
 
-use super::bucket_width::BucketWidth;
+use super::width::Width;
 
-/// Per-width SWAR parameters: `(shift, lane_mask)`.
-///
-/// - `shift`: number of bits to shift the upper half-slots down.
-/// - `lane_mask`: keeps only the lower half-slot in each pair.
-/// - `!lane_mask`: overflow mask — bits set here after a step mean the
-///   pair-sum overflowed the original width.
-///
-/// Indexed by [`BucketWidth::level()`] (0=B1 … 5=U32).
-pub(crate) const SWAR_TABLE: [(u32, u64); 6] = [
-    (1, 0x5555_5555_5555_5555),  // B1
-    (2, 0x3333_3333_3333_3333),  // B2
-    (4, 0x0F0F_0F0F_0F0F_0F0F), // B4
-    (8, 0x00FF_00FF_00FF_00FF),  // U8
-    (16, 0x0000_FFFF_0000_FFFF), // U16
-    (32, 0x0000_0000_FFFF_FFFF), // U32
-];
+// ── Single-step SWAR primitives ──────────────────────────────────────
 
-/// Single SWAR step: sum adjacent counters at the current width into
-/// the next wider width, in place.
+/// B1 → B2: sum pairs of 1-bit lanes.
+#[inline(always)]
+fn step_b1_b2(w: u64) -> u64 {
+    (w & 0x5555_5555_5555_5555) + ((w >> 1) & 0x5555_5555_5555_5555)
+}
+
+/// B2 → B4: sum pairs of 2-bit lanes.
+#[inline(always)]
+fn step_b2_b4(w: u64) -> u64 {
+    (w & 0x3333_3333_3333_3333) + ((w >> 2) & 0x3333_3333_3333_3333)
+}
+
+/// B4 → U8: sum pairs of 4-bit lanes.
+#[inline(always)]
+fn step_b4_u8(w: u64) -> u64 {
+    (w & 0x0F0F_0F0F_0F0F_0F0F) + ((w >> 4) & 0x0F0F_0F0F_0F0F_0F0F)
+}
+
+/// U8 → U16: sum pairs of 8-bit lanes.
+#[inline(always)]
+fn step_u8_u16(w: u64) -> u64 {
+    (w & 0x00FF_00FF_00FF_00FF) + ((w >> 8) & 0x00FF_00FF_00FF_00FF)
+}
+
+/// U16 → U32: sum pairs of 16-bit lanes.
+#[inline(always)]
+fn step_u16_u32(w: u64) -> u64 {
+    (w & 0x0000_FFFF_0000_FFFF) + ((w >> 16) & 0x0000_FFFF_0000_FFFF)
+}
+
+/// U32 → U64: sum pair of 32-bit lanes.
+#[inline(always)]
+fn step_u32_u64(w: u64) -> u64 {
+    (w & 0x0000_0000_FFFF_FFFF) + (w >> 32)
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+
+/// Widen a single u64 word in place from `before` lane width to
+/// `after` lane width by chaining SWAR pair-sum steps.
+/// Uses count_ones() shortcuts for B1→U32 and B1→U64.
 #[inline]
-pub(crate) fn swar_step(data: &mut [u64], width: BucketWidth) {
-    debug_assert_ne!(width, BucketWidth::U64, "cannot widen past U64");
-    let (shift, mask) = SWAR_TABLE[width.level()];
-    for w in data.iter_mut() {
-        let x = *w;
-        *w = ((x >> shift) & mask) + (x & mask);
+pub(crate) fn widen(before: Width, after: Width, w: u64) -> u64 {
+    use Width::*;
+    debug_assert!(before < after);
+    match (before, after) {
+        // B1 → *
+        (B1, B2) => step_b1_b2(w),
+        (B1, B4) => step_b2_b4(step_b1_b2(w)),
+        (B1, U8) => step_b4_u8(step_b2_b4(step_b1_b2(w))),
+        (B1, U16) => step_u8_u16(step_b4_u8(step_b2_b4(step_b1_b2(w)))),
+        (B1, U32) => {
+            let lo = (w as u32).count_ones() as u64;
+            let hi = ((w >> 32) as u32).count_ones() as u64;
+            lo | (hi << 32)
+        }
+        (B1, U64) => w.count_ones() as u64,
+
+        // B2 → *
+        (B2, B4) => step_b2_b4(w),
+        (B2, U8) => step_b4_u8(step_b2_b4(w)),
+        (B2, U16) => step_u8_u16(step_b4_u8(step_b2_b4(w))),
+        (B2, U32) => step_u16_u32(step_u8_u16(step_b4_u8(step_b2_b4(w)))),
+        (B2, U64) => step_u32_u64(step_u16_u32(step_u8_u16(step_b4_u8(step_b2_b4(w))))),
+
+        // B4 → *
+        (B4, U8) => step_b4_u8(w),
+        (B4, U16) => step_u8_u16(step_b4_u8(w)),
+        (B4, U32) => step_u16_u32(step_u8_u16(step_b4_u8(w))),
+        (B4, U64) => step_u32_u64(step_u16_u32(step_u8_u16(step_b4_u8(w)))),
+
+        // U8 → *
+        (U8, U16) => step_u8_u16(w),
+        (U8, U32) => step_u16_u32(step_u8_u16(w)),
+        (U8, U64) => step_u32_u64(step_u16_u32(step_u8_u16(w))),
+
+        // U16 → *
+        (U16, U32) => step_u16_u32(w),
+        (U16, U64) => step_u32_u64(step_u16_u32(w)),
+
+        // U32 → U64
+        (U32, U64) => step_u32_u64(w),
+
+        _ => unreachable!(),
     }
 }
 
-/// Checks whether any widened pair-sum overflows the original width.
-/// Called after `swar_step` has already written the wider sums.
-#[inline]
-pub(crate) fn swar_has_overflow(data: &[u64], original_width: BucketWidth) -> bool {
-    if original_width == BucketWidth::U64 {
-        return false;
-    }
-    let (_, mask) = SWAR_TABLE[original_width.level()];
-    data.iter().any(|&w| w & !mask != 0)
+// ── Single-step SWAR narrow primitives ───────────────────────────────
+//
+// Each function masks a u64 word to keep only the target-width low bits
+// in each source-width lane, then compacts the values by removing the
+// interleaved gaps.  The result occupies the low 32 bits of the u64.
+
+/// B2 → B1: keep low 1 bit of each 2-bit lane, compact 32 values.
+#[inline(always)]
+fn nstep_b2_b1(w: u64) -> u64 {
+    let w = w & 0x5555_5555_5555_5555;
+    let w = (w | (w >> 1)) & 0x3333_3333_3333_3333;
+    let w = (w | (w >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
+    let w = (w | (w >> 4)) & 0x00FF_00FF_00FF_00FF;
+    let w = (w | (w >> 8)) & 0x0000_FFFF_0000_FFFF;
+    (w | (w >> 16)) & 0x0000_0000_FFFF_FFFF
 }
 
-/// Compacts narrowed half-words into full words, pairing two source
-/// words into one destination word and zeroing the freed tail.
-#[inline]
-fn compact_with<F: Fn(u64) -> u64>(data: &mut [u64], narrow: F) {
-    let n = data.len();
-    for i in (0..n).step_by(2) {
-        let lo = narrow(data[i]);
-        let hi = if i + 1 < n { narrow(data[i + 1]) } else { 0 };
-        data[i / 2] = lo | (hi << 32);
-    }
-    for w in &mut data[n.div_ceil(2)..n] {
-        *w = 0;
-    }
+/// B4 → B2: keep low 2 bits of each 4-bit lane, compact 16 values.
+#[inline(always)]
+fn nstep_b4_b2(w: u64) -> u64 {
+    let w = w & 0x3333_3333_3333_3333;
+    let w = (w | (w >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
+    let w = (w | (w >> 4)) & 0x00FF_00FF_00FF_00FF;
+    let w = (w | (w >> 8)) & 0x0000_FFFF_0000_FFFF;
+    (w | (w >> 16)) & 0x0000_0000_FFFF_FFFF
 }
 
-/// Shifts all slot values up by one position, inserting a zero at slot 0.
+/// U8 → B4: keep low 4 bits of each 8-bit lane, compact 8 values.
+#[inline(always)]
+fn nstep_u8_b4(w: u64) -> u64 {
+    let w = w & 0x0F0F_0F0F_0F0F_0F0F;
+    let w = (w | (w >> 4)) & 0x00FF_00FF_00FF_00FF;
+    let w = (w | (w >> 8)) & 0x0000_FFFF_0000_FFFF;
+    (w | (w >> 16)) & 0x0000_0000_FFFF_FFFF
+}
+
+/// U16 → U8: keep low 8 bits of each 16-bit lane, compact 4 values.
+#[inline(always)]
+fn nstep_u16_u8(w: u64) -> u64 {
+    let w = w & 0x00FF_00FF_00FF_00FF;
+    let w = (w | (w >> 8)) & 0x0000_FFFF_0000_FFFF;
+    (w | (w >> 16)) & 0x0000_0000_FFFF_FFFF
+}
+
+/// U32 → U16: keep low 16 bits of each 32-bit lane, compact 2 values.
+#[inline(always)]
+fn nstep_u32_u16(w: u64) -> u64 {
+    let w = w & 0x0000_FFFF_0000_FFFF;
+    (w | (w >> 16)) & 0x0000_0000_FFFF_FFFF
+}
+
+/// U64 → U32: keep low 32 bits.
+#[inline(always)]
+fn nstep_u64_u32(w: u64) -> u64 {
+    w & 0x0000_0000_FFFF_FFFF
+}
+
+/// Narrow a single u64 word in place from `before` lane width to
+/// `after` lane width by chaining SWAR mask-and-compact steps.
 ///
-/// This effectively decrements the logical `index_base` by one, turning
-/// an odd base into an even one so that a normal SWAR step pairs the
-/// correct indices.
-///
-/// Precondition: the top slot of the last word must be zero (the live
-/// range must not fill the entire capacity).
+/// Each source-width lane is truncated to `after` bits and the values
+/// are packed contiguously starting from bit 0.  The result occupies
+/// the low `64 × after_bits / before_bits` bits of the returned u64.
 #[inline]
-pub(crate) fn swar_shift_up_one(data: &mut [u64], width: BucketWidth) {
-    debug_assert_ne!(width, BucketWidth::U64);
-    let bits = width.bits();
-    let n = data.len();
-    if n == 0 {
-        return;
-    }
-    debug_assert!(
-        data[n - 1] >> (64 - bits) == 0,
-        "top slot must be zero before shift",
-    );
-    // Process high-to-low so each word reads from the (unmodified) word below.
-    for i in (1..n).rev() {
-        data[i] = (data[i] << bits) | (data[i - 1] >> (64 - bits));
-    }
-    data[0] <<= bits;
-}
+pub(crate) fn narrow(before: Width, after: Width, w: u64) -> u64 {
+    use Width::*;
+    debug_assert!(before > after);
+    match (before, after) {
+        // B2 → *
+        (B2, B1) => nstep_b2_b1(w),
 
-/// Progressive bit-compaction: at each stage, merge adjacent groups by
-/// OR-shifting, then mask to keep only the compacted result.
-#[inline]
-fn compact_lanes(mut x: u64, stages: &[(u32, u64)]) -> u64 {
-    for &(shift, mask) in stages {
-        x = (x | (x >> shift)) & mask;
-    }
-    x
-}
+        // B4 → *
+        (B4, B2) => nstep_b4_b2(w),
+        (B4, B1) => nstep_b2_b1(nstep_b4_b2(w)),
 
-/// Narrows a single word from `wider(original_width)` format back to
-/// `original_width`, compacting the result into the low 32 bits.
-///
-/// Stage parameters are derived from [`SWAR_TABLE`]: stage K uses
-/// `(SWAR_TABLE[K].0, SWAR_TABLE[K+1].1)` — the shift of level K and
-/// the lane mask of level K+1.
-#[inline]
-pub(crate) fn narrow_word(w: u64, original_width: BucketWidth) -> u64 {
-    const COMPACT_STAGES: [(u32, u64); 5] = [
-        (SWAR_TABLE[0].0, SWAR_TABLE[1].1),
-        (SWAR_TABLE[1].0, SWAR_TABLE[2].1),
-        (SWAR_TABLE[2].0, SWAR_TABLE[3].1),
-        (SWAR_TABLE[3].0, SWAR_TABLE[4].1),
-        (SWAR_TABLE[4].0, SWAR_TABLE[5].1),
-    ];
+        // U8 → *
+        (U8, B4) => nstep_u8_b4(w),
+        (U8, B2) => nstep_b4_b2(nstep_u8_b4(w)),
+        (U8, B1) => nstep_b2_b1(nstep_b4_b2(nstep_u8_b4(w))),
 
-    let level = original_width.level();
-    debug_assert!(level <= 5, "can only narrow sub-U64 widths");
+        // U16 → *
+        (U16, U8) => nstep_u16_u8(w),
+        (U16, B4) => nstep_u8_b4(nstep_u16_u8(w)),
+        (U16, B2) => nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(w))),
+        (U16, B1) => nstep_b2_b1(nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(w)))),
 
-    if level == 5 {
-        // U32: one sum per word, just mask the carry bit.
-        w & SWAR_TABLE[5].1
-    } else {
-        compact_lanes(w & SWAR_TABLE[level].1, &COMPACT_STAGES[level..])
+        // U32 → *
+        (U32, U16) => nstep_u32_u16(w),
+        (U32, U8) => nstep_u16_u8(nstep_u32_u16(w)),
+        (U32, B4) => nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(w))),
+        (U32, B2) => nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(w)))),
+        (U32, B1) => nstep_b2_b1(nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(w))))),
+
+        // U64 → *
+        (U64, U32) => nstep_u64_u32(w),
+        (U64, U16) => nstep_u32_u16(nstep_u64_u32(w)),
+        (U64, U8) => nstep_u16_u8(nstep_u32_u16(nstep_u64_u32(w))),
+        (U64, B4) => nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(nstep_u64_u32(w)))),
+        (U64, B2) => nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(nstep_u64_u32(w))))),
+        (U64, B1) => nstep_b2_b1(nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(
+            nstep_u64_u32(w),
+        ))))),
+
+        _ => unreachable!(),
     }
 }
 
-/// After a SWAR step that produced no overflow, narrow the widened sums
-/// back to the original width and compact words 2:1.
+/// SWAR addition with per-lane overflow detection.
 ///
-/// The data is currently in `wider(original_width)` format with all values
-/// fitting in `original_width`. This function bit-compresses each word
-/// (via [`narrow_word`]) and packs pairs of words into one, freeing the
-/// upper half of the array.
+/// Returns `Some(a + b)` if no lane overflows, or `None` if any lane
+/// would exceed its maximum value.  Neither input is modified on failure.
+///
+/// Algorithm: zero the MSB of each lane, add the lower bits (which
+/// cannot carry across lanes), then detect overflow via the majority
+/// function of (a_msb, b_msb, carry_from_below).
 #[inline]
-pub(crate) fn swar_narrow_compact(data: &mut [u64], original_width: BucketWidth) {
-    compact_with(data, |w| narrow_word(w, original_width));
+pub(crate) fn swar_add_checked(a: u64, b: u64, width: Width) -> Option<u64> {
+    if width == Width::U64 {
+        return a.checked_add(b);
+    }
+    let msb = width.msb_mask();
+    let a_lo = a & !msb;
+    let b_lo = b & !msb;
+    let sum_lo = a_lo + b_lo; // no inter-lane carry (MSB was zeroed)
+    let carry = sum_lo & msb;
+    let a_hi = a & msb;
+    let b_hi = b & msb;
+    // Overflow in a lane iff at least 2 of {a_msb, b_msb, carry} are set.
+    let overflow = (a_hi & b_hi) | (a_hi & carry) | (b_hi & carry);
+    if overflow != 0 {
+        return None;
+    }
+    Some(sum_lo ^ a_hi ^ b_hi)
+}
+
+impl Width {
+    /// Mask with the MSB of each SWAR lane set.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn msb_mask(self) -> u64 {
+        use Width::{B1, B2, B4, U16, U32, U64, U8};
+        match self {
+            B1 => 0xFFFF_FFFF_FFFF_FFFF,
+            B2 => 0xAAAA_AAAA_AAAA_AAAA,
+            B4 => 0x8888_8888_8888_8888,
+            U8 => 0x8080_8080_8080_8080,
+            U16 => 0x8000_8000_8000_8000,
+            U32 => 0x8000_0000_8000_0000,
+            U64 => 0x8000_0000_0000_0000,
+        }
+    }
+
+    /// OR-fold all SWAR lanes within a word into a single representative
+    /// value.  The result has the same highest-set-bit as the true
+    /// maximum lane, so `Width::from_max_value(or_fold_lanes(w, word))`
+    /// gives the exact minimum width needed to hold any lane.
+    #[inline]
+    pub(crate) fn or_fold_lanes(self, w: u64) -> u64 {
+        use Width::{B1, B2, B4, U16, U32, U64, U8};
+        match self {
+            B1 => (w != 0) as u64,
+            B2 => {
+                let w = w | (w >> 2);
+                let w = w | (w >> 4);
+                let w = w | (w >> 8);
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0x3
+            }
+            B4 => {
+                let w = w | (w >> 4);
+                let w = w | (w >> 8);
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0xF
+            }
+            U8 => {
+                let w = w | (w >> 8);
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0xFF
+            }
+            U16 => {
+                let w = w | (w >> 16);
+                (w | (w >> 32)) & 0xFFFF
+            }
+            U32 => (w | (w >> 32)) & 0xFFFF_FFFF,
+            U64 => w,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack_u8x8(v: [u8; 8]) -> u64 {
+        v.iter()
+            .enumerate()
+            .fold(0u64, |a, (i, &b)| a | ((b as u64) << (i * 8)))
+    }
+
+    fn pack_u16x4(v: [u16; 4]) -> u64 {
+        v.iter()
+            .enumerate()
+            .fold(0u64, |a, (i, &s)| a | ((s as u64) << (i * 16)))
+    }
+
+    fn pack_u32x2(lo: u32, hi: u32) -> u64 {
+        (lo as u64) | ((hi as u64) << 32)
+    }
+
+    fn pack_b4x16(v: [u8; 16]) -> u64 {
+        v.iter()
+            .enumerate()
+            .fold(0u64, |a, (i, &n)| a | (((n & 0xF) as u64) << (i * 4)))
+    }
+
+    fn pack_b2x32(v: [u8; 32]) -> u64 {
+        v.iter()
+            .enumerate()
+            .fold(0u64, |a, (i, &n)| a | (((n & 0x3) as u64) << (i * 2)))
+    }
+
+    // ── narrow: single-step tests ───────────────────────────────────
+
+    #[test]
+    fn narrow_u64_to_u32() {
+        assert_eq!(narrow(Width::U64, Width::U32, 0), 0);
+        assert_eq!(narrow(Width::U64, Width::U32, 42), 42);
+        assert_eq!(
+            narrow(Width::U64, Width::U32, 0x1_0000_0000),
+            0, // high bits stripped
+        );
+        assert_eq!(narrow(Width::U64, Width::U32, 0xFFFF_FFFF), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn narrow_u32_to_u16() {
+        assert_eq!(narrow(Width::U32, Width::U16, 0), 0);
+
+        let input = pack_u32x2(1000, 2000);
+        let expected = pack_u16x4([1000, 2000, 0, 0]);
+        assert_eq!(narrow(Width::U32, Width::U16, input), expected);
+
+        let input = pack_u32x2(65535, 65535);
+        let expected = pack_u16x4([65535, 65535, 0, 0]);
+        assert_eq!(narrow(Width::U32, Width::U16, input), expected);
+    }
+
+    #[test]
+    fn narrow_u16_to_u8() {
+        assert_eq!(narrow(Width::U16, Width::U8, 0), 0);
+
+        let input = pack_u16x4([10, 20, 30, 40]);
+        let expected = pack_u8x8([10, 20, 30, 40, 0, 0, 0, 0]);
+        assert_eq!(narrow(Width::U16, Width::U8, input), expected);
+
+        let input = pack_u16x4([255, 255, 255, 255]);
+        let expected = pack_u8x8([255, 255, 255, 255, 0, 0, 0, 0]);
+        assert_eq!(narrow(Width::U16, Width::U8, input), expected);
+    }
+
+    #[test]
+    fn narrow_u8_to_b4() {
+        assert_eq!(narrow(Width::U8, Width::B4, 0), 0);
+
+        let input = pack_u8x8([1, 2, 3, 4, 5, 6, 7, 8]);
+        let expected = pack_b4x16([1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(narrow(Width::U8, Width::B4, input), expected);
+
+        let input = pack_u8x8([15, 15, 15, 15, 15, 15, 15, 15]);
+        let expected = pack_b4x16([15, 15, 15, 15, 15, 15, 15, 15, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(narrow(Width::U8, Width::B4, input), expected);
+
+        let input = pack_u8x8([15, 0, 8, 0, 3, 0, 1, 0]);
+        let expected = pack_b4x16([15, 0, 8, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(narrow(Width::U8, Width::B4, input), expected);
+    }
+
+    #[test]
+    fn narrow_b4_to_b2() {
+        assert_eq!(narrow(Width::B4, Width::B2, 0), 0);
+
+        let input = pack_b4x16([1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0]);
+        let expected = pack_b2x32([
+            1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ]);
+        assert_eq!(narrow(Width::B4, Width::B2, input), expected);
+    }
+
+    #[test]
+    fn narrow_b2_to_b1() {
+        assert_eq!(narrow(Width::B2, Width::B1, 0), 0);
+        // All 1s → 32 set bits
+        assert_eq!(
+            narrow(Width::B2, Width::B1, pack_b2x32([1; 32])),
+            0xFFFF_FFFF,
+        );
+    }
+
+    // ── narrow: multi-step tests ────────────────────────────────────
+
+    #[test]
+    fn narrow_u16_to_b4() {
+        let input = pack_u16x4([5, 10, 15, 0]);
+        let expected = pack_b4x16([5, 10, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(narrow(Width::U16, Width::B4, input), expected);
+    }
+
+    #[test]
+    fn narrow_u32_to_b4() {
+        let input = pack_u32x2(7, 12);
+        let expected = pack_b4x16([7, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(narrow(Width::U32, Width::B4, input), expected);
+    }
+
+    #[test]
+    fn narrow_u64_to_b4() {
+        assert_eq!(
+            narrow(Width::U64, Width::B4, 9),
+            9, // single value fits in one nibble
+        );
+    }
+
+    // ── narrow: slot-order preservation ─────────────────────────────
+
+    #[test]
+    fn narrow_u8_b4_preserves_slot_order() {
+        for i in 0..8u8 {
+            let mut bytes = [0u8; 8];
+            bytes[i as usize] = (i + 1).min(15);
+            let result = narrow(Width::U8, Width::B4, pack_u8x8(bytes));
+
+            let nibble = (result >> (i as u64 * 4)) & 0xF;
+            assert_eq!(nibble, (i + 1).min(15) as u64, "nibble {i}");
+
+            for j in 0..8u8 {
+                if j != i {
+                    let other = (result >> (j as u64 * 4)) & 0xF;
+                    assert_eq!(other, 0, "nibble {j} should be 0 when only {i} is set");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_u16_u8_preserves_slot_order() {
+        for i in 0..4u16 {
+            let mut shorts = [0u16; 4];
+            shorts[i as usize] = (i + 1).min(255);
+            let result = narrow(Width::U16, Width::U8, pack_u16x4(shorts));
+
+            let byte_val = (result >> (i as u64 * 8)) & 0xFF;
+            assert_eq!(byte_val, (i + 1).min(255) as u64, "byte {i}");
+        }
+    }
+
+    #[test]
+    fn narrow_u32_u16_preserves_slot_order() {
+        for i in 0..2u32 {
+            let lo = if i == 0 { 42 } else { 0 };
+            let hi = if i == 1 { 42 } else { 0 };
+            let result = narrow(Width::U32, Width::U16, pack_u32x2(lo, hi));
+
+            let short = (result >> (i as u64 * 16)) & 0xFFFF;
+            assert_eq!(short, 42, "short {i}");
+        }
+    }
+
+    // ── msb_mask tests ─────────────────────────────────────────────
+
+    #[test]
+    fn msb_mask_b1() {
+        assert_eq!(Width::B1.msb_mask(), u64::MAX);
+    }
+
+    #[test]
+    fn msb_mask_b2() {
+        // Bit 1 of every 2-bit lane
+        assert_eq!(Width::B2.msb_mask(), 0xAAAA_AAAA_AAAA_AAAA);
+    }
+
+    #[test]
+    fn msb_mask_u8() {
+        // Bit 7 of every byte
+        assert_eq!(Width::U8.msb_mask(), 0x8080_8080_8080_8080);
+    }
+
+    // ── swar_add_checked tests ─────────────────────────────────────
+
+    #[test]
+    fn swar_add_checked_u8_no_overflow() {
+        let a = pack_u8x8([10, 20, 30, 40, 50, 60, 70, 80]);
+        let b = pack_u8x8([5, 10, 15, 20, 25, 30, 35, 40]);
+        let expected = pack_u8x8([15, 30, 45, 60, 75, 90, 105, 120]);
+        assert_eq!(swar_add_checked(a, b, Width::U8), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_u8_overflow() {
+        let a = pack_u8x8([200, 0, 0, 0, 0, 0, 0, 0]);
+        let b = pack_u8x8([100, 0, 0, 0, 0, 0, 0, 0]);
+        // 200 + 100 = 300 > 255
+        assert_eq!(swar_add_checked(a, b, Width::U8), None);
+    }
+
+    #[test]
+    fn swar_add_checked_u8_at_max() {
+        let a = pack_u8x8([127, 128, 255, 0, 0, 0, 0, 0]);
+        let b = pack_u8x8([128, 127, 0, 0, 0, 0, 0, 0]);
+        let expected = pack_u8x8([255, 255, 255, 0, 0, 0, 0, 0]);
+        assert_eq!(swar_add_checked(a, b, Width::U8), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_b4_no_overflow() {
+        let a = pack_b4x16([1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let b = pack_b4x16([1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let expected = pack_b4x16([2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(swar_add_checked(a, b, Width::B4), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_b4_overflow() {
+        let a = pack_b4x16([15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let b = pack_b4x16([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(swar_add_checked(a, b, Width::B4), None);
+    }
+
+    #[test]
+    fn swar_add_checked_u16() {
+        let a = pack_u16x4([1000, 2000, 3000, 4000]);
+        let b = pack_u16x4([500, 1000, 1500, 2000]);
+        let expected = pack_u16x4([1500, 3000, 4500, 6000]);
+        assert_eq!(swar_add_checked(a, b, Width::U16), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_u32() {
+        let a = pack_u32x2(100_000, 200_000);
+        let b = pack_u32x2(50_000, 100_000);
+        let expected = pack_u32x2(150_000, 300_000);
+        assert_eq!(swar_add_checked(a, b, Width::U32), Some(expected));
+    }
+
+    #[test]
+    fn swar_add_checked_u64() {
+        assert_eq!(swar_add_checked(10, 20, Width::U64), Some(30));
+        assert_eq!(swar_add_checked(u64::MAX, 1, Width::U64), None);
+    }
+
+    #[test]
+    fn swar_add_checked_b1() {
+        // B1: 0+0=0, 0+1=1, 1+0=1, 1+1=overflow
+        assert_eq!(swar_add_checked(0, 0, Width::B1), Some(0));
+        assert_eq!(swar_add_checked(1, 0, Width::B1), Some(1));
+        // Two bits set in non-overlapping positions
+        assert_eq!(swar_add_checked(0b0101, 0b1010, Width::B1), Some(0b1111));
+        // Same bit set in both → overflow
+        assert_eq!(swar_add_checked(0b0001, 0b0001, Width::B1), None);
+    }
+
+    #[test]
+    fn swar_add_checked_b2() {
+        // B2 lanes: max 3.  2+1=3 ok, 3+1=4 overflow
+        let a = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 2;
+            v[1] = 3;
+            v
+        });
+        let b = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 1;
+            v[1] = 0;
+            v
+        });
+        let expected = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 3;
+            v[1] = 3;
+            v
+        });
+        assert_eq!(swar_add_checked(a, b, Width::B2), Some(expected));
+
+        // 3+1 overflows
+        let c = pack_b2x32({
+            let mut v = [0u8; 32];
+            v[0] = 1;
+            v
+        });
+        assert_eq!(swar_add_checked(expected, c, Width::B2), None);
+    }
+
+    #[test]
+    fn swar_add_checked_zero_identity() {
+        // Adding zero always succeeds at any width
+        for &w in &[
+            Width::B1,
+            Width::B2,
+            Width::B4,
+            Width::U8,
+            Width::U16,
+            Width::U32,
+            Width::U64,
+        ] {
+            assert_eq!(swar_add_checked(0, 0, w), Some(0));
+            assert_eq!(swar_add_checked(42, 0, w), Some(42));
+            assert_eq!(swar_add_checked(0, 42, w), Some(42));
+        }
+    }
 }

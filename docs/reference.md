@@ -2,15 +2,15 @@
 
 ## Error Handling & Atomicity
 
-All mutating operations (`update`, `record`, `merge_from`, `merge_from_other`, `merge_from_raw`) return `Result<(), Overflow>`. The `Overflow` error indicates that a bucket counter or the total count would exceed its maximum representable value.
+All mutating operations (`update`, `record_incr`, `merge_from`) return `Result<(), Error>`. The `Error::Overflow` variant indicates that the total count would exceed `u64::MAX`.
 
 **Snapshot/rollback guarantee:** Before any mutating operation, the histogram clones itself. If the operation fails (e.g., a U64 counter would overflow), the clone is restored and the histogram is left unchanged. This ensures that partial mutations from multi-step operations (downscale + widen + insert) never leak to the caller.
 
 ```rust,ignore
-let snapshot_count = h.view().count();
+let snapshot_count = h.view().stats().count;
 if h.update(value).is_err() {
     // h is unchanged — count, sum, buckets all identical to before
-    assert_eq!(h.view().count(), snapshot_count);
+    assert_eq!(h.view().stats().count, snapshot_count);
 }
 ```
 
@@ -34,13 +34,13 @@ The crate contains **zero `unsafe` code**. All bit-level manipulation (sub-byte 
 
 ## `no_std` Support
 
-The crate is `#![no_std]` compatible. The `std` feature (enabled by default) only gates `std::error::Error` implementations for `Overflow` and `MappingError`. All core functionality — recording, merging, downscaling, quantile estimation — works without `std`. Math operations (`ln`, `exp`, `floor`, `powi`) delegate to `libm` when `std` is disabled.
+The crate is `#![no_std]` compatible. The `std` feature (enabled by default) only gates `std::error::Error` implementations for `Overflow` and `ScaleError`. All core functionality — recording, merging, downscaling — works without `std`. Quantile estimation requires the `quantile` feature (which depends on `boundary`). Math operations (`ln`, `exp`, `floor`, `powi`) delegate to `libm` when `std` is disabled.
 
 To use in a `no_std` environment, disable default features and re-enable the ones you need:
 
 ```toml
 [dependencies]
-otel-expohisto = { version = "0.1", default-features = false, features = ["newrelic", "scale-8"] }
+otel-expohisto = { version = "0.1", default-features = false, features = ["scale-8"] }
 ```
 
 The CI test matrix includes `--no-default-features` to ensure `no_std` compatibility is continuously validated.
@@ -49,14 +49,14 @@ The CI test matrix includes `--no-default-features` to ensure `no_std` compatibi
 
 The crate includes comprehensive validation at multiple levels:
 
-- **125 unit tests** covering basic operations, promotion, widening, downscaling, SWAR pairwise merge, all merge strategies, quantile estimation, and boundary conditions
+- **140 unit tests** covering basic operations, widening, downscaling, SWAR pairwise merge, all merge strategies, quantile estimation, and boundary conditions
 - **4 fuzz targets** (`cargo +nightly fuzz run <target>`):
   - `histogram_oracle` — validates invariants (count, sum, min/max, bucket integrity) with random f64 sequences
   - `merge_oracle` — fuzzes weighted `record()` + cross-scale merge
   - `stateful_oracle` — state-machine fuzzer with interleaved update/merge/clear/read operations
   - `rng_stress` — large histogram (N=160) with millions of random values
-- **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 20
-- **CI matrix** — tests across 4 feature combinations (`bench-all`, `newrelic+scale-8`, `dynatrace+scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
+- **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 16
+- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
 
 ## Examples
 
@@ -66,7 +66,7 @@ Four examples are included in the `examples/` directory:
 |---------|------------|-------------|
 | `basic` | `cargo run --example basic` | Record latencies, view stats and iterate buckets |
 | `merge` | `cargo run --example merge` | Same-size and cross-size histogram merging |
-| `sizing` | `cargo run --example sizing` | Interactive capacity explorer for choosing `N` and `min_bucket_width` |
+| `sizing` | `cargo run --example sizing` | Interactive capacity explorer for choosing `N` and `min_width` |
 | `quick_start_test` | `cargo run --example quick_start_test` | Minimal 3-value example |
 
 ## References
@@ -74,9 +74,7 @@ Four examples are included in the `examples/` directory:
 - [OpenTelemetry Exponential Histogram Specification](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
 - [Upper-inclusive boundary discussion](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261): The specification change (for Prometheus compatibility) that motivated the boundary condition re-engineering in this implementation
 - [Golang OpenTelemetry Exponential Histogram](https://github.com/lightstep/go-expohisto): Golang reference implementation by the same author
-- [Dynatrace DynaHist library by Otmar Ertl](https://github.com/dynatrace-oss/dynahist) (see [ExponentialHistogramLargeInclusiveLayout](https://github.com/dynatrace-oss/dynahist/blob/main/src/main/java/com/dynatrace/dynahist/layout/ExponentialHistogramLargeInclusiveLayout.java))
-- [NewRelic lookup table algorithm by Yuke Zhuge](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/Indexer.md)
-- [NewRelic algorithm implementation](https://github.com/newrelic-experimental/newrelic-sketch-java/blob/main/src/main/java/com/newrelic/nrsketch/indexer/SubBucketLookupIndexer.java)
+- [Historical Notes](history.md): Origins of the lookup table algorithm, with links to the original Dynatrace and NewRelic implementations
 
 ## OTel SDK Specification Compatibility
 
@@ -89,7 +87,7 @@ The spec defines three configuration parameters:
 | Parameter | Spec Default | This Implementation | Notes |
 |-----------|-------------|---------------------|-------|
 | **MaxSize** | 160 | Any compile-time `N` via `Histogram<N>` | `N` is the data pool size in u64 words. Bucket capacity depends on the current counter width. |
-| **MaxScale** | 20 | 20 (`MAX_SCALE`) | All scales 1–20 are always supported. Scales within the compiled table range use exact lookup; higher scales fall back to the built-in logarithm mapper. `Histogram::new().with_scale()` lets the user set a lower starting scale. |
+| **MaxScale** | 20 | 16 (`MAX_SCALE`) | Scales 1–16 use the compile-time lookup table (selected via `scale-N` feature). The default feature is `scale-8`. `Histogram::new().with_scale()` lets the user set a lower starting scale. |
 | **RecordMinMax** | true | Always on | `min` and `max` are tracked on every update. There is no option to disable them. |
 
 ### Collected Fields
@@ -114,13 +112,13 @@ The spec requires all histogram aggregations to collect count, sum, min, and max
 
 > Implementations SHOULD NOT incorporate non-normal values (i.e., +Inf, -Inf, and NaNs) into the sum, min, and max fields.
 
-**Caller responsibility.** `debug_assert!` guards reject non-finite and negative values during development, but there is no runtime check in release builds. The crate expects the SDK caller to filter these before recording.
+**Supported.** `record_incr` rejects non-finite and negative values at runtime, returning `Error::Extreme`. Zero values are accepted (counted but not bucketed).
 
 ### Support a Minimum and Maximum Scale
 
 > The implementation MUST maintain reasonable minimum and maximum scale parameters that the automatic scale parameter will not exceed.
 
-**Supported.** Scale is bounded by `MIN_SCALE` (-10) and `MAX_SCALE` (20). The starting scale (configurable via `Histogram::new().with_scale()`) sets the upper bound for automatic scale selection.
+**Supported.** Scale is bounded by `MIN_SCALE` (-10) and `MAX_SCALE` (16). The starting scale (configurable via `Histogram::new().with_scale()`) sets the upper bound for automatic scale selection.
 
 ### Use the Maximum Scale for Single Measurements
 
@@ -142,9 +140,8 @@ The spec defines both positive and negative bucket ranges. **This implementation
 
 The spec requires aggregations to be mergeable. This implementation supports:
 
-- **Same-type merge:** `Histogram::merge_from()` merges identically-typed histograms, computing the minimum common scale and downscaling as needed.
-- **Cross-size merge:** `Histogram::merge_from_other()` merges histograms with different `N` parameters.
-- **Raw merge:** `Histogram::merge_from_raw()` merges from raw histogram data via a closure-based bucket accessor, enabling cross-library interop.
+- **Same- or cross-size merge:** `Histogram::merge_from()` merges histograms, computing the minimum common scale and downscaling as needed.  The source and destination may have different `N` parameters (e.g., `Histogram<16>` into `Histogram<8>`).
+- **Cross-size merge:** The source and destination may have different `N` parameters (e.g., `Histogram<16>` into `Histogram<8>`).
 
 ### Counter Widening
 
@@ -155,12 +152,12 @@ Not part of the spec, but relevant to overflow handling: bucket counters start a
 | Spec Requirement | Status |
 |-----------------|--------|
 | MaxSize = 160 default | Supported |
-| MaxScale = 20 default | Supported |
+| MaxScale = 20 default | Supported (up to 16) |
 | RecordMinMax | Always on |
 | Handle all normal values | Supported |
-| Reject +Inf, -Inf, NaN | Debug-only (caller responsibility) |
+| Reject +Inf, -Inf, NaN | Supported (runtime `Error::Extreme`) |
 | Subnormal values | Mapped to lowest normal bucket |
-| Minimum and maximum scale | Supported (MIN_SCALE = -10, MAX_SCALE = 20) |
+| Minimum and maximum scale | Supported (MIN_SCALE = -10, MAX_SCALE = 16) |
 | Max scale for single measurements | Supported |
 | Maintain ideal scale | Supported |
 | Positive bucket range | Supported |

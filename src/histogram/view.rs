@@ -3,13 +3,8 @@
 
 //! Promoted read-only view of a histogram.
 
-#[cfg(feature = "boundary")]
-use crate::mapping::Mapping;
-
-use super::bucket_view::BucketView;
-#[cfg(feature = "boundary")]
-use super::quantile::QuantileIter;
-use super::Histogram;
+use super::width::{SlotAddr, Width};
+use super::{Histogram, Stats};
 
 /// Read-only view of a histogram's data.
 ///
@@ -25,8 +20,8 @@ use super::Histogram;
 /// h.update(2.7).unwrap();
 ///
 /// let v = h.view();
-/// assert_eq!(v.count(), 2);
-/// assert!(v.sum() > 4.0);
+/// assert_eq!(v.stats().count, 2);
+/// assert!(v.stats().sum > 4.0);
 /// println!("scale = {}, buckets = {}", v.scale(), v.positive().len());
 /// ```
 #[derive(Debug)]
@@ -43,39 +38,25 @@ impl<const N: usize> HistogramView<'_, N> {
         if self.hist.buckets_empty() {
             0
         } else {
-            self.hist.mapping.scale()
+            self.hist.current.scale.scale()
         }
     }
 
-    /// Returns the count of all recorded values.
+    /// Returns the aggregate statistics (count, sum, min, max).
+    ///
+    /// When the histogram is empty (count is 0), min and max are
+    /// reported as 0.0.
     #[inline]
-    pub const fn count(&self) -> u64 {
-        self.hist.stats.count
-    }
-
-    /// Returns the sum of all recorded values as `f64`.
-    #[inline]
-    pub const fn sum(&self) -> f64 {
-        self.hist.stats.sum
-    }
-
-    /// Returns the minimum recorded value, or 0.0 if empty.
-    #[inline]
-    pub const fn min(&self) -> f64 {
-        if self.hist.stats.count == 0 {
-            0.0
+    pub const fn stats(&self) -> Stats {
+        if self.hist.stats.count == 0 || self.hist.buckets_empty() {
+            Stats {
+                count: self.hist.stats.count,
+                sum: 0.0,
+                min: 0.0,
+                max: 0.0,
+            }
         } else {
-            self.hist.stats.min
-        }
-    }
-
-    /// Returns the maximum recorded value, or 0.0 if empty.
-    #[inline]
-    pub const fn max(&self) -> f64 {
-        if self.hist.stats.count == 0 {
-            0.0
-        } else {
-            self.hist.stats.max
+            self.hist.stats
         }
     }
 
@@ -84,58 +65,116 @@ impl<const N: usize> HistogramView<'_, N> {
     pub fn positive(&self) -> BucketView<'_, N> {
         BucketView { hist: self.hist }
     }
+}
 
-    /// Returns an iterator that estimates values at the requested quantiles.
+/// Read-only view of bucket data in a histogram.
+#[derive(Debug)]
+pub struct BucketView<'a, const N: usize> {
+    pub(super) hist: &'a Histogram<N>,
+}
+
+impl<const N: usize> BucketView<'_, N> {
+    /// Returns the first slot index (bucket offset).
     ///
-    /// Each quantile must be in `[0.0, 1.0]` and the slice must be sorted
-    /// in non-decreasing order. By definition, quantile 0.0 yields
-    /// [`min()`](Self::min) and quantile 1.0 yields [`max()`](Self::max).
+    /// This is the index of the first non-zero bucket, trimmed
+    /// to sub-word granularity.
+    #[inline]
+    pub fn offset(&self) -> i32 {
+        if self.hist.buckets_empty() {
+            return 0;
+        }
+        self.hist.first_slot()
+    }
+
+    /// Number of logical buckets in use.
     ///
-    /// The iterator walks the histogram's CDF exactly once, using linear
-    /// interpolation within the bucket that straddles each threshold.
-    /// Zero-valued observations contribute CDF mass at value 0.0 before
-    /// any positive buckets.
+    /// This is the count from the first non-zero bucket to the last
+    /// non-zero bucket (inclusive), trimmed to sub-word granularity.
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.hist.trimmed_slot_count()
+    }
+
+    /// Number of logical buckets in use (alias).
+    #[inline]
+    pub fn bucket_count(&self) -> u32 {
+        self.len()
+    }
+
+    /// Returns the current counter width.
+    #[inline]
+    pub fn width(&self) -> Width {
+        self.hist.current.width
+    }
+
+    /// Returns true if no buckets are in use.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.hist.buckets_empty()
+    }
+
+    /// Returns an iterator over bucket counts.
     ///
-    /// # Panics
-    ///
-    /// Debug-asserts that every quantile is in `[0.0, 1.0]` and that the
-    /// slice is sorted.
-    #[cfg(feature = "boundary")]
-    pub fn quantiles<'a>(&'a self, quantiles: &'a [f64]) -> QuantileIter<'a, N> {
-        debug_assert!(
-            quantiles.windows(2).all(|w| w[0] <= w[1]),
-            "quantiles must be sorted in non-decreasing order"
-        );
-        debug_assert!(
-            quantiles.iter().all(|&q| (0.0..=1.0).contains(&q)),
-            "quantiles must be in [0.0, 1.0]"
-        );
-
-        let total_count = self.count();
-        let min = self.min();
-        let max = self.max();
-
-        let bucket_len = self.hist.range_len();
-        let offset = self.hist.index_start;
-
-        // Derive zero_count by summing positive buckets and subtracting
-        // from total. Any consumer that walks buckets learns this naturally.
-        let positive_count: u64 = (0..bucket_len)
-            .map(|pos| {
-                let index = offset + pos as i32;
-                self.hist.bucket_get(self.hist.slot_for(index))
-            })
-            .sum();
-        let zero_count = total_count.saturating_sub(positive_count);
-
-        let mapping = if positive_count == 0 {
-            Mapping::new(0).unwrap()
-        } else {
-            self.hist.mapping
-        };
-
-        QuantileIter::new(
-            self.hist, mapping, quantiles, bucket_len, offset, total_count, zero_count, min, max,
-        )
+    /// Iterates from the first non-zero slot to the last non-zero
+    /// slot, matching [`offset`](Self::offset) and [`len`](Self::len).
+    #[inline]
+    pub fn iter(&self) -> BucketsIter<'_, N> {
+        let remaining = self.hist.trimmed_slot_count() as usize;
+        BucketsIter {
+            hist: self.hist,
+            addr: if remaining > 0 {
+                Some(self.hist.slot_addr(self.hist.first_slot()))
+            } else {
+                None
+            },
+            remaining,
+        }
     }
 }
+
+impl<'a, const N: usize> IntoIterator for &'a BucketView<'a, N> {
+    type Item = u64;
+    type IntoIter = BucketsIter<'a, N>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Iterator over bucket counts.
+#[derive(Debug)]
+pub struct BucketsIter<'a, const N: usize> {
+    hist: &'a Histogram<N>,
+    addr: Option<SlotAddr<'a>>,
+    remaining: usize,
+}
+
+impl<const N: usize> Iterator for BucketsIter<'_, N> {
+    type Item = u64;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let addr = self.addr.as_ref()?;
+        let count = self.hist.bucket_get(addr);
+        self.remaining -= 1;
+        if self.remaining > 0 {
+            if let Some(a) = self.addr.take() {
+                self.addr = a.next_addr(self.hist.word_end);
+            }
+        } else {
+            self.addr = None;
+        }
+        Some(count)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<const N: usize> ExactSizeIterator for BucketsIter<'_, N> {}

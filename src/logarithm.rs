@@ -7,7 +7,7 @@
 //! It has floating-point precision errors near bucket boundaries but requires
 //! no lookup tables and works for all positive scales.
 
-use crate::float64::{get_normal_base2, get_significand};
+use crate::float64::{get_significand, get_unbiased_exponent};
 
 /// Pre-computed `LOG2_E * 2^scale` for scales 0..=20.
 ///
@@ -35,7 +35,7 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     debug_assert!(scale > 0);
 
     let significand = get_significand(value);
-    let exp = get_normal_base2(value);
+    let exp = get_unbiased_exponent(value);
 
     // Exact power-of-two: significand is 0, index is (exp << scale) - 1.
     // We use the exponent directly rather than ln() to avoid FP imprecision.
@@ -50,7 +50,8 @@ pub fn map_to_index(value: f64, scale: i32) -> i32 {
     //
     // For a non-power-of-two with exponent E, log2(value) is in
     // (E, E+1), so the index must be in [E << scale, (E+1) << scale - 1].
-    let raw = crate::float64::floor(crate::float64::ln(value) * SCALE_FACTORS[scale as usize]) as i32;
+    let raw =
+        crate::float64::floor(crate::float64::ln(value) * SCALE_FACTORS[scale as usize]) as i32;
     let lo = exp << scale;
     let hi = ((exp + 1) << scale) - 1;
     raw.clamp(lo, hi)
@@ -89,7 +90,11 @@ mod tests {
 
         // Values between 1 and 2 should be in buckets 0..15
         let idx = map_to_index(1.5, scale);
-        assert!((0..15).contains(&idx), "1.5 should be in [0, 15), got {}", idx);
+        assert!(
+            (0..15).contains(&idx),
+            "1.5 should be in [0, 15), got {}",
+            idx
+        );
     }
 
     #[test]

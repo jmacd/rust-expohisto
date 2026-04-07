@@ -14,21 +14,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   pool fills, then promote to bucket mode at the optimal scale in one shot
 - **Sub-byte bucket widths** — counters start at 1-bit and widen through
   B1→B2→B4→U8→U16→U32→U64 via SWAR (SIMD Within A Register) operations
-- **Two lookup table algorithms** — `newrelic` (default) and `dynatrace`,
-  selected at compile time via Cargo features; a built-in `logarithm` mapper
-  is always available for scales above the table maximum (or as the sole mapper
-  when no lookup table is enabled)
-- **Configurable lookup table scale** — `scale-1` through `scale-20` features
+- **Lookup table mapping** — compile-time generated index tables for O(1)
+  integer-only bucket mapping at positive scales; a built-in `logarithm`
+  mapper is always available for scales above the table maximum (or as the
+  sole mapper when no lookup table is enabled)
+- **Configurable lookup table scale** — `scale-1` through `scale-16` features
   trade binary size for finer resolution support
-- `Histogram::merge_from()` — same-size in-place merge with atomicity
-- `Histogram::merge_from_other()` — cross-size merge (different `N` values)
-- `Histogram::merge_from_raw()` — merge from raw bucket data
-- `Histogram::with_min_bucket_width()` — skip sub-byte widths for faster ops
-- `Histogram::with_literal_mode()` — disable literal mode when value range
+- `Histogram::merge_from()` — merge from any histogram (same or different `N`)
+
+- `Histogram::with_min_width()` — skip sub-byte widths for faster ops
+- `Width::B0` — literal mode represented as a width variant; disable via `with_min_width(Width::B1)` when value range
   is known upfront
 - `BucketView` — borrow-based read access to bucket data with iteration
 - OTel SDK specification compatibility (count, sum, min, max, positive buckets)
 - +Inf and subnormal value handling
-- 125 unit tests and 4 fuzz targets
-- Comprehensive README with algorithm documentation, SWAR explanation,
-  memory layout diagrams, and OTel spec compatibility matrix
+- 140 unit tests and 4 fuzz targets
+- Comprehensive documentation: design theory, implementation internals,
+  OTel spec compatibility matrix (see `docs/`), and README overview

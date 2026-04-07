@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use otel_expohisto::Histogram;
+use otel_expohisto::{Width, Histogram};
 
 #[path = "verify.rs"]
 mod verify;
@@ -61,16 +61,10 @@ fuzz_target!(|data: &[u8]| {
     let split = (partition_byte as usize) % (ops.len() + 1);
     let (left, right) = ops.split_at(split);
 
-    check_merge_same::<8>(left, right, true);
-    check_merge_same::<16>(left, right, true);
-    check_merge_different::<8, 16>(left, right, true);
-    check_merge_different::<16, 8>(left, right, true);
-
-    // Also test with literal mode disabled.
-    check_merge_same::<8>(left, right, false);
-    check_merge_same::<16>(left, right, false);
-    check_merge_different::<8, 16>(left, right, false);
-    check_merge_different::<16, 8>(left, right, false);
+    check_merge_same::<8>(left, right);
+    check_merge_same::<16>(left, right);
+    check_merge_different::<8, 16>(left, right);
+    check_merge_different::<16, 8>(left, right);
 });
 
 /// Map a selector byte into an increment that exercises different
@@ -120,20 +114,20 @@ fn decode_increment(sel: u8, mode: u8) -> u64 {
 // Merge checks
 // ---------------------------------------------------------------------------
 
-fn build<const N: usize>(ops: &[Op], literal_mode: bool) -> (Histogram<N>, Vec<Op>) {
-    let mut h = Histogram::<N>::new().with_literal_mode(literal_mode);
+fn build<const N: usize>(ops: &[Op]) -> (Histogram<N>, Vec<Op>) {
+    let mut h = Histogram::<N>::new().with_min_width(Width::B1);
     let mut ok = Vec::new();
     for &op in ops {
-        if h.record(op.value, op.incr).is_ok() {
+        if h.record_incr(op.value, op.incr).is_ok() {
             ok.push(op);
         }
     }
     (h, ok)
 }
 
-fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: bool) {
-    let (mut h1, mut ok) = build::<N>(left, literal_mode);
-    let (h2, ok_right) = build::<N>(right, literal_mode);
+fn check_merge_same<const N: usize>(left: &[Op], right: &[Op]) {
+    let (mut h1, mut ok) = build::<N>(left);
+    let (h2, ok_right) = build::<N>(right);
     if h1.merge_from(&h2).is_err() {
         return;
     }
@@ -144,11 +138,10 @@ fn check_merge_same<const N: usize>(left: &[Op], right: &[Op], literal_mode: boo
 fn check_merge_different<const N: usize, const M: usize>(
     left: &[Op],
     right: &[Op],
-    literal_mode: bool,
 ) {
-    let (mut h1, mut ok) = build::<N>(left, literal_mode);
-    let (h2, ok_right) = build::<M>(right, literal_mode);
-    if h1.merge_from_other(&h2).is_err() {
+    let (mut h1, mut ok) = build::<N>(left);
+    let (h2, ok_right) = build::<M>(right);
+    if h1.merge_from(&h2).is_err() {
         return;
     }
     ok.extend_from_slice(&ok_right);

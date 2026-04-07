@@ -9,13 +9,14 @@ use otel_expohisto::Histogram;
 
 fn print_histogram<const N: usize>(label: &str, h: &mut Histogram<N>) {
     let v = h.view();
+    let stats = v.stats();
     println!("{label}:");
     println!(
         "  count={}, sum={:.1}, min={:.1}, max={:.1}, scale={}",
-        v.count(),
-        v.sum(),
-        v.min(),
-        v.max(),
+        stats.count,
+        stats.sum,
+        stats.min,
+        stats.max,
         v.scale()
     );
     let b = v.positive();
@@ -66,7 +67,7 @@ fn main() {
     print_histogram("Edge (H8)", &mut edge);
     print_histogram("Aggregator (H32)", &mut aggregator);
 
-    // merge_from_other allows different N values
-    aggregator.merge_from_other(&edge).unwrap();
+    // merge_from allows different N values
+    aggregator.merge_from(&edge).unwrap();
     print_histogram("\nAggregator after merge", &mut aggregator);
 }

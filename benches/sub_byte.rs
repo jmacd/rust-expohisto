@@ -16,18 +16,18 @@
 //!    including the benefit of starting wider (skip sub-byte entirely).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{BucketWidth, Histogram};
+use otel_expohisto::{Histogram, Width};
 
 mod common;
 
 use common::unique_values;
 
-const WIDTHS: &[(&str, BucketWidth)] = &[
-    ("B1", BucketWidth::B1),
-    ("B2", BucketWidth::B2),
-    ("B4", BucketWidth::B4),
-    ("U8", BucketWidth::U8),
-    ("U16", BucketWidth::U16),
+const WIDTHS: &[(&str, Width)] = &[
+    ("B1", Width::B1),
+    ("B2", Width::B2),
+    ("B4", Width::B4),
+    ("U8", Width::U8),
+    ("U16", Width::U16),
 ];
 
 fn bench_sub_byte(c: &mut Criterion) {
@@ -47,8 +47,10 @@ fn bench_sub_byte(c: &mut Criterion) {
         for &(label, min_w) in WIDTHS {
             group.bench_function(BenchmarkId::new("start", label), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<16> =
-                        Histogram::new().with_scale(scale).with_min_bucket_width(min_w);
+                    let mut h: Histogram<16> = Histogram::new()
+                        .with_scale(scale)
+                        .unwrap()
+                        .with_min_width(min_w);
                     for &v in &values {
                         h.update(black_box(v)).unwrap();
                     }
@@ -75,10 +77,12 @@ fn bench_sub_byte(c: &mut Criterion) {
                 let id = format!("{dup_label}/{width_label}");
                 group.bench_function(BenchmarkId::new("start", &id), |b| {
                     b.iter(|| {
-                        let mut h: Histogram<16> =
-                            Histogram::new().with_scale(scale).with_min_bucket_width(min_w);
+                        let mut h: Histogram<16> = Histogram::new()
+                            .with_scale(scale)
+                            .unwrap()
+                            .with_min_width(min_w);
                         for &v in &values {
-                            h.record(black_box(v), reps).unwrap();
+                            h.record_incr(black_box(v), reps).unwrap();
                         }
                         black_box(&h);
                     })
@@ -98,13 +102,18 @@ fn bench_sub_byte(c: &mut Criterion) {
         for &(label, min_w) in WIDTHS {
             group.bench_function(BenchmarkId::new("start", label), |b| {
                 b.iter(|| {
-                    let mut h: Histogram<16> =
-                        Histogram::new().with_scale(scale).with_min_bucket_width(min_w);
+                    let mut h: Histogram<16> = Histogram::new()
+                        .with_scale(scale)
+                        .unwrap()
+                        .with_min_width(min_w);
                     for _cycle in 0..10 {
                         for &v in &values {
                             h.update(black_box(v)).unwrap();
                         }
-                        h = Histogram::new().with_scale(scale).with_min_bucket_width(min_w);
+                        h = Histogram::new()
+                            .with_scale(scale)
+                            .unwrap()
+                            .with_min_width(min_w);
                     }
                     black_box(&h);
                 })

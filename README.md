@@ -5,7 +5,7 @@
 [![docs.rs](https://docs.rs/otel-expohisto/badge.svg)](https://docs.rs/otel-expohisto)
 [![License](https://img.shields.io/crates/l/otel-expohisto.svg)](https://github.com/jmacd/rust-expohisto/blob/main/LICENSE)
 
-An allocation-free (after one-time table init), table-lookup based implementation of the
+An allocation-free, compile-time table-lookup based implementation of the
 [OpenTelemetry Exponential Histogram](https://opentelemetry.io/docs/specs/otel/metrics/data-model/#exponentialhistogram)
 in Rust.
 
@@ -15,16 +15,15 @@ Exponential histograms provide a compact, high-resolution representation of valu
 
 - **No heap allocation**: Fixed-size bucket storage using const generics (`Histogram<N>`)
 - **`Send + Sync`**: All fields are `Copy` primitives; safe to share across threads with external synchronization
-- **High performance**: Lookup table provides 3.5× speedup over logarithm-based mapping
+- **High performance**: Lookup table provides ~1.8× speedup over logarithm-based mapping
 - **Sub-byte counters**: 1-bit bucket counters (B1) maximize resolution; auto-widen on overflow
 - **Configurable table size**: Trade static memory for lookup acceleration at higher scales
 - **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
-- **Atomic error recovery**: Snapshot/rollback ensures failed operations leave the histogram unchanged
-- **Literal mode**: Cold-start optimization defers bucket allocation until the value range is known
-- **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature; all math delegates to `libm`
+- **Compact configuration**: 2-byte `Settings` struct pairs `Scale` + `Width`; histograms track both initial and current settings
+- **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature
 - **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate
-- **Minimal dependencies**: Single runtime dependency (`libm`) for `no_std`-compatible math functions
-- **Comprehensive testing**: 125 unit tests and 4 fuzz targets
+- **Zero runtime dependencies**: Only a build dependency (`expohisto-mapping-gen`) for compile-time table generation
+- **Comprehensive testing**: Unit tests and fuzz targets
 
 **Minimum Supported Rust Version (MSRV):** 1.73
 
@@ -49,7 +48,8 @@ hist.update(100.0).unwrap();
 
 // Access statistics through a view
 let v = hist.view();
-println!("count: {}, sum: {}", v.count(), v.sum());
+let stats = v.stats();
+println!("count: {}, sum: {}", stats.count, stats.sum);
 println!("scale: {}", v.scale());
 ```
 
@@ -60,26 +60,18 @@ Benchmark results — `map_to_index` over 100 random f64 values (criterion, medi
 | Method | Scale range | Per-value | Notes |
 |--------|------------|-----------|-------|
 | Exponent | ≤ 0 | ~3.4 ns | Bit extraction only |
-| Dynatrace lookup | 1–14 | ~5.9 ns | Integer-only, N linear buckets, 2 corrections |
-| NewRelic lookup | 1–14 | ~7.3 ns | Integer-only, 2N linear buckets, 1 correction |
+| Lookup table | 1–14 | ~5.9 ns | Integer-only, compile-time generated |
 | Logarithm | 1–20 | ~10.5 ns | `ln()`-based, works at any scale |
 
-The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum automatically fall back to the built-in logarithm mapper.
+The lookup table accelerates all scales from 1 up to the compiled maximum. Scales beyond the table maximum are rejected by `Scale::new()`.
 
-## Lookup Table Features
-
-Choose a **scale** feature to set the table size, and an **algorithm** feature to select the mapping method:
-
-```toml
-[dependencies]
-otel-expohisto = { version = "0.1", features = ["newrelic", "scale-8"] }  # default: std + newrelic + scale-8
-```
+## Features
 
 ### Scale (table size)
 
-Scale features `scale-1` through `scale-20` control the lookup table size.
+Scale features `scale-1` through `scale-16` control the lookup table size.
 Each table supports all scales from 1 up to its maximum; higher scales
-fall back to the built-in logarithm mapper. Selected examples:
+are rejected by `Scale::new()`. Selected examples:
 
 | Feature | Table Size | Scales Accelerated | Use Case |
 |---------|------------|-------------------|----------|
@@ -90,29 +82,23 @@ fall back to the built-in logarithm mapper. Selected examples:
 | `scale-12` | 32 KB | 1–12 | High resolution |
 | `scale-14` | 128 KB | 1–14 | Maximum practical coverage |
 
-### Algorithm
-
-| Feature | Linear Buckets | Max Corrections | Notes |
-|---------|---------------|-----------------|-------|
-| `newrelic` | 2N | 1 | Slightly larger index table |
-| `dynatrace` | N | 2 | ~50% smaller index table |
-| *(none)* | — | — | Pure logarithm, no table needed, FP precision errors |
-
-The `newrelic` and `dynatrace` algorithms produce identical results, are equally tested, and perform the same at runtime — choose whichever you prefer. Memory differences are negligible (see [Lookup Table Design](docs/design.md#lookup-table-design)). When neither is enabled (or when the scale exceeds the table maximum), the built-in logarithm mapper handles all scales.
-
 ### Other features
 
 | Feature | Default | Effect |
 |---------|---------|--------|
-| `std` | ✓ | Enables `std::error::Error` impls for `Overflow` and `MappingError`. Disable for `#![no_std]` builds. |
+| `std` | ✓ | Enables `std::error::Error` impls for `Overflow` and `ScaleError`. Disable for `#![no_std]` builds. |
+| `logarithm` | | Pure `ln()`-based mapper for testing and benchmarking. Requires `std`. |
+| `boundary` | | Enables `lower_boundary()` at positive scales. Requires `std`. |
+| `quantile` | | Quantile estimation (`QuantileIter`). Requires `boundary`. |
 | `bench-internals` | | Exposes internal methods (e.g., `downscale()`) for benchmarking |
-| `bench-all` | | Enables `newrelic` + `dynatrace` + `scale-8` + `bench-internals` for testing all algorithms together |
+| `bench-all` | | Enables `logarithm` + `quantile` + `scale-8` + `bench-internals` for comprehensive testing |
 
 ## Documentation
 
 - **[Design & Architecture](docs/design.md)** — Exponential scale theory, index mapping algorithms, lookup table design, crate structure
 - **[Implementation Details](docs/internals.md)** — Literal mode, sub-byte counters (SWAR), parameter selection, API overview
 - **[Reference](docs/reference.md)** — Error handling, thread safety, `no_std` support, testing, OTel spec compatibility
+- **[Historical Notes](docs/history.md)** — Origins of the lookup table algorithm
 
 ## Contributing
 

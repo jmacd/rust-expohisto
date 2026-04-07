@@ -1,43 +1,5 @@
 # Implementation Details
 
-## Literal Mode (Cold-Start Optimization)
-
-New histograms start in **literal mode**: the first few observations are stored as raw
-`f64` bit patterns in the data pool (one u64 per value). When the pool fills, the
-histogram promotes to bucket mode, computing the optimal starting scale from the full
-observed range in a single pass.
-
-```text
-Literal Mode Lifecycle:
-
-  new()                    update(v)                      (N+1)th value
-    │                         │                              │
-    ▼                         ▼                              ▼
-┌────────┐   non-zero    ┌────────────┐    pool full    ┌──────────┐
-│ Empty  │──────────────►│  Storing   │────────────────►│ Promote  │
-│literal │   store bits  │  literals  │  promote_with() │ to bucket│
-│mode=on │               │  in pool   │                 │   mode   │
-└────────┘               └────────────┘                 └──────────┘
-     │                        │                              │
-     │   zero values          │   zero values                │
-     └── update MMSC only ◄───┘                              ▼
-         (no literal slot)                          ┌──────────────────┐
-                                                    │  Bucket mode     │
-          Readers (positive(), scale(), etc.)        │  normal ops:     │
-          compute a virtual bucket view on the fly  │  insert, merge,  │
-          from stored literals — no promotion needed │  downscale, ...  │
-                                                    └──────────────────┘
-```
-
-**Why this matters**: Without literal mode, the first few values often span a wide range,
-triggering repeated downscale+widen operations that are immediately discarded as subsequent
-values refine the range. Literal mode eliminates all that incremental work — the optimal
-scale and bucket width are determined from the full initial set in one shot.
-
-For `Histogram<16>`, literal capacity is 16 values (= `N`).
-Literal mode can be disabled via `.with_literal_mode(false)` for benchmarks or when the
-caller already knows the value range.
-
 ## Sub-Byte Bucket Widths and Bit-Level Arithmetic
 
 Bucket counters start at 1 bit per counter, maximizing the initial bucket count for a given memory budget. As counters saturate, they widen in place through the chain **B1→B2→B4→U8→U16→U32→U64**, each transition halving the bucket count and doubling counter capacity. All widths use a single shift-and-mask formula over the `[u64]` pool — sub-byte widths extract packed bitfields, while byte-aligned widths reduce to ordinary word-sized reads. This section describes the bit-level machinery that makes sub-byte widths work.
@@ -46,7 +8,7 @@ Bucket counters start at 1 bit per counter, maximizing the initial bucket count 
 
 `Histogram<N>` stores aggregate statistics in separate struct fields plus a flat
 `[u64; N]` data pool. Because stats live outside the pool, all `N` words are
-available for bucket data (or literals):
+available for bucket data:
 
 ```text
 Histogram<16>                     128 bytes data pool + 32 bytes stats
@@ -58,16 +20,13 @@ Histogram<16>                     128 bytes data pool + 32 bytes stats
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ data[0] │ data[1] │ data[2] │ ... │ data[15]                   │
-│ 16 words: bucket data or literal f64 values                    │
+│ 16 words: bucket data                                           │
 └─────────────────────────────────────────────────────────────────┘
  ◄───────────── stats overhead: 32 bytes ─────────────►
  ◄──────────── data pool: N = 16 words = 128 bytes ───►
 ```
 
-In **literal mode** (cold start), the data pool stores raw `f64` bit patterns
-— one per non-zero observation — until the pool fills and promotes to bucket mode.
-
-In **bucket mode**, the data pool is reinterpreted at the current counter width.
+The data pool is interpreted at the current counter width.
 All widths use the same physical `[u64; N]` backing array — the histogram just
 interprets the same bits differently:
 
@@ -183,31 +142,20 @@ When `index_base` is even, the k-th counter and its neighbor at k+1 are already 
 
 Either way, one downscale step is consumed: indices are halved by right-shifting `index_start`, `index_end`, and `index_base`.
 
-#### Odd base: SWAR shift + merge
+#### Clone + scatter-add (unified path)
 
-When `index_base` is odd, the physical slot layout is misaligned for SWAR pairing. The solution is to shift all slots up by one position first, inserting a zero at slot 0. This makes the effective base even, after which the normal SWAR merge proceeds exactly as above.
+Both downscale and counter-widening use a single `do_downscale(change, min_width)` function that works identically at all counter widths (B1 through U64):
 
-The shift operates on the raw `[u64]` array in a single high-to-low pass:
+1. **Clone** the `[u64; N]` data array.
+2. **Determine output width**: walk the old live range, summing each group of `2^change` adjacent counters that share the same shifted index.  Track the maximum group sum to find the minimum `Width` whose `counter_max` accommodates all sums (at least `min_width`).
+3. **Zero the data array** and compute a fresh, word-aligned `index_base`.
+4. **Scatter-add**: for each old bucket, read its counter from the clone, compute the shifted output index, and add the value into the corresponding slot of the zeroed output buffer.
 
-```text
-swar_shift_up_one(data, width):
-    bits = width.bits()
-    for i in (N-1 down to 1):
-        data[i] = (data[i] << bits) | (data[i-1] >> (64 - bits))
-    data[0] <<= bits
-```
-
-Each word shifts left by `bits`, carrying the overflow from the word below. The result is a one-slot shift of the entire packed array, with no per-slot extraction needed.
-
-**Edge case**: When the live range fills the entire capacity (the top slot of the last word is nonzero), the shift would push data off the end. This rare case falls back to scalar gather-scatter, which reads all values into a temporary buffer, clears the data, and writes them back at their new modular positions.
-
-#### At U64 width
-
-Once counters have reached U64, further downscale steps use a different path (`bucket_downscale_u64`) that processes multiple steps at once by reading each slot, shifting its index right by `change`, and accumulating sums at the destination.
+This linear read→fold→write pattern avoids in-place alignment fixups and is SIMD-friendly.  The alignment invariant (`index_base` aligned to `slots_per_word`) is trivially maintained because the base is computed fresh each time.
 
 ### Counter widening
 
-When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to record another observation), the histogram must widen all counters. This is done via `bucket_widen(steps)`:
+When a bucket counter saturates (e.g., a B1 counter already holds 1 and needs to record another observation), the histogram must widen all counters.  This calls `do_downscale(1, current_width.wider())`, which merges adjacent pairs and ensures the output width is at least one level wider than the input:
 
 ```text
 Widening cascade for Histogram<16> (16 bucket words):
@@ -218,14 +166,7 @@ B1 ──saturate──► B2 ──saturate──► B4 ──saturate──►
 max=1            max=3            max=15           max=255 max=64K max=4G  max=2⁶⁴
 
 Each transition: counters merge pairwise, scale decreases by 1.
-All transitions use SWAR shift-and-mask over the [u64] pool.
 ```
-
-1. **If base is even**: Use multi-step SWAR widening (`swar_widen`), which chains SWAR steps from the current width to the target width. Each step sums adjacent pairs, doubling the counter width and halving the bucket count.
-
-2. **If base is odd**: Fall back to scalar gather-scatter for each step, since the SWAR pairing would be incorrect.
-
-3. **Update metadata**: Shift `index_start`, `index_end`, and `index_base` right by `steps`, set the new `bucket_width`.
 
 The transition preserves the total count across all buckets: the sum of all counters before and after widening is identical. Resolution is lost (adjacent buckets are merged), but no data is destroyed.
 
@@ -236,7 +177,7 @@ The transition preserves the total count across all buckets: the sum of all coun
 ### Pool size `N` (u64 words)
 
 `N` controls data-pool size: each histogram uses exactly `N × 8` bytes of
-bucket/literal storage. Aggregate stats are stored separately as `count: u64`
+bucket storage. Aggregate stats are stored separately as `count: u64`
 and `sum/min/max: f64` (32 bytes total).
 Larger `N` means more buckets, which means finer resolution before downscaling.
 
@@ -254,9 +195,8 @@ relative error) across the full range.
 
 | Method | Effect |
 |--------|--------|
-| `with_scale(s)` | Set exact starting scale (panics if invalid; does not clamp) |
-| `with_min_bucket_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
-| `with_literal_mode(false)` | Disable literal mode when the value range is already known |
+| `with_scale(s)` | Set exact starting scale (returns `Err` if invalid; does not clamp) |
+| `with_min_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
 
 Run `cargo run --example sizing` for an interactive capacity explorer.
 
@@ -280,21 +220,22 @@ Both `update` and `record` return `Result<(), Overflow>`. On error the histogram
 
 ### Reading via `HistogramView`
 
-All read access goes through `view()`, which promotes from literal mode if needed and returns an immutable `HistogramView`. Note that `view()` takes `&mut self` because promotion from literal to bucket mode is a one-time internal mutation:
+All read access goes through `view()`, which returns an immutable `HistogramView`:
 
 ```rust,ignore
 let v = h.view();
-v.count()                      // u64  — total observations
-v.sum()                        // f64  — arithmetic sum
-v.min()                        // f64  — minimum value
-v.max()                        // f64  — maximum value
+let s = v.stats();
+s.count                        // u64  — total observations
+s.sum                          // f64  — arithmetic sum
+s.min                          // f64  — minimum value
+s.max                          // f64  — maximum value
 v.scale()                      // i32  — current mapping scale
 
 // Iterate over non-empty positive buckets
 let buckets = v.positive();
 buckets.offset()               // i32  — index of the first bucket
 buckets.len()                  // u32  — number of contiguous buckets
-buckets.width()                // BucketWidth — current counter width
+buckets.width()                // Width — current counter width
 for count in &buckets {
     // each count is u64
 }
@@ -318,7 +259,7 @@ The returned `QuantileIter` implements `Iterator<Item = QuantileValue>` and `Exa
 Three merge strategies enable flexible aggregation:
 
 ```rust,ignore
-use otel_expohisto::{Histogram, Stats, BucketDescriptor};
+use otel_expohisto::Histogram;
 
 let mut a: Histogram<16> = Histogram::new();
 let b: Histogram<16> = Histogram::new();
@@ -328,50 +269,40 @@ a.merge_from(&b).unwrap();
 
 // Cross-size merge (different N parameters)
 let c: Histogram<32> = Histogram::new();
-a.merge_from_other(&c).unwrap();
-
-// Raw merge — from arbitrary bucket data via a closure
-a.merge_from_raw(
-    &Stats { count: 10, sum: 42.0, min: 1.0, max: 9.0 },
-    &BucketDescriptor { scale: 4, offset: 0, len: 5 },
-    &|i| bucket_counts[i as usize],  // closure returning count at position i
-).unwrap();
+a.merge_from(&c).unwrap();
 ```
 
-All merge operations compute the minimum common scale, downscale as needed, and use snapshot/rollback for atomicity.
+Merge computes the minimum common scale, downscales as needed, and uses snapshot/rollback for atomicity.
 
 ### Lifecycle
 
 | Method | Description |
 |--------|-------------|
-| `new()` | Create at maximum scale (20) with default settings |
-| `with_scale(s)` | Create at exact scale (panics if invalid; does not clamp) |
+| `new()` | Create at maximum table scale with default settings |
+| `with_scale(s)` | Create at exact scale (returns `Err` if invalid; does not clamp) |
 | `swap(&mut other)` | Exchange contents with another histogram (O(N) memswap) |
-| `is_literal()` | Check if in literal mode |
-| `bucket_capacity()` | Number of logical buckets at the current width |
-| `bucket_width()` | Current counter width (`B1`..`U64`) |
-| `buckets_empty()` | Whether all bucket counters are zero |
+| `width()` | Current counter width (`B1`..`U64`) |
 
 ### Constructor chain
 
 ```rust,ignore
-use otel_expohisto::{Histogram, BucketWidth};
+use otel_expohisto::{Histogram, Width};
 
 let h: Histogram<16> = Histogram::new()
-    .with_scale(8)                                    // set starting scale
-    .with_min_bucket_width(BucketWidth::U8)           // skip sub-byte widths
-    .with_literal_mode(false);                        // disable cold-start optimization
+    .with_scale(8)?                                   // set starting scale
+    .with_min_width(Width::U8)           // skip sub-byte widths
+    .with_min_width(Width::B1);    // disable cold-start optimization
 ```
 
-### Standalone `Mapping` API
+### Standalone `Scale` API
 
-The `Mapping` struct is re-exported at the crate root for direct value-to-index conversion, independent of any histogram instance:
+The `Scale` struct is re-exported at the crate root for direct value-to-index conversion, independent of any histogram instance:
 
 ```rust,ignore
-use otel_expohisto::{Mapping, MappingError, MAX_SCALE, MIN_SCALE, max_scale};
+use otel_expohisto::{Scale, ScaleError, MAX_SCALE, MIN_SCALE, max_scale};
 
 // Create a mapping at scale 8
-let m = Mapping::new(8).unwrap();
+let m = Scale::new(8).unwrap();
 assert_eq!(m.scale(), 8);
 
 // Map a value to its bucket index
@@ -387,7 +318,7 @@ assert_eq!(MAX_SCALE, 20);
 assert_eq!(max_scale(), 20);
 ```
 
-`Mapping::new(scale)` returns `Err(MappingError::InvalidScale)` for scales outside \[-10, 20\]. `lower_boundary()` returns `Err(MappingError::Underflow)` or `Err(MappingError::Overflow)` when the index corresponds to a subnormal or infinite value.
+`Scale::new(scale)` returns `Err(ScaleError::InvalidScale)` for scales outside \[-10, 20\]. `lower_boundary()` returns `Err(ScaleError::Underflow)` or `Err(ScaleError::Overflow)` when the index corresponds to a subnormal or infinite value.
 
 ### Trait implementations
 
@@ -399,9 +330,8 @@ assert_eq!(max_scale(), 20);
 | `BucketsIter` | `Iterator<Item = u64>`, `ExactSizeIterator`, `Debug` |
 | `QuantileIter` | `Iterator<Item = QuantileValue>`, `ExactSizeIterator`, `Debug` |
 | `QuantileValue` | `Clone`, `Copy`, `Debug`, `PartialEq` |
-| `BucketWidth` | `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord` |
+| `Width` | `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord` |
 | `Stats` | `Clone`, `Copy`, `Debug` (also has `Stats::EMPTY` constant) |
-| `BucketDescriptor` | `Clone`, `Copy`, `Debug` |
-| `Overflow` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
-| `MappingError` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
-| `Mapping` | `Clone`, `Copy`, `Debug` |
+| `Error` | `Clone`, `Copy`, `Debug`, `Display`, `PartialEq` |
+| `ScaleError` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
+| `Scale` | `Clone`, `Copy`, `Debug` |

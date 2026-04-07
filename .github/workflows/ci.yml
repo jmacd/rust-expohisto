@@ -36,8 +36,8 @@ jobs:
       matrix:
         features:
           - "--features bench-all"
-          - "--features newrelic,scale-8"
-          - "--features dynatrace,scale-8"
+          - "--features scale-8"
+          - "--no-default-features --features scale-8"
           - "--no-default-features"
     steps:
       - uses: actions/checkout@v4
@@ -93,3 +93,14 @@ jobs:
       - run: cargo +nightly fuzz run merge_oracle -- -max_total_time=30
       - run: cargo +nightly fuzz run stateful_oracle -- -max_total_time=30
       - run: cargo +nightly fuzz run rng_stress -- -max_total_time=30
+
+  no-std:
+    name: no_std
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - run: cargo check --target thumbv7em-none-eabihf --no-default-features
+      - run: cargo check --target thumbv7em-none-eabihf --no-default-features --features scale-8

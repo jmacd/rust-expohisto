@@ -12,7 +12,7 @@ categories = ["data-structures"]
 exclude = ["fuzz/", "benches/", "mapping-gen/", ".github/", "CONTRIBUTING.md", "docs/"]
 
 [features]
-default = ["std", "newrelic", "scale-8"]
+default = ["std", "scale-8"]
 
 # Std enables std::error::Error impls, nothing more.
 std = []
@@ -35,28 +35,20 @@ scale-13 = []
 scale-14 = []
 scale-15 = []
 scale-16 = []
-scale-17 = []
-scale-18 = []
-scale-19 = []
-scale-20 = []
-
-# Mapping algorithms — choose one. Both produce identical results; they
-# differ only in index table size and correction count. Scales above the
-# table scale are rejected by Mapping::new().
-
-newrelic = ["scale-8"]
-dynatrace = ["scale-8"]
 
 # Logarithm mapper — for testing and benchmarking only.
 # Uses ln() and floor() from std.
 logarithm = ["std"]
 
-# Boundary computation (lower_boundary, quantile estimation).
+# Boundary computation (lower_boundary).
 # Uses exp() from std.
 boundary = ["std"]
 
+# Quantile estimation over histogram buckets.
+quantile = ["boundary"]
+
 # For benchmarking all algorithms together
-bench-all = ["newrelic", "dynatrace", "logarithm", "boundary", "scale-8", "bench-internals"]
+bench-all = ["logarithm", "quantile", "scale-8", "bench-internals"]
 
 # Expose internal methods for benchmarking
 bench-internals = []

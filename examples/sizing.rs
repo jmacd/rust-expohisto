@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run --example sizing`
 
-use otel_expohisto::{BucketWidth, Histogram};
+use otel_expohisto::{Histogram, Width};
 
 fn show_capacity<const N: usize>(label: &str) {
     let bucket_words = N;
@@ -66,44 +66,45 @@ fn main() {
     // Histogram<16> gives 1024 B1 buckets → plenty.
     // Even after widening to B4: 256 buckets → still covers the range.
 
-    let mut h: Histogram<16> = Histogram::new().with_scale(4);
+    let mut h: Histogram<16> = Histogram::new().with_scale(4).unwrap();
     let values = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 500.0, 10000.0];
     for &v in &values {
         h.update(v).unwrap();
     }
 
     let v = h.view();
+    let stats = v.stats();
     println!(
         "Histogram<16> with scale=4 after {} values spanning {:.0}x range:",
-        v.count(),
-        v.max() / v.min()
+        stats.count,
+        stats.max / stats.min
     );
     let bw = v.positive().width();
     println!(
         "  scale: {}, width: {:?}, capacity: {}",
         v.scale(),
         bw,
-        v.positive().capacity()
+        v.positive().bucket_count()
     );
     let b = v.positive();
     println!(
         "  using {} of {} buckets ({:.0}% utilization)",
         b.len(),
-        b.capacity(),
-        b.len() as f64 / b.capacity() as f64 * 100.0
+        b.bucket_count(),
+        b.len() as f64 / b.bucket_count() as f64 * 100.0
     );
 
     println!("\n--- Minimum Bucket Width ---\n");
 
     // Skip sub-byte overhead by starting at U8 (fewer buckets, faster ops)
-    let mut fast: Histogram<16> = Histogram::new().with_min_bucket_width(BucketWidth::U8);
+    let mut fast: Histogram<16> = Histogram::new().with_min_width(Width::U8);
     for &v in &values {
         fast.update(v).unwrap();
     }
 
     println!(
-        "with_min_bucket_width(U8): {} buckets at {:?}",
-        fast.view().positive().capacity(),
+        "with_min_width(U8): {} buckets at {:?}",
+        fast.view().positive().bucket_count(),
         fast.view().positive().width()
     );
 
@@ -113,7 +114,7 @@ fn main() {
     }
     println!(
         "default (B1 start):        {} buckets at {:?}",
-        dense.view().positive().capacity(),
+        dense.view().positive().bucket_count(),
         dense.view().positive().width()
     );
 }
