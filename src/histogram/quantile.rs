@@ -8,7 +8,7 @@
 use crate::mapping::Scale;
 
 use super::view::HistogramView;
-use super::Histogram;
+use super::HistogramNN;
 
 /// A quantile–value pair estimated from a histogram's bucket distribution.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,7 +31,7 @@ pub struct QuantileValue {
 /// the maximum.
 #[derive(Debug)]
 pub struct QuantileIter<'a, const N: usize> {
-    hist: &'a Histogram<N>,
+    hist: &'a HistogramNN<N>,
     scale: Scale,
     quantiles: &'a [f64],
     qi: usize,
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_quantile_empty_histogram() {
-        let h: Histogram<8> = Histogram::new();
+        let h: HistogramNN<8> = HistogramNN::new();
         let qs = [0.0, 0.5, 1.0];
         let v = h.view();
         let vals: Vec<_> = v.quantiles(&qs).collect();
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_quantile_single_value() {
-        let mut h: Histogram<8> = Histogram::new();
+        let mut h: HistogramNN<8> = HistogramNN::new();
         h.update(42.0).unwrap();
         let qs = [0.0, 0.5, 1.0];
         let v = h.view();
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_quantile_with_zeros() {
-        let mut h: Histogram<8> = Histogram::new();
+        let mut h: HistogramNN<8> = HistogramNN::new();
         for _ in 0..90 {
             h.update(0.0).unwrap();
         }
@@ -266,7 +266,7 @@ mod tests {
     /// Tests monotonicity, p0=min, p100=max, clamping, and ExactSizeIterator.
     #[test]
     fn test_quantile_properties() {
-        let mut h: Histogram<8> = Histogram::new();
+        let mut h: HistogramNN<8> = HistogramNN::new();
         for v in 1..=1000 {
             h.update(v as f64).unwrap();
         }
@@ -317,7 +317,7 @@ mod tests {
     /// All-same-value histogram: every quantile should return that value.
     #[test]
     fn test_quantile_all_same_value() {
-        let mut h: Histogram<8> = Histogram::new();
+        let mut h: HistogramNN<8> = HistogramNN::new();
         for _ in 0..100 {
             h.update(7.0).unwrap();
         }
@@ -336,7 +336,7 @@ mod tests {
     /// Monotonicity with many closely-spaced quantiles.
     #[test]
     fn test_quantile_fine_grained_monotonicity() {
-        let mut h: Histogram<16> = Histogram::new();
+        let mut h: HistogramNN<16> = HistogramNN::new();
         for v in 1..=500 {
             h.update(v as f64).unwrap();
         }
@@ -379,7 +379,7 @@ mod tests {
 
     /// Computes reduced χ²/df of histogram bucket counts vs a theoretical
     /// CDF. Bins with expected count < 5 are merged with neighbours.
-    fn reduced_chi_squared<const N: usize>(h: &Histogram<N>, cdf: fn(f64) -> f64) -> f64 {
+    fn reduced_chi_squared<const N: usize>(h: &HistogramNN<N>, cdf: fn(f64) -> f64) -> f64 {
         let histogram_view = h.view();
         let scale = histogram_view.scale();
         let mapping = Scale::new(scale).unwrap();
@@ -455,7 +455,7 @@ mod tests {
 
         for case in &cases {
             let mut rng = rand::rngs::StdRng::seed_from_u64(case.seed);
-            let mut h: Histogram<160> = Histogram::new();
+            let mut h: HistogramNN<160> = HistogramNN::new();
             for _ in 0..1_000_000 {
                 h.update((case.sample)(&mut rng)).unwrap();
             }

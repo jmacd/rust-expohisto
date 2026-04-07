@@ -3,7 +3,7 @@
 
 //! Allocation-free exponential histogram with a unified flat memory layout.
 //!
-//! `Histogram<N>` stores everything in fixed struct fields plus a `[u64; N]`
+//! `HistogramNN<N>` stores everything in fixed struct fields plus a `[u64; N]`
 //! data pool used for bucket counters.
 
 use core::fmt;
@@ -60,7 +60,8 @@ impl Settings {
 pub enum Error {
     /// Overflow of a u64 counter.
     Overflow,
-    /// Invalid value: NaN, ±Inf, or negative.
+    /// Invalid value: NaN or ±Inf for all histogram types, or negative
+    /// for [`HistogramNN`].
     Extreme,
 }
 
@@ -68,7 +69,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Overflow => "histogram total count overflow",
-            Self::Extreme => "invalid value: NaN, ±Inf, or negative",
+            Self::Extreme => "invalid extreme value",
         })
     }
 }
@@ -154,7 +155,9 @@ enum IncrResult {
 }
 
 /// An allocation-free exponential histogram for non-negative values.
-pub struct Histogram<const N: usize> {
+///
+/// Use [`HistogramPN`] when values can be negative.
+pub struct HistogramNN<const N: usize> {
     initial: Settings,
     current: Settings,
 
@@ -167,7 +170,7 @@ pub struct Histogram<const N: usize> {
     data: [u64; N],
 }
 
-impl<const N: usize> Clone for Histogram<N> {
+impl<const N: usize> Clone for HistogramNN<N> {
     fn clone(&self) -> Self {
         Self {
             initial: self.initial,
@@ -181,9 +184,9 @@ impl<const N: usize> Clone for Histogram<N> {
     }
 }
 
-impl<const N: usize> fmt::Debug for Histogram<N> {
+impl<const N: usize> fmt::Debug for HistogramNN<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut s = f.debug_struct("Histogram");
+        let mut s = f.debug_struct("HistogramNN");
         let stats = self.stats();
         s.field("width", &self.current.width)
             .field("count", &stats.count)
@@ -196,13 +199,13 @@ impl<const N: usize> fmt::Debug for Histogram<N> {
     }
 }
 
-impl<const N: usize> Default for Histogram<N> {
+impl<const N: usize> Default for HistogramNN<N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize> Histogram<N> {
+impl<const N: usize> HistogramNN<N> {
     /// Returns the aggregate statistics (count, sum, min, max).
     #[inline]
     pub(crate) const fn stats(&self) -> Stats {
@@ -563,7 +566,7 @@ impl<const N: usize> Histogram<N> {
         self.current.scale = Scale::new(new_scale).expect("invariant: callers cap at MIN_SCALE");
     }
 
-    fn downscale_by(&mut self, change: u32) {
+    pub(crate) fn downscale_by(&mut self, change: u32) {
         self.downscale_by_min(change, self.current.width);
     }
 
@@ -663,9 +666,15 @@ impl<const N: usize> Histogram<N> {
     }
 }
 
-// Compile-time test that Histogram is Send + Sync
+/// Backward-compatible alias: `Histogram<N>` is `HistogramNN<N>`.
+pub type Histogram<const N: usize> = HistogramNN<N>;
+
+// Compile-time test that HistogramNN is Send + Sync
 const fn _assert_send_sync<T: Send + Sync>() {}
-const _: () = _assert_send_sync::<Histogram<2>>();
+const _: () = _assert_send_sync::<HistogramNN<2>>();
+
+mod pn;
+pub use pn::{HistogramPN, HistogramPNView};
 
 #[cfg(test)]
 mod tests;

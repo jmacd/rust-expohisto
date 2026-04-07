@@ -13,9 +13,9 @@
 
 use super::swar::{narrow, swar_add_checked, widen};
 use super::width::Width;
-use super::{Error, HighLow, Histogram, Stats};
+use super::{Error, HighLow, HistogramNN, Stats};
 
-impl<const N: usize> Histogram<N> {
+impl<const N: usize> HistogramNN<N> {
     /// Merges another histogram into this one.
     ///
     /// The source histogram may have a different pool size (`M`).
@@ -24,7 +24,7 @@ impl<const N: usize> Histogram<N> {
     ///
     /// Returns [`Error::Overflow`] if the combined total count would
     /// exceed `u64::MAX`.
-    pub fn merge_from<const M: usize>(&mut self, other: &Histogram<M>) -> Result<(), Error> {
+    pub fn merge_from<const M: usize>(&mut self, other: &HistogramNN<M>) -> Result<(), Error> {
         if other.stats.count == 0 {
             return Ok(());
         }
@@ -49,7 +49,7 @@ impl<const N: usize> Histogram<N> {
     ///
     /// Infallible: count overflow is checked by the caller, and all
     /// internal operations (downscale, widen) always succeed.
-    fn merge_buckets<const M: usize>(&mut self, other: &Histogram<M>) {
+    fn merge_buckets<const M: usize>(&mut self, other: &HistogramNN<M>) {
         if other.buckets_empty() {
             return;
         }
@@ -145,7 +145,7 @@ impl<const N: usize> Histogram<N> {
     /// much wider than the source after downscaling.
     fn merge_words<const M: usize>(
         &mut self,
-        other: &Histogram<M>,
+        other: &HistogramNN<M>,
         src_width: Width,
         src_scale: i32,
     ) {
@@ -162,7 +162,7 @@ impl<const N: usize> Histogram<N> {
     /// Merge when `tm_log >= 0`: each dest word ← `2^tm_log` source words.
     fn merge_words_positive<const M: usize>(
         &mut self,
-        other: &Histogram<M>,
+        other: &HistogramNN<M>,
         src_width: Width,
         src_scale: i32,
         tm_log: u32,
@@ -220,7 +220,7 @@ impl<const N: usize> Histogram<N> {
     /// their respective dest words.
     fn merge_words_negative<const M: usize>(
         &mut self,
-        other: &Histogram<M>,
+        other: &HistogramNN<M>,
         src_width: Width,
         src_scale: i32,
         neg_tm: u32,
@@ -283,7 +283,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns `Err(max_lane)` if any lane value exceeds
     /// `dest_width.counter_max()`.
     fn extract_source_chunk<const M: usize>(
-        other: &Histogram<M>,
+        other: &HistogramNN<M>,
         src_width: Width,
         src_scale: i32,
         dest_scale: i32,
@@ -360,7 +360,7 @@ impl<const N: usize> Histogram<N> {
     /// Returns `Err(or_sums)` if the source sums overflow dest_width
     /// lanes (caller must widen self and retry).
     fn repack_source<const M: usize>(
-        other: &Histogram<M>,
+        other: &HistogramNN<M>,
         src_width: Width,
         src_scale: i32,
         dest_scale: i32,

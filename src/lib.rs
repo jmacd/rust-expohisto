@@ -22,7 +22,8 @@ pub mod logarithm;
 pub mod lookup;
 
 pub use histogram::{
-    BucketView, BucketsIter, Error, Histogram, HistogramView, Settings, Stats, Width,
+    BucketView, BucketsIter, Error, Histogram, HistogramNN, HistogramPN, HistogramPNView,
+    HistogramView, Settings, Stats, Width,
 };
 #[cfg(feature = "quantile")]
 pub use histogram::{QuantileIter, QuantileValue};
