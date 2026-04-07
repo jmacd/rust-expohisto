@@ -370,7 +370,11 @@ mod tests {
             * (0.254829592
                 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
         let result = 1.0 - poly * (-a * a).exp();
-        if x < 0.0 { -result } else { result }
+        if x < 0.0 {
+            -result
+        } else {
+            result
+        }
     }
 
     /// Computes reduced χ²/df of histogram bucket counts vs a theoretical

@@ -3,9 +3,9 @@
 
 //! Downscale operations.
 
-use super::Histogram;
 use super::swar::{narrow, widen};
-use super::width::{ALL_WIDTHS, Width};
+use super::width::{Width, ALL_WIDTHS};
+use super::Histogram;
 
 impl<const N: usize> Histogram<N> {
     /// Widen every active word from `before` to `after` and return
@@ -53,11 +53,7 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Process one aligned group for pure cross-word grouping (no narrowing).
-    fn repack_group_cross(
-        &self,
-        ostart: i32,
-        change: u32,
-    ) -> (i32, u64) {
+    fn repack_group_cross(&self, ostart: i32, change: u32) -> (i32, u64) {
         let total_merge = 1i32 << change;
 
         let out_widx = ostart >> change;
@@ -80,11 +76,7 @@ impl<const N: usize> Histogram<N> {
     ///
     /// Returns the actual number of scale steps applied, which may
     /// exceed `change` when bucket sums require a wider output width.
-    pub(super) fn do_downscale(
-        &mut self,
-        change: u32,
-        min_output_width: Width,
-    ) -> u32 {
+    pub(super) fn do_downscale(&mut self, change: u32, min_output_width: Width) -> u32 {
         debug_assert!(change != 0);
         debug_assert!(!self.buckets_empty());
 
@@ -93,8 +85,7 @@ impl<const N: usize> Histogram<N> {
 
         // Absolute budget: total scale steps must not push below
         // MIN_SCALE.
-        let abs_budget = (self.current.scale.scale()
-            - crate::mapping::MIN_SCALE) as u32;
+        let abs_budget = (self.current.scale.scale() - crate::mapping::MIN_SCALE) as u32;
 
         // Phase 1: Widen by up to `change` steps (capped at U64 and budget).
         let first_widen = change.min(to_u64).min(abs_budget);
@@ -181,10 +172,8 @@ impl<const N: usize> Histogram<N> {
                     }
                     let required = Width::from_max_value(or_sums);
                     let gap = Width::U64.subtract(required) as u32;
-                    let narrow_needed =
-                        (change - cross_steps).min(max_narrow);
-                    let scale_ok =
-                        total_widen + cross_steps >= change;
+                    let narrow_needed = (change - cross_steps).min(max_narrow);
+                    let scale_ok = total_widen + cross_steps >= change;
                     if scale_ok && gap >= narrow_needed {
                         break;
                     }
@@ -205,9 +194,7 @@ impl<const N: usize> Histogram<N> {
         let headroom_cap = (self.current.scale.scale()
             - (total_widen + cross_steps) as i32
             - crate::mapping::MIN_SCALE) as u32;
-        let narrow_steps = (change - cross_steps)
-            .min(max_narrow)
-            .min(headroom_cap);
+        let narrow_steps = (change - cross_steps).min(max_narrow).min(headroom_cap);
         let word_shift = cross_steps + narrow_steps;
         let output_width = ALL_WIDTHS[cur as usize - narrow_steps as usize];
 
@@ -215,9 +202,8 @@ impl<const N: usize> Histogram<N> {
         let new_word_base = self.word_base >> word_shift;
 
         // Write physical index under the shifted mapping.
-        let write_idx = |out_widx: i32| -> usize {
-            (out_widx - new_word_base).rem_euclid(N as i32) as usize
-        };
+        let write_idx =
+            |out_widx: i32| -> usize { (out_widx - new_word_base).rem_euclid(N as i32) as usize };
 
         // The aligned group that contains word_base.
         let fwd_start = self.word_base & !(total_merge - 1);

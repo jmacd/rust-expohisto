@@ -8,8 +8,8 @@
 
 use core::fmt;
 
-use crate::float64::{NAN_INF_BIASED, get_biased_exponent, get_significand, unbias_exponent};
-use crate::mapping::{Scale, ScaleError, table_scale};
+use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
+use crate::mapping::{table_scale, Scale, ScaleError};
 
 mod downscale;
 mod merge;
@@ -269,14 +269,14 @@ impl<const N: usize> Histogram<N> {
     /// Slot index of the first non-zero bucket.
     #[inline]
     pub(crate) fn first_slot(&self) -> i32 {
-        self.current.width.word_to_slot_index(self.word_start)
-            + self.leading_zero_lanes() as i32
+        self.current.width.word_to_slot_index(self.word_start) + self.leading_zero_lanes() as i32
     }
 
     /// Slot index of the last non-zero bucket.
     #[inline]
     pub(crate) fn last_slot(&self) -> i32 {
-        self.current.width.word_to_slot_index(self.word_end + 1) - 1
+        self.current.width.word_to_slot_index(self.word_end + 1)
+            - 1
             - self.trailing_zero_lanes() as i32
     }
 
@@ -560,8 +560,7 @@ impl<const N: usize> Histogram<N> {
             self.current.scale.scale(),
             crate::mapping::MIN_SCALE,
         );
-        self.current.scale =
-            Scale::new(new_scale).expect("invariant: callers cap at MIN_SCALE");
+        self.current.scale = Scale::new(new_scale).expect("invariant: callers cap at MIN_SCALE");
     }
 
     fn downscale_by(&mut self, change: u32) {
@@ -577,11 +576,7 @@ impl<const N: usize> Histogram<N> {
     /// Like `downscale_by` but guarantees the output width is at least
     /// `min_output_width`. Used by merge to prevent the narrow step
     /// from undoing the widening the merge path needs.
-    fn downscale_by_min(
-        &mut self,
-        change: u32,
-        min_output_width: Width,
-    ) {
+    fn downscale_by_min(&mut self, change: u32, min_output_width: Width) {
         if change == 0 {
             return;
         }

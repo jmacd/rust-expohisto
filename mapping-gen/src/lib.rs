@@ -77,10 +77,10 @@ pub fn write_inverse_factors<W: Write>(w: &mut W, factors: &[f64]) -> std::io::R
     writeln!(w, "const INVERSE_FACTOR: [f64; {}] = [", MAX_SCALE)?;
     for (i, &f) in factors.iter().enumerate() {
         let scale = i + 1;
-        // Emit as f64::from_bits for exact round-trip without precision lint issues
+        // Use crate::float64::from_bits for MSRV-compatible const context
         writeln!(
             w,
-            "    f64::from_bits(0x{:016X}), // scale {} ≈ {:.6e}",
+            "    crate::float64::from_bits(0x{:016X}), // scale {} ≈ {:.6e}",
             f.to_bits(),
             scale,
             f

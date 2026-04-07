@@ -6,6 +6,8 @@ license = "Apache-2.0"
 description = "Lookup table generation for exponential histogram mapping"
 
 [dependencies]
+# Pin az < 1.3 for MSRV compatibility (1.3 uses edition 2024).
+az = ">=1, <1.3"
 rug = "1.24"
 
 [dev-dependencies]

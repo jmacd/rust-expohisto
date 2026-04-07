@@ -1329,8 +1329,7 @@ fn repro_fuzz_histogram_oracle_offset() {
     let v = h.view();
     let mapping = Scale::new(v.scale()).unwrap();
     // record_incr rounds subnormals to (biased_exp=1, significand=1).
-    let subnormal_rounded =
-        f64::from_bits((1u64 << crate::float64::SIGNIFICAND_WIDTH) | 1);
+    let subnormal_rounded = f64::from_bits((1u64 << crate::float64::SIGNIFICAND_WIDTH) | 1);
     let subnormal_idx = mapping.map_to_index(subnormal_rounded);
     let exp_offset = subnormal_idx.min(mapping.map_to_index(normal));
 
@@ -1361,8 +1360,7 @@ fn repro_fuzz_merge_oracle_offset() {
     let v = left.view();
     let buckets = v.positive();
     let mapping = Scale::new(v.scale()).unwrap();
-    let subnormal_rounded =
-        f64::from_bits((1u64 << crate::float64::SIGNIFICAND_WIDTH) | 1);
+    let subnormal_rounded = f64::from_bits((1u64 << crate::float64::SIGNIFICAND_WIDTH) | 1);
     let exp_idx = mapping.map_to_index(subnormal_rounded);
 
     assert_eq!(
@@ -1645,7 +1643,10 @@ fn test_msb_mask_u64() {
     // At U64 width, swar_add_checked uses checked_add directly.
     // But let's also exercise the overflow path.
     assert_eq!(swar_add_checked(u64::MAX, 1, Width::U64), None);
-    assert_eq!(swar_add_checked(u64::MAX - 1, 1, Width::U64), Some(u64::MAX));
+    assert_eq!(
+        swar_add_checked(u64::MAX - 1, 1, Width::U64),
+        Some(u64::MAX)
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1675,7 +1676,10 @@ fn test_scale_display() {
 #[test]
 fn test_settings_accessors() {
     // Exercise Settings::scale() and Settings::width() via view.
-    let h: Histogram<8> = Histogram::new().with_scale(3).unwrap().with_min_width(Width::B4);
+    let h: Histogram<8> = Histogram::new()
+        .with_scale(3)
+        .unwrap()
+        .with_min_width(Width::B4);
     // Settings are accessed internally; we verify through the view.
     let v = h.view();
     assert_eq!(v.scale(), 0); // empty histogram returns 0
@@ -1686,17 +1690,17 @@ fn test_settings_accessors() {
 fn test_crash_1d7f7c() {
     let value = f64::from_le_bytes([255, 251, 122, 0, 0, 0, 0, 0]);
     // value ≈ 3.98e-317 (subnormal)
-    
+
     let mut h1 = Histogram::<8>::new().with_min_width(Width::B1);
     h1.record_incr(value, 1).unwrap();
-    
+
     let mut h2 = Histogram::<8>::new().with_min_width(Width::B1);
     h2.record_incr(value, 4).unwrap();
     h2.record_incr(value, 64).unwrap();
     h2.record_incr(value, 1024).unwrap();
-    
+
     h1.merge_from(&h2).unwrap();
-    
+
     let v = h1.view();
     let stats = v.stats();
     assert_eq!(stats.count, 1 + 4 + 64 + 1024);

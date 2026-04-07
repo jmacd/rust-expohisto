@@ -22,11 +22,10 @@ pub mod logarithm;
 pub mod lookup;
 
 pub use histogram::{
-    BucketView, BucketsIter, Error, Histogram, HistogramView, Settings, Stats,
-    Width,
+    BucketView, BucketsIter, Error, Histogram, HistogramView, Settings, Stats, Width,
 };
 #[cfg(feature = "quantile")]
 pub use histogram::{QuantileIter, QuantileValue};
-pub use mapping::{MAX_SCALE, MIN_SCALE, Scale, ScaleError, table_scale};
+pub use mapping::{table_scale, Scale, ScaleError, MAX_SCALE, MIN_SCALE};
 
 pub(crate) mod float64;

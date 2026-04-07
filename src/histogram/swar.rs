@@ -193,11 +193,9 @@ pub(crate) fn narrow(before: Width, after: Width, w: u64) -> u64 {
         (U64, U8) => nstep_u16_u8(nstep_u32_u16(nstep_u64_u32(w))),
         (U64, B4) => nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(nstep_u64_u32(w)))),
         (U64, B2) => nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(nstep_u64_u32(w))))),
-        (U64, B1) => {
-            nstep_b2_b1(nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(
-                nstep_u64_u32(w),
-            )))))
-        }
+        (U64, B1) => nstep_b2_b1(nstep_b4_b2(nstep_u8_b4(nstep_u16_u8(nstep_u32_u16(
+            nstep_u64_u32(w),
+        ))))),
 
         _ => unreachable!(),
     }
@@ -236,7 +234,7 @@ impl Width {
     #[inline]
     #[must_use]
     pub(crate) const fn msb_mask(self) -> u64 {
-        use Width::{B1, B2, B4, U8, U16, U32, U64};
+        use Width::{B1, B2, B4, U16, U32, U64, U8};
         match self {
             B1 => 0xFFFF_FFFF_FFFF_FFFF,
             B2 => 0xAAAA_AAAA_AAAA_AAAA,
@@ -254,7 +252,7 @@ impl Width {
     /// gives the exact minimum width needed to hold any lane.
     #[inline]
     pub(crate) fn or_fold_lanes(self, w: u64) -> u64 {
-        use Width::{B1, B2, B4, U8, U16, U32, U64};
+        use Width::{B1, B2, B4, U16, U32, U64, U8};
         match self {
             B1 => (w != 0) as u64,
             B2 => {
@@ -379,8 +377,8 @@ mod tests {
 
         let input = pack_b4x16([1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0]);
         let expected = pack_b2x32([
-            1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0,
+            1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
         ]);
         assert_eq!(narrow(Width::B4, Width::B2, input), expected);
     }

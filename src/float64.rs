@@ -34,6 +34,24 @@ pub const MAX_NORMAL_EXPONENT: i32 = EXPONENT_BIAS;
 /// Smallest normal f64 value: 2^-1022 (same as `f64::MIN_POSITIVE`).
 pub const MIN_VALUE: f64 = f64::MIN_POSITIVE;
 
+/// MSRV-compatible const `f64::to_bits()` (const-stable since 1.83;
+/// `transmute` has been const-stable since 1.56).
+#[inline]
+#[allow(unnecessary_transmutes)]
+pub const fn to_bits(v: f64) -> u64 {
+    // SAFETY: f64 and u64 have the same size and alignment.
+    unsafe { core::mem::transmute(v) }
+}
+
+/// MSRV-compatible const `f64::from_bits()` (const-stable since 1.83;
+/// `transmute` has been const-stable since 1.56).
+#[inline]
+#[allow(unnecessary_transmutes)]
+pub const fn from_bits(bits: u64) -> f64 {
+    // SAFETY: u64 and f64 have the same size and alignment.
+    unsafe { core::mem::transmute(bits) }
+}
+
 /// Extracts the unbiased base-2 exponent from an f64.
 #[inline]
 pub const fn get_unbiased_exponent(value: f64) -> i32 {
@@ -51,13 +69,13 @@ pub const fn unbias_exponent(biased: u32) -> i32 {
 /// Inf or NaN.
 #[inline]
 pub const fn get_biased_exponent(value: f64) -> u32 {
-    ((value.to_bits() & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as u32
+    ((to_bits(value) & EXPONENT_MASK) >> SIGNIFICAND_WIDTH) as u32
 }
 
 /// Returns the 52-bit significand as an unsigned value.
 #[inline]
 pub const fn get_significand(value: f64) -> u64 {
-    value.to_bits() & SIGNIFICAND_MASK
+    to_bits(value) & SIGNIFICAND_MASK
 }
 
 /// Constructs 2^k as an f64 using direct IEEE 754 bit manipulation.
@@ -72,7 +90,7 @@ pub const fn pow2(k: i32) -> f64 {
         "pow2 out of range"
     );
     let biased = (k + EXPONENT_BIAS) as u64;
-    f64::from_bits(biased << SIGNIFICAND_WIDTH)
+    from_bits(biased << SIGNIFICAND_WIDTH)
 }
 
 // ── Math helpers (std only) ──────────────────────────────────────────

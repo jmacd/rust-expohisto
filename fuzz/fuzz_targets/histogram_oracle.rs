@@ -58,11 +58,22 @@ fn check_histogram<const N: usize>(values: &[f64]) {
     // so we only assert scale <= span-optimal-scale.
     let b1_cap = (N * 64) as i32;
 
+    // The histogram rounds subnormals to (biased_exp=1, significand=1).
+    // Use the same rounded value so the oracle maps subnormals to the
+    // same bucket index as the histogram.
+    const SUBNORMAL_ROUNDED: f64 = f64::from_bits((1u64 << 52) | 1);
+
     // Find the highest scale where span fits at B1 capacity.
     let mut optimal = MAX_SCALE;
     for s in (otel_expohisto::MIN_SCALE..=MAX_SCALE).rev() {
         if let Ok(m) = Scale::new(s) {
-            let indices: Vec<i32> = non_zero.iter().map(|&v| m.map_to_index(v)).collect();
+            let indices: Vec<i32> = non_zero.iter().map(|&v| {
+                if v.to_bits() >> 52 == 0 {
+                    m.map_to_index(SUBNORMAL_ROUNDED)
+                } else {
+                    m.map_to_index(v)
+                }
+            }).collect();
             let lo = *indices.iter().min().unwrap();
             let hi = *indices.iter().max().unwrap();
             if hi - lo + 1 <= b1_cap {

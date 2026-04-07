@@ -77,16 +77,15 @@ impl<const N: usize> Histogram<N> {
         let self_change = range_change.max(width_change);
         // Clamp: the two-bucket invariant guarantees that at MIN_SCALE
         // the entire exponent range fits.
-        let budget = (self.current.scale.scale()
-            - crate::mapping::MIN_SCALE) as u32;
+        let budget = (self.current.scale.scale() - crate::mapping::MIN_SCALE) as u32;
         let self_change = self_change.min(budget);
 
         if self.buckets_empty() {
             // No data to transform — just set scale and width.
             // Clamp at MIN_SCALE (the two-bucket invariant guarantees
             // the entire exponent range fits at MIN_SCALE).
-            let new_scale = (self.current.scale.scale() - self_change as i32)
-                .max(crate::mapping::MIN_SCALE);
+            let new_scale =
+                (self.current.scale.scale() - self_change as i32).max(crate::mapping::MIN_SCALE);
             debug_assert!(new_scale >= crate::mapping::MIN_SCALE);
             self.current.scale =
                 crate::mapping::Scale::new(new_scale).expect("clamped at MIN_SCALE");
@@ -101,8 +100,7 @@ impl<const N: usize> Histogram<N> {
         // prevents this from exceeding MIN_SCALE).
         if !self.buckets_empty() {
             let headroom_needed = Width::U64 as i32 - self.current.width as i32;
-            let headroom_have = self.current.scale.scale()
-                - crate::mapping::MIN_SCALE;
+            let headroom_have = self.current.scale.scale() - crate::mapping::MIN_SCALE;
             if headroom_needed > headroom_have {
                 self.downscale_by((headroom_needed - headroom_have) as u32);
             }
@@ -169,10 +167,7 @@ impl<const N: usize> Histogram<N> {
         src_scale: i32,
         tm_log: u32,
     ) {
-        debug_assert!(
-            tm_log < 31,
-            "tm_log={tm_log}: scale bounds violated",
-        );
+        debug_assert!(tm_log < 31, "tm_log={tm_log}: scale bounds violated",);
 
         let total_merge = 1i32 << tm_log;
         let aligned_start = other.word_start & !(total_merge - 1);
@@ -186,8 +181,11 @@ impl<const N: usize> Histogram<N> {
 
             loop {
                 let acc = match Self::repack_source(
-                    other, src_width, src_scale,
-                    self.current.scale.scale(), self.current.width,
+                    other,
+                    src_width,
+                    src_scale,
+                    self.current.scale.scale(),
+                    self.current.width,
                     src_start,
                 ) {
                     Err(or_sums) => {
@@ -240,9 +238,13 @@ impl<const N: usize> Histogram<N> {
 
                 loop {
                     let acc = match Self::extract_source_chunk(
-                        other, src_width, src_scale,
-                        self.current.scale.scale(), self.current.width,
-                        src_widx, k,
+                        other,
+                        src_width,
+                        src_scale,
+                        self.current.scale.scale(),
+                        self.current.width,
+                        src_widx,
+                        k,
                     ) {
                         Err(or_val) => {
                             self.widen_to(Width::from_max_value(or_val));
@@ -408,8 +410,7 @@ impl<const N: usize> Histogram<N> {
             let chunk_bits = 64u32 >> narrow_steps;
             let mut acc = 0u64;
             for r in 0..repack_count {
-                acc |= narrow(cur, dest_width, sums[r as usize])
-                    << (r as u32 * chunk_bits);
+                acc |= narrow(cur, dest_width, sums[r as usize]) << (r as u32 * chunk_bits);
             }
             acc
         } else {
