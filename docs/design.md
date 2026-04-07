@@ -48,7 +48,7 @@ Per the OpenTelemetry specification, bucket boundaries are **upper-inclusive**:
 
 > The bucket identified by `index` represents values **greater than** `base^index` and **less than or equal to** `base^(index+1)`.
 
-This convention was adopted for Prometheus compatibility in a [specification change](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261) that post-dates the original lookup table algorithms (see [Historical Notes](history.md)). This implementation re-engineers the boundary condition for upper-inclusive semantics, validated by an exhaustive test over all ~3 billion f64 values in the first sub-bucket at scale 20.
+This convention was adopted for Prometheus compatibility in a [specification change](https://github.com/open-telemetry/opentelemetry-specification/issues/2611#issuecomment-1178119261) that post-dates the original lookup table algorithms (see [Historical Notes](history.md)). This implementation re-engineers the boundary condition for upper-inclusive semantics, validated by an exhaustive test over all ~3 billion f64 values in the first sub-bucket at scale 16.
 
 The practical effect: exact powers of two must fall into the bucket *below* what a naive `floor(log(value))` would suggest.
 
@@ -211,13 +211,13 @@ otel-expohisto/
 │   ├── lib.rs            # Crate root and public re-exports
 │   ├── histogram/        # Core histogram implementation
 │   │   ├── mod.rs        #   Histogram<N>: update, merge, downscale, widen
-│   │   ├── view.rs       #   HistogramView: read-only promoted view
-│   │   ├── bucket_view.rs#   BucketView + BucketsIter: bucket access
-│   │   ├── width.rs#  Width enum (B0..U64)
-│   │   ├── bucket_ops.rs #   Sub-byte get/set/increment
+│   │   ├── view.rs       #   HistogramView, BucketView, BucketsIter
+│   │   ├── width.rs      #   Width enum and SlotAddr
+│   │   ├── downscale.rs  #   Downscale and widen operations
+│   │   ├── merge.rs      #   merge_from
 │   │   ├── swar.rs       #   SWAR pairwise merge, shift, narrow-compact
 │   │   ├── quantile.rs   #   QuantileIter: CDF-walk quantile estimation (feature = "quantile")
-│   │   └── tests.rs      #   106 unit tests
+│   │   └── tests.rs      #   140 unit tests
 │   ├── mapping.rs        # Scale-to-index dispatch (Scale struct)
 │   ├── exponent.rs       # Scale ≤ 0: IEEE 754 exponent extraction
 │   ├── logarithm.rs      # Scale > 0 fallback: ln()-based mapping

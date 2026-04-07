@@ -48,9 +48,9 @@ impl<const N: usize> HistogramView<'_, N> {
     /// reported as 0.0.
     #[inline]
     pub const fn stats(&self) -> Stats {
-        if self.hist.stats.count == 0 {
+        if self.hist.stats.count == 0 || self.hist.buckets_empty() {
             Stats {
-                count: 0,
+                count: self.hist.stats.count,
                 sum: 0.0,
                 min: 0.0,
                 max: 0.0,

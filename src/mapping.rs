@@ -15,11 +15,13 @@ use core::fmt;
 pub const MIN_SCALE: i32 = -10;
 
 /// Maximum scale supported is the finest resolution.
-/// At scale 20, indices require 31 bits of information.
-pub const MAX_SCALE: i32 = 20;
+/// At scale 16, the index table requires 16-bit entries. Scales 17–20
+/// would require wider table entries and are not currently supported.
+pub const MAX_SCALE: i32 = 16;
 
 /// Error types for mapping operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScaleError {
     /// The bucket index corresponds to a subnormal value.
     Underflow,

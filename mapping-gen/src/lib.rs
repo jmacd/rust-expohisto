@@ -24,7 +24,7 @@ pub use table::{compute_boundaries_exact, map_to_index};
 use std::io::Write;
 
 /// Maximum scale for inverse factor table (matches `mapping::MAX_SCALE`).
-pub const MAX_SCALE: u32 = 20;
+pub const MAX_SCALE: u32 = 16;
 
 /// Computes `ln(2) / 2^scale` for scales 1..=`MAX_SCALE` as correctly
 /// rounded f64 values using 256-bit precision via `rug`.

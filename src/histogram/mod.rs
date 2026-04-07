@@ -56,10 +56,11 @@ impl Settings {
 
 /// Error returned when the total count would exceed `u64::MAX`.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     /// Overflow of a u64 counter.
     Overflow,
-    /// Extreme values like Inf, NaN, and zero values.
+    /// Invalid value: NaN, ±Inf, or negative.
     Extreme,
 }
 
@@ -67,7 +68,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Overflow => "histogram total count overflow",
-            Self::Extreme => "extreme value received",
+            Self::Extreme => "invalid value: NaN, ±Inf, or negative",
         })
     }
 }
@@ -421,6 +422,19 @@ impl<const N: usize> Histogram<N> {
         HistogramView { hist: self }
     }
 
+    /// Returns the initial settings (as configured at construction).
+    #[inline]
+    pub const fn initial_settings(&self) -> Settings {
+        self.initial
+    }
+
+    /// Returns the current settings (scale may have decreased and
+    /// width may have increased due to insertions or merges).
+    #[inline]
+    pub const fn current_settings(&self) -> Settings {
+        self.current
+    }
+
     /// Returns the current counter width.
     #[inline]
     pub const fn width(&self) -> Width {
@@ -464,6 +478,8 @@ impl<const N: usize> Histogram<N> {
                     // Zero case: no bucket, no min/max update.
                     self.stats.count = new_count;
                     return Ok(());
+                } else if value.is_sign_negative() {
+                    return Err(Error::Extreme);
                 } else {
                     // Round subnormals into the first bucket that
                     // contains normal values (just above MIN_VALUE).
@@ -525,15 +541,37 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Decreases the scale by `decrease` steps.
-    /// Decreases the scale by `decrease` steps.
+    ///
+    /// # Invariant
+    ///
+    /// Callers must ensure `decrease` does not push below `MIN_SCALE`.
+    /// This is maintained by:
+    /// - `do_downscale`: caps at `abs_budget` (scale − MIN_SCALE)
+    /// - merge prepare: clamps at `MIN_SCALE` and pre-reserves headroom
+    /// - `resolve_increment` empty path: only sets width, no scale change
+    ///
+    /// At `MIN_SCALE` the entire f64 exponent range maps to ≤ 2 bucket
+    /// indices, so `N ≥ 2` guarantees the range always fits.
     pub(crate) fn change_scale(&mut self, decrease: u32) {
         let new_scale = self.current.scale.scale() - decrease as i32;
+        debug_assert!(
+            new_scale >= crate::mapping::MIN_SCALE,
+            "change_scale({decrease}) would push scale from {} below MIN_SCALE ({})",
+            self.current.scale.scale(),
+            crate::mapping::MIN_SCALE,
+        );
         self.current.scale =
-            Scale::new(new_scale).expect("two buckets fit entire range at min_scale");
+            Scale::new(new_scale).expect("invariant: callers cap at MIN_SCALE");
     }
 
     fn downscale_by(&mut self, change: u32) {
         self.downscale_by_min(change, self.current.width);
+    }
+
+    /// Public entry point for benchmarking downscale.
+    #[cfg(feature = "bench-internals")]
+    pub fn downscale(&mut self, change: u32) {
+        self.downscale_by(change);
     }
 
     /// Like `downscale_by` but guarantees the output width is at least
@@ -609,7 +647,9 @@ impl<const N: usize> Histogram<N> {
                 let new_width = Width::from_max_value(total);
                 let change = new_width.subtract(self.current.width) as u32;
                 if self.buckets_empty() {
-                    self.change_scale(change);
+                    // Empty histogram: no data to transform and the
+                    // retry will place the first value fresh. Just
+                    // widen the counter — no scale change needed.
                     self.current.width = new_width;
                 } else {
                     // Route through do_downscale so the headroom

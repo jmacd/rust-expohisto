@@ -35,10 +35,6 @@ scale-13 = []
 scale-14 = []
 scale-15 = []
 scale-16 = []
-scale-17 = []
-scale-18 = []
-scale-19 = []
-scale-20 = []
 
 # Logarithm mapper — for testing and benchmarking only.
 # Uses ln() and floor() from std.

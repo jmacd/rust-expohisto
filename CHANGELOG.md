@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   integer-only bucket mapping at positive scales; a built-in `logarithm`
   mapper is always available for scales above the table maximum (or as the
   sole mapper when no lookup table is enabled)
-- **Configurable lookup table scale** — `scale-1` through `scale-20` features
+- **Configurable lookup table scale** — `scale-1` through `scale-16` features
   trade binary size for finer resolution support
 - `Histogram::merge_from()` — merge from any histogram (same or different `N`)
 
@@ -28,6 +28,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `BucketView` — borrow-based read access to bucket data with iteration
 - OTel SDK specification compatibility (count, sum, min, max, positive buckets)
 - +Inf and subnormal value handling
-- 122 unit tests and 4 fuzz targets
+- 140 unit tests and 4 fuzz targets
 - Comprehensive documentation: design theory, implementation internals,
   OTel spec compatibility matrix (see `docs/`), and README overview

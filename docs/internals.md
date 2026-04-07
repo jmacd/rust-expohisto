@@ -1,43 +1,5 @@
 # Implementation Details
 
-## Literal Mode (Cold-Start Optimization)
-
-New histograms start in **literal mode**: the first few observations are stored as raw
-`f64` bit patterns in the data pool (one u64 per value). When the pool fills, the
-histogram promotes to bucket mode, computing the optimal starting scale from the full
-observed range in a single pass.
-
-```text
-Literal Mode Lifecycle:
-
-  new()                    update(v)                      (N+1)th value
-    │                         │                              │
-    ▼                         ▼                              ▼
-┌────────┐   non-zero    ┌────────────┐    pool full    ┌──────────┐
-│ Empty  │──────────────►│  Storing   │────────────────►│ Promote  │
-│literal │   store bits  │  literals  │  promote_with() │ to bucket│
-│mode=on │               │  in pool   │                 │   mode   │
-└────────┘               └────────────┘                 └──────────┘
-     │                        │                              │
-     │   zero values          │   zero values                │
-     └── update MMSC only ◄───┘                              ▼
-         (no literal slot)                          ┌──────────────────┐
-                                                    │  Bucket mode     │
-          Readers (positive(), scale(), etc.)        │  normal ops:     │
-          compute a virtual bucket view on the fly  │  insert, merge,  │
-          from stored literals — no promotion needed │  downscale, ...  │
-                                                    └──────────────────┘
-```
-
-**Why this matters**: Without literal mode, the first few values often span a wide range,
-triggering repeated downscale+widen operations that are immediately discarded as subsequent
-values refine the range. Literal mode eliminates all that incremental work — the optimal
-scale and bucket width are determined from the full initial set in one shot.
-
-For `Histogram<16>`, literal capacity is 16 values (= `N`).
-Literal mode can be disabled via `.with_min_width(Width::B1)` for benchmarks or when the
-caller already knows the value range.
-
 ## Sub-Byte Bucket Widths and Bit-Level Arithmetic
 
 Bucket counters start at 1 bit per counter, maximizing the initial bucket count for a given memory budget. As counters saturate, they widen in place through the chain **B1→B2→B4→U8→U16→U32→U64**, each transition halving the bucket count and doubling counter capacity. All widths use a single shift-and-mask formula over the `[u64]` pool — sub-byte widths extract packed bitfields, while byte-aligned widths reduce to ordinary word-sized reads. This section describes the bit-level machinery that makes sub-byte widths work.
@@ -46,7 +8,7 @@ Bucket counters start at 1 bit per counter, maximizing the initial bucket count 
 
 `Histogram<N>` stores aggregate statistics in separate struct fields plus a flat
 `[u64; N]` data pool. Because stats live outside the pool, all `N` words are
-available for bucket data (or literals):
+available for bucket data:
 
 ```text
 Histogram<16>                     128 bytes data pool + 32 bytes stats
@@ -58,16 +20,13 @@ Histogram<16>                     128 bytes data pool + 32 bytes stats
 
 ┌─────────────────────────────────────────────────────────────────┐
 │ data[0] │ data[1] │ data[2] │ ... │ data[15]                   │
-│ 16 words: bucket data or literal f64 values                    │
+│ 16 words: bucket data                                           │
 └─────────────────────────────────────────────────────────────────┘
  ◄───────────── stats overhead: 32 bytes ─────────────►
  ◄──────────── data pool: N = 16 words = 128 bytes ───►
 ```
 
-In **literal mode** (cold start), the data pool stores raw `f64` bit patterns
-— one per non-zero observation — until the pool fills and promotes to bucket mode.
-
-In **bucket mode**, the data pool is reinterpreted at the current counter width.
+The data pool is interpreted at the current counter width.
 All widths use the same physical `[u64; N]` backing array — the histogram just
 interprets the same bits differently:
 
@@ -218,7 +177,7 @@ The transition preserves the total count across all buckets: the sum of all coun
 ### Pool size `N` (u64 words)
 
 `N` controls data-pool size: each histogram uses exactly `N × 8` bytes of
-bucket/literal storage. Aggregate stats are stored separately as `count: u64`
+bucket storage. Aggregate stats are stored separately as `count: u64`
 and `sum/min/max: f64` (32 bytes total).
 Larger `N` means more buckets, which means finer resolution before downscaling.
 
@@ -238,7 +197,6 @@ relative error) across the full range.
 |--------|--------|
 | `with_scale(s)` | Set exact starting scale (returns `Err` if invalid; does not clamp) |
 | `with_min_width(w)` | Skip sub-byte widths — e.g., `U8` for faster ops at the cost of fewer initial buckets |
-| `with_min_width(Width::B1)` | Disable literal mode when the value range is already known |
 
 Run `cargo run --example sizing` for an interactive capacity explorer.
 
@@ -262,7 +220,7 @@ Both `update` and `record` return `Result<(), Overflow>`. On error the histogram
 
 ### Reading via `HistogramView`
 
-All read access goes through `view()`, which promotes from literal mode if needed and returns an immutable `HistogramView`. Note that `view()` takes `&mut self` because promotion from literal to bucket mode is a one-time internal mutation:
+All read access goes through `view()`, which returns an immutable `HistogramView`:
 
 ```rust,ignore
 let v = h.view();
@@ -320,13 +278,10 @@ Merge computes the minimum common scale, downscales as needed, and uses snapshot
 
 | Method | Description |
 |--------|-------------|
-| `new()` | Create at maximum scale (20) with default settings |
+| `new()` | Create at maximum table scale with default settings |
 | `with_scale(s)` | Create at exact scale (returns `Err` if invalid; does not clamp) |
 | `swap(&mut other)` | Exchange contents with another histogram (O(N) memswap) |
-| `width() == Width::B0` | Check if in literal mode |
-| `bucket_capacity()` | Number of logical buckets at the current width |
 | `width()` | Current counter width (`B1`..`U64`) |
-| `buckets_empty()` | Whether all bucket counters are zero |
 
 ### Constructor chain
 

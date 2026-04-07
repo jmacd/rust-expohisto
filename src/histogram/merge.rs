@@ -83,11 +83,13 @@ impl<const N: usize> Histogram<N> {
 
         if self.buckets_empty() {
             // No data to transform — just set scale and width.
-            // Cap at MIN_SCALE since the empty dest has no data constraints.
+            // Clamp at MIN_SCALE (the two-bucket invariant guarantees
+            // the entire exponent range fits at MIN_SCALE).
             let new_scale = (self.current.scale.scale() - self_change as i32)
                 .max(crate::mapping::MIN_SCALE);
+            debug_assert!(new_scale >= crate::mapping::MIN_SCALE);
             self.current.scale =
-                crate::mapping::Scale::new(new_scale).expect("valid scale");
+                crate::mapping::Scale::new(new_scale).expect("clamped at MIN_SCALE");
             self.current.width = merge_width;
         } else if self_change > 0 {
             self.downscale_by_min(self_change, merge_width);
@@ -416,6 +418,10 @@ impl<const N: usize> Histogram<N> {
     }
 
     /// Widen self to `new_width`, updating scale and all words.
+    ///
+    /// Callers must ensure headroom: the merge prepare phase
+    /// pre-downscales so that `scale − MIN_SCALE ≥ U64 − width`,
+    /// guaranteeing `change_scale` stays within budget.
     fn widen_to(&mut self, new_width: Width) {
         let old_width = self.current.width;
         let change = new_width.subtract(old_width) as u32;

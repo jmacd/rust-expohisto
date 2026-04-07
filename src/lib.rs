@@ -29,5 +29,4 @@ pub use histogram::{
 pub use histogram::{QuantileIter, QuantileValue};
 pub use mapping::{MAX_SCALE, MIN_SCALE, Scale, ScaleError, table_scale};
 
-// Note: public because mapping-gen uses it from another crate
-pub mod float64;
+pub(crate) mod float64;

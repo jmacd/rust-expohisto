@@ -15,11 +15,10 @@ Exponential histograms provide a compact, high-resolution representation of valu
 
 - **No heap allocation**: Fixed-size bucket storage using const generics (`Histogram<N>`)
 - **`Send + Sync`**: All fields are `Copy` primitives; safe to share across threads with external synchronization
-- **High performance**: Lookup table provides 3.5× speedup over logarithm-based mapping
+- **High performance**: Lookup table provides ~1.8× speedup over logarithm-based mapping
 - **Sub-byte counters**: 1-bit bucket counters (B1) maximize resolution; auto-widen on overflow
 - **Configurable table size**: Trade static memory for lookup acceleration at higher scales
 - **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
-- **Literal mode**: Cold-start pool defers bucketing until the value range is known, minimizing downscales
 - **Compact configuration**: 2-byte `Settings` struct pairs `Scale` + `Width`; histograms track both initial and current settings
 - **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature
 - **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate
@@ -70,7 +69,7 @@ The lookup table accelerates all scales from 1 up to the compiled maximum. Scale
 
 ### Scale (table size)
 
-Scale features `scale-1` through `scale-20` control the lookup table size.
+Scale features `scale-1` through `scale-16` control the lookup table size.
 Each table supports all scales from 1 up to its maximum; higher scales
 are rejected by `Scale::new()`. Selected examples:
 

@@ -113,7 +113,7 @@ fn bench_downscale(c: &mut Criterion) {
                     for &v in &values {
                         let _ = h.update(v);
                     }
-                    let _ = h.downscale(black_box(steps));
+                    h.downscale(black_box(steps));
                     black_box(&h);
                 })
             });

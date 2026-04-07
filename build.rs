@@ -43,7 +43,7 @@ fn main() {
 fn table_scale() -> u32 {
     // Check from highest to lowest; features are additive so the highest wins.
     // Cargo sets CARGO_FEATURE_SCALE_<N> for each enabled `scale-<N>` feature.
-    (1..=20)
+    (1..=16)
         .rev()
         .find(|&s| env::var(format!("CARGO_FEATURE_SCALE_{s}")).is_ok())
         .unwrap_or(8)

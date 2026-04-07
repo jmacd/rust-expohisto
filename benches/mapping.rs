@@ -4,7 +4,7 @@
 //! Benchmarks for exponential histogram mapping functions.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use otel_expohisto::{max_scale, Scale};
+use otel_expohisto::{table_scale, Scale};
 
 /// 100 test values with significands roughly uniformly distributed across [1.0, 2.0).
 /// 10 base significands × 10 magnitude groups = 100 values.
@@ -49,8 +49,8 @@ fn bench_map_to_index(c: &mut Criterion) {
     }
 
     // Positive scales - benchmark the lookup table algorithm via Scale
-    let max = max_scale();
-    let scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20]
+    let max = table_scale();
+    let scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 16]
         .into_iter()
         .filter(|&s| s <= max)
         .collect();
@@ -69,7 +69,7 @@ fn bench_map_to_index(c: &mut Criterion) {
     // When bench-all is enabled, also benchmark the logarithm algorithm directly
     #[cfg(feature = "bench-all")]
     {
-        let log_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 20].to_vec();
+        let log_scales: Vec<i32> = [1, 4, 6, 8, 10, 12, 14, 16].to_vec();
 
         for &scale in &log_scales {
             group.bench_function(BenchmarkId::new("logarithm", scale), |b| {
@@ -102,9 +102,9 @@ fn bench_lower_boundary(c: &mut Criterion) {
         });
     }
 
-    // Positive scales - benchmark up to max_scale()
-    let max = max_scale();
-    let scales: Vec<i32> = [1, 4, 8, 10, 12, 14, 20]
+    // Positive scales - benchmark up to table_scale()
+    let max = table_scale();
+    let scales: Vec<i32> = [1, 4, 8, 10, 12, 14, 16]
         .into_iter()
         .filter(|&s| s <= max)
         .collect();

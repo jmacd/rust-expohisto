@@ -1563,7 +1563,7 @@ fn test_error_display() {
 
     let e2 = Error::Extreme;
     let msg2 = std::format!("{e2}");
-    assert!(msg2.contains("extreme"), "error display: {msg2}");
+    assert!(msg2.contains("invalid"), "error display: {msg2}");
 }
 
 #[test]
@@ -1695,15 +1695,11 @@ fn test_crash_1d7f7c() {
     h2.record_incr(value, 64).unwrap();
     h2.record_incr(value, 1024).unwrap();
     
-    eprintln!("h1: scale={}, width={:?}", h1.view().scale(), h1.view().positive().width());
-    eprintln!("h2: scale={}, width={:?}", h2.view().scale(), h2.view().positive().width());
-    
     h1.merge_from(&h2).unwrap();
     
     let v = h1.view();
     let stats = v.stats();
     assert_eq!(stats.count, 1 + 4 + 64 + 1024);
-    eprintln!("Merged: scale={}, width={:?}", v.scale(), v.positive().width());
 }
 
 #[test]
@@ -1723,4 +1719,70 @@ fn repro_fuzz_merge_cross_size_doubling() {
     let bt: u64 = h1.view().positive().iter().sum();
     let count = h1.view().stats().count;
     assert_eq!(bt, count, "bucket total ({bt}) != count ({count})");
+}
+
+#[test]
+fn test_negative_subnormal_rejected() {
+    let mut h: Histogram<16> = Histogram::new();
+    // Negative subnormals must be rejected, not silently bucketed.
+    let neg_subnormal = -5e-324_f64;
+    assert!(neg_subnormal.is_sign_negative());
+    assert_eq!(h.update(neg_subnormal), Err(Error::Extreme));
+    assert_eq!(h.view().stats().count, 0);
+
+    // Positive subnormals are still accepted.
+    let pos_subnormal = 5e-324_f64;
+    assert!(h.update(pos_subnormal).is_ok());
+    assert_eq!(h.view().stats().count, 1);
+}
+
+#[test]
+fn test_zero_only_histogram_stats() {
+    let mut h: Histogram<16> = Histogram::new();
+    h.update(0.0).unwrap();
+    h.update(0.0).unwrap();
+    let s = h.view().stats();
+    assert_eq!(s.count, 2);
+    assert_eq!(s.sum, 0.0);
+    assert_eq!(s.min, 0.0, "zero-only min should be 0.0");
+    assert_eq!(s.max, 0.0, "zero-only max should be 0.0");
+    assert_eq!(h.view().positive().len(), 0);
+
+    // Negative zero is also accepted as zero.
+    let mut h2: Histogram<16> = Histogram::new();
+    h2.update(-0.0).unwrap();
+    let s2 = h2.view().stats();
+    assert_eq!(s2.count, 1);
+    assert_eq!(s2.min, 0.0);
+    assert_eq!(s2.max, 0.0);
+}
+
+#[test]
+fn test_min_scale_large_increment_no_panic() {
+    // At MIN_SCALE with B1 counters (max=1), recording incr=2
+    // must not panic. It should widen the counter width without
+    // changing the scale — an empty histogram has no range to
+    // protect, so only the width needs adjustment.
+    let mut h: Histogram<16> = Histogram::new()
+        .with_scale(crate::mapping::MIN_SCALE)
+        .unwrap();
+    assert!(h.record_incr(1.0, 2).is_ok());
+    assert_eq!(h.view().stats().count, 2);
+    assert_eq!(
+        h.view().scale(),
+        crate::mapping::MIN_SCALE,
+        "scale should be preserved at MIN_SCALE"
+    );
+
+    // Even larger increments should also work and preserve scale.
+    let mut h2: Histogram<16> = Histogram::new()
+        .with_scale(crate::mapping::MIN_SCALE)
+        .unwrap();
+    assert!(h2.record_incr(1.0, u16::MAX as u64 + 1).is_ok());
+    assert_eq!(h2.view().stats().count, u16::MAX as u64 + 1);
+    assert_eq!(
+        h2.view().scale(),
+        crate::mapping::MIN_SCALE,
+        "scale should be preserved at MIN_SCALE"
+    );
 }

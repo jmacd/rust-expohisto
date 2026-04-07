@@ -49,14 +49,14 @@ The CI test matrix includes `--no-default-features` to ensure `no_std` compatibi
 
 The crate includes comprehensive validation at multiple levels:
 
-- **122 unit tests** covering basic operations, promotion, widening, downscaling, SWAR pairwise merge, all merge strategies, quantile estimation, and boundary conditions
+- **140 unit tests** covering basic operations, widening, downscaling, SWAR pairwise merge, all merge strategies, quantile estimation, and boundary conditions
 - **4 fuzz targets** (`cargo +nightly fuzz run <target>`):
   - `histogram_oracle` — validates invariants (count, sum, min/max, bucket integrity) with random f64 sequences
   - `merge_oracle` — fuzzes weighted `record()` + cross-scale merge
   - `stateful_oracle` — state-machine fuzzer with interleaved update/merge/clear/read operations
   - `rng_stress` — large histogram (N=160) with millions of random values
-- **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 20
-- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-4`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
+- **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 16
+- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
 
 ## Examples
 
@@ -87,7 +87,7 @@ The spec defines three configuration parameters:
 | Parameter | Spec Default | This Implementation | Notes |
 |-----------|-------------|---------------------|-------|
 | **MaxSize** | 160 | Any compile-time `N` via `Histogram<N>` | `N` is the data pool size in u64 words. Bucket capacity depends on the current counter width. |
-| **MaxScale** | 20 | 20 (`MAX_SCALE`) | All scales 1–20 are always supported. Scales within the compiled table range use exact lookup; higher scales fall back to the built-in logarithm mapper. `Histogram::new().with_scale()` lets the user set a lower starting scale. |
+| **MaxScale** | 20 | 16 (`MAX_SCALE`) | Scales 1–16 use the compile-time lookup table (selected via `scale-N` feature). The default feature is `scale-8`. `Histogram::new().with_scale()` lets the user set a lower starting scale. |
 | **RecordMinMax** | true | Always on | `min` and `max` are tracked on every update. There is no option to disable them. |
 
 ### Collected Fields
@@ -112,13 +112,13 @@ The spec requires all histogram aggregations to collect count, sum, min, and max
 
 > Implementations SHOULD NOT incorporate non-normal values (i.e., +Inf, -Inf, and NaNs) into the sum, min, and max fields.
 
-**Caller responsibility.** `debug_assert!` guards reject non-finite and negative values during development, but there is no runtime check in release builds. The crate expects the SDK caller to filter these before recording.
+**Supported.** `record_incr` rejects non-finite and negative values at runtime, returning `Error::Extreme`. Zero values are accepted (counted but not bucketed).
 
 ### Support a Minimum and Maximum Scale
 
 > The implementation MUST maintain reasonable minimum and maximum scale parameters that the automatic scale parameter will not exceed.
 
-**Supported.** Scale is bounded by `MIN_SCALE` (-10) and `MAX_SCALE` (20). The starting scale (configurable via `Histogram::new().with_scale()`) sets the upper bound for automatic scale selection.
+**Supported.** Scale is bounded by `MIN_SCALE` (-10) and `MAX_SCALE` (16). The starting scale (configurable via `Histogram::new().with_scale()`) sets the upper bound for automatic scale selection.
 
 ### Use the Maximum Scale for Single Measurements
 
@@ -152,12 +152,12 @@ Not part of the spec, but relevant to overflow handling: bucket counters start a
 | Spec Requirement | Status |
 |-----------------|--------|
 | MaxSize = 160 default | Supported |
-| MaxScale = 20 default | Supported |
+| MaxScale = 20 default | Supported (up to 16) |
 | RecordMinMax | Always on |
 | Handle all normal values | Supported |
-| Reject +Inf, -Inf, NaN | Debug-only (caller responsibility) |
+| Reject +Inf, -Inf, NaN | Supported (runtime `Error::Extreme`) |
 | Subnormal values | Mapped to lowest normal bucket |
-| Minimum and maximum scale | Supported (MIN_SCALE = -10, MAX_SCALE = 20) |
+| Minimum and maximum scale | Supported (MIN_SCALE = -10, MAX_SCALE = 16) |
 | Max scale for single measurements | Supported |
 | Maintain ideal scale | Supported |
 | Positive bucket range | Supported |

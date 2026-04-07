@@ -62,8 +62,8 @@ pub fn verify_histogram<const N: usize>(hist: &mut Histogram<N>, ops: &[(f64, u6
     // record_incr rounds subnormals to (biased_exp=1, significand=1).
     // Construct the f64 that results from this rounding so the oracle
     // maps it through the same code path as the histogram.
-    const SUBNORMAL_ROUNDED: f64 =
-        f64::from_bits((1u64 << otel_expohisto::float64::SIGNIFICAND_WIDTH) | 1);
+    // 52 is the IEEE 754 double-precision significand width.
+    const SUBNORMAL_ROUNDED: f64 = f64::from_bits((1u64 << 52) | 1);
 
     for &(value, incr) in ops {
         if value != 0.0 {
