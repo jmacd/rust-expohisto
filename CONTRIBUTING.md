@@ -63,7 +63,7 @@ src/
 ├── histogram/       # Core histogram struct:
 │   ├── mod.rs       #   struct, construction, update, downscale, widen
 │   ├── literal.rs   #   literal mode and promotion to bucket mode
-│   ├── merge.rs     #   merge_from, merge_from_raw
+│   ├── merge.rs     #   merge_from
 │   ├── bucket_view.rs  # BucketView and BucketsIter
 │   ├── view.rs      #   HistogramView (read-only snapshot)
 │   ├── quantile.rs  #   quantile estimation

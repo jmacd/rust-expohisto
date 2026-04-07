@@ -21,7 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Configurable lookup table scale** — `scale-1` through `scale-20` features
   trade binary size for finer resolution support
 - `Histogram::merge_from()` — merge from any histogram (same or different `N`)
-- `Histogram::merge_from_raw()` — merge from raw bucket data
+
 - `Histogram::with_min_width()` — skip sub-byte widths for faster ops
 - `Width::B0` — literal mode represented as a width variant; disable via `with_min_width(Width::B1)` when value range
   is known upfront

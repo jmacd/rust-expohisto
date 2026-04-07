@@ -2,7 +2,7 @@
 
 ## Error Handling & Atomicity
 
-All mutating operations (`update`, `record`, `merge_from`, `merge_from_raw`) return `Result<(), Overflow>`. The `Overflow` error indicates that a bucket counter or the total count would exceed its maximum representable value.
+All mutating operations (`update`, `record_incr`, `merge_from`) return `Result<(), Error>`. The `Error::Overflow` variant indicates that the total count would exceed `u64::MAX`.
 
 **Snapshot/rollback guarantee:** Before any mutating operation, the histogram clones itself. If the operation fails (e.g., a U64 counter would overflow), the clone is restored and the histogram is left unchanged. This ensures that partial mutations from multi-step operations (downscale + widen + insert) never leak to the caller.
 
@@ -141,7 +141,7 @@ The spec defines both positive and negative bucket ranges. **This implementation
 The spec requires aggregations to be mergeable. This implementation supports:
 
 - **Same- or cross-size merge:** `Histogram::merge_from()` merges histograms, computing the minimum common scale and downscaling as needed.  The source and destination may have different `N` parameters (e.g., `Histogram<16>` into `Histogram<8>`).
-- **Raw merge:** `Histogram::merge_from_raw()` merges from raw histogram data via a closure-based bucket accessor, enabling cross-library interop.
+- **Cross-size merge:** The source and destination may have different `N` parameters (e.g., `Histogram<16>` into `Histogram<8>`).
 
 ### Counter Widening
 

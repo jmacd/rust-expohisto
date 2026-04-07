@@ -98,22 +98,6 @@ impl Stats {
     };
 }
 
-/// Describes the bucket layout of an exponential histogram.
-///
-/// Used by [`Histogram::merge_from_raw`] to pass the source histogram's
-/// bucket metadata without requiring a full `Histogram` instance.
-#[derive(Debug, Clone, Copy)]
-pub struct BucketDescriptor {
-    /// Exponential histogram scale.
-    pub scale: i32,
-    /// Index of the first bucket.
-    pub offset: i32,
-    /// Number of contiguous buckets. Note that some buckets may be
-    /// zero, including at the extremes. Callers are expected to skip
-    /// and adjust for leading/trailing buckets.
-    pub len: u32,
-}
-
 /// High-low range helper.
 #[derive(Debug, Clone, Copy)]
 struct HighLow {

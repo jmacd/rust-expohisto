@@ -301,7 +301,7 @@ The returned `QuantileIter` implements `Iterator<Item = QuantileValue>` and `Exa
 Three merge strategies enable flexible aggregation:
 
 ```rust,ignore
-use otel_expohisto::{Histogram, Stats, BucketDescriptor};
+use otel_expohisto::Histogram;
 
 let mut a: Histogram<16> = Histogram::new();
 let b: Histogram<16> = Histogram::new();
@@ -312,16 +312,9 @@ a.merge_from(&b).unwrap();
 // Cross-size merge (different N parameters)
 let c: Histogram<32> = Histogram::new();
 a.merge_from(&c).unwrap();
-
-// Raw merge — from arbitrary bucket data via a closure
-a.merge_from_raw(
-    &Stats { count: 10, sum: 42.0, min: 1.0, max: 9.0 },
-    &BucketDescriptor { scale: 4, offset: 0, len: 5 },
-    &|i| bucket_counts[i as usize],  // closure returning count at position i
-).unwrap();
 ```
 
-All merge operations compute the minimum common scale, downscale as needed, and use snapshot/rollback for atomicity.
+Merge computes the minimum common scale, downscales as needed, and uses snapshot/rollback for atomicity.
 
 ### Lifecycle
 
@@ -384,7 +377,6 @@ assert_eq!(max_scale(), 20);
 | `QuantileValue` | `Clone`, `Copy`, `Debug`, `PartialEq` |
 | `Width` | `Clone`, `Copy`, `Debug`, `PartialEq`, `Eq`, `PartialOrd`, `Ord` |
 | `Stats` | `Clone`, `Copy`, `Debug` (also has `Stats::EMPTY` constant) |
-| `BucketDescriptor` | `Clone`, `Copy`, `Debug` |
-| `Overflow` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
+| `Error` | `Clone`, `Copy`, `Debug`, `Display`, `PartialEq` |
 | `ScaleError` | `Clone`, `Copy`, `Debug`, `Display`, `Error`, `PartialEq`, `Eq` |
 | `Scale` | `Clone`, `Copy`, `Debug` |

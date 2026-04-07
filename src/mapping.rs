@@ -68,7 +68,7 @@ impl Scale {
     /// Creates a new mapping for the given scale.
     ///
     /// Returns `ScaleError::InvalidScale` if scale is outside
-    /// [`MIN_SCALE`]..=[`max_scale()`].
+    /// [`MIN_SCALE`]..=[`table_scale()`].
     pub fn new(scale: i32) -> Result<Self, ScaleError> {
         if !(MIN_SCALE..=table_scale()).contains(&scale) {
             return Err(ScaleError::InvalidScale);
