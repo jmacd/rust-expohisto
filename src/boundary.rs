@@ -26,12 +26,7 @@ const fn max_normal_index_exp(scale: i32) -> i32 {
 #[inline]
 const fn min_normal_lower_boundary_index(scale: i32) -> i32 {
     let shift = (-scale) as u32;
-    let mut idx = MIN_NORMAL_EXPONENT >> shift;
-    if shift < 2 {
-        // For scales -1 and 0, 2^-1022 is a power-of-two multiple
-        idx -= 1;
-    }
-    idx
+    MIN_NORMAL_EXPONENT >> shift
 }
 
 /// Returns the lower boundary of a bucket at non-positive scale.

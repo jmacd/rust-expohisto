@@ -5,7 +5,7 @@
 // an exponential histogram, and prints the result in a canonical text format
 // for cross-implementation comparison.
 //
-// Usage: go-cli [-size N]
+// Usage: go-cli [-size N] [-pn]
 package main
 
 import (
@@ -21,6 +21,7 @@ import (
 
 func main() {
 	size := flag.Int("size", 160, "maximum number of bucket indices (maxSize)")
+	pnMode := flag.Bool("pn", false, "positive+negative mode (accept negative values)")
 	flag.Parse()
 
 	var hist structure.Float64
@@ -40,18 +41,23 @@ func main() {
 		}
 		value := math.Float64frombits(bits)
 
-		// Skip NaN, Inf, negative non-zero (matching Rust behavior)
+		// Skip NaN and Inf always
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			continue
 		}
-		if math.Signbit(value) && value != 0 {
-			continue
+
+		if !*pnMode {
+			// NN mode: skip negative non-zero
+			if math.Signbit(value) && value != 0 {
+				continue
+			}
 		}
 
-		// Normalize subnormals to the smallest normal so both
-		// implementations agree on the bucket assignment.
-		if value > 0 && value < 0x1p-1022 {
-			value = 0x1p-1022
+		// Normalize subnormals (positive or negative) to the smallest
+		// normal so both implementations agree on bucket assignment.
+		absVal := math.Abs(value)
+		if absVal > 0 && absVal < 0x1p-1022 {
+			value = math.Copysign(0x1p-1022, value)
 		}
 
 		hist.Update(value)
@@ -85,11 +91,24 @@ func main() {
 	fmt.Printf("zero_count=%d\n", zeroCount)
 	fmt.Printf("positive_offset=%d\n", positiveOffset)
 
-	counts := make([]string, positiveLen)
+	posCounts := make([]string, positiveLen)
 	for i := uint32(0); i < positiveLen; i++ {
-		counts[i] = fmt.Sprintf("%d", positive.At(i))
+		posCounts[i] = fmt.Sprintf("%d", positive.At(i))
 	}
-	fmt.Printf("positive_counts=[%s]\n", strings.Join(counts, ","))
+	fmt.Printf("positive_counts=[%s]\n", strings.Join(posCounts, ","))
+
+	if *pnMode {
+		negative := hist.Negative()
+		negativeOffset := negative.Offset()
+		negativeLen := negative.Len()
+
+		fmt.Printf("negative_offset=%d\n", negativeOffset)
+		negCounts := make([]string, negativeLen)
+		for i := uint32(0); i < negativeLen; i++ {
+			negCounts[i] = fmt.Sprintf("%d", negative.At(i))
+		}
+		fmt.Printf("negative_counts=[%s]\n", strings.Join(negCounts, ","))
+	}
 }
 
 func normalizeZero(v float64) uint64 {

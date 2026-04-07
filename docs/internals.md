@@ -299,7 +299,7 @@ let h: Histogram<16> = Histogram::new()
 The `Scale` struct is re-exported at the crate root for direct value-to-index conversion, independent of any histogram instance:
 
 ```rust,ignore
-use otel_expohisto::{Scale, ScaleError, MAX_SCALE, MIN_SCALE, max_scale};
+use otel_expohisto::{Scale, ScaleError, MAX_SCALE, MIN_SCALE, table_scale};
 
 // Create a mapping at scale 8
 let m = Scale::new(8).unwrap();
@@ -314,11 +314,11 @@ assert!(boundary <= 3.14);
 
 // Scale constants
 assert_eq!(MIN_SCALE, -10);
-assert_eq!(MAX_SCALE, 20);
-assert_eq!(max_scale(), 20);
+assert_eq!(MAX_SCALE, 16);
+assert!(table_scale() <= MAX_SCALE);
 ```
 
-`Scale::new(scale)` returns `Err(ScaleError::InvalidScale)` for scales outside \[-10, 20\]. `lower_boundary()` returns `Err(ScaleError::Underflow)` or `Err(ScaleError::Overflow)` when the index corresponds to a subnormal or infinite value.
+`Scale::new(scale)` returns `Err(ScaleError::InvalidScale)` for scales outside \[-10, `table_scale()`\]. `lower_boundary()` returns `Err(ScaleError::Underflow)` or `Err(ScaleError::Overflow)` when the index corresponds to a subnormal or infinite value.
 
 ### Trait implementations
 

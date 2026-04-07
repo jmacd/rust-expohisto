@@ -369,6 +369,12 @@ impl<const N: usize> HistogramNN<N> {
     }
 
     /// Creates a new histogram at the maximum supported scale.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N < 2` or `N > 250`. These are compile-time constant
+    /// constraints: `N >= 2` ensures the minimum scale covers the full
+    /// exponent range; `N <= 250` caps the struct at 2 KiB.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
@@ -401,6 +407,11 @@ impl<const N: usize> HistogramNN<N> {
     }
 
     /// Sets the maximum scale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScaleError::InvalidScale`] if `scale` is outside
+    /// [`MIN_SCALE`](crate::MIN_SCALE)..=[`table_scale()`](crate::table_scale).
     #[inline]
     pub fn with_scale(mut self, scale: i32) -> Result<Self, ScaleError> {
         let s = Scale::new(scale)?;
@@ -461,12 +472,22 @@ impl<const N: usize> HistogramNN<N> {
     }
 
     /// Records a single value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Extreme`] if the value is NaN, ±Inf, or negative.
+    /// Returns [`Error::Overflow`] if the total count would exceed `u64::MAX`.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Error> {
         self.record_incr(value, 1)
     }
 
     /// Records a value with a specified increment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Extreme`] if the value is NaN, ±Inf, or negative.
+    /// Returns [`Error::Overflow`] if the total count would exceed `u64::MAX`.
     pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Error> {
         // Extract the raw exponent and significand (sign bit is ignored).
         let mut biased_exp = get_biased_exponent(value);

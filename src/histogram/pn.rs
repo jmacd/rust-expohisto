@@ -87,6 +87,11 @@ impl<const K: usize, const L: usize> Default for HistogramPN<K, L> {
 
 impl<const K: usize, const L: usize> HistogramPN<K, L> {
     /// Creates a new histogram at the maximum supported scale.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `K < 2`, `K > 250`, `L < 2`, or `L > 250` (same
+    /// constraints as [`HistogramNN::new`]).
     #[inline]
     #[must_use]
     pub fn new() -> Self {
@@ -101,6 +106,11 @@ impl<const K: usize, const L: usize> HistogramPN<K, L> {
     }
 
     /// Sets the maximum scale for both ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScaleError::InvalidScale`] if `scale` is outside
+    /// [`MIN_SCALE`](crate::MIN_SCALE)..=[`table_scale()`](crate::table_scale).
     #[inline]
     pub fn with_scale(mut self, scale: i32) -> Result<Self, ScaleError> {
         self.positive = self.positive.with_scale(scale)?;
@@ -168,12 +178,22 @@ impl<const K: usize, const L: usize> HistogramPN<K, L> {
     }
 
     /// Records a single value (positive, negative, or zero).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Extreme`] if the value is NaN, +Inf, or -Inf.
+    /// Returns [`Error::Overflow`] if the total count would exceed `u64::MAX`.
     #[inline]
     pub fn update(&mut self, value: f64) -> Result<(), Error> {
         self.record_incr(value, 1)
     }
 
     /// Records a value with a specified increment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Extreme`] if the value is NaN, +Inf, or -Inf.
+    /// Returns [`Error::Overflow`] if the total count would exceed `u64::MAX`.
     pub fn record_incr(&mut self, value: f64, incr: u64) -> Result<(), Error> {
         let biased_exp = get_biased_exponent(value);
         let significand = get_significand(value);
@@ -185,10 +205,7 @@ impl<const K: usize, const L: usize> HistogramPN<K, L> {
         match biased_exp {
             0 if significand == 0 => {
                 // Both +0.0 and -0.0 are treated as zero.
-                self.zero_count = self
-                    .zero_count
-                    .checked_add(incr)
-                    .ok_or(Error::Overflow)?;
+                self.zero_count = self.zero_count.checked_add(incr).ok_or(Error::Overflow)?;
                 self.min = self.min.min(0.0);
                 self.max = self.max.max(0.0);
                 return Ok(());
@@ -199,39 +216,22 @@ impl<const K: usize, const L: usize> HistogramPN<K, L> {
             _ => {}
         }
 
+        // After pre-validation above, the inner record_incr cannot
+        // fail: NaN/Inf are rejected, zero is handled, and the total
+        // overflow check covers each sub-histogram's individual count.
+        // The inner call drives downscale/widen internally and always
+        // succeeds for valid non-zero finite values.
         if value.is_sign_negative() {
-            // Route to negative sub-histogram with absolute value.
-            let abs_value = -value;
-            let snapshot = self.negative.clone();
-            match self.negative.record_incr(abs_value, incr) {
-                Ok(()) => {
-                    self.sum += value * incr as f64;
-                    self.min = self.min.min(value);
-                    self.max = self.max.max(value);
-                    self.sync_scales();
-                    Ok(())
-                }
-                Err(e) => {
-                    self.negative = snapshot;
-                    Err(e)
-                }
-            }
+            self.negative.record_incr(-value, incr)?;
         } else {
-            let snapshot = self.positive.clone();
-            match self.positive.record_incr(value, incr) {
-                Ok(()) => {
-                    self.sum += value * incr as f64;
-                    self.min = self.min.min(value);
-                    self.max = self.max.max(value);
-                    self.sync_scales();
-                    Ok(())
-                }
-                Err(e) => {
-                    self.positive = snapshot;
-                    Err(e)
-                }
-            }
+            self.positive.record_incr(value, incr)?;
         }
+
+        self.sum += value * incr as f64;
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        self.sync_scales();
+        Ok(())
     }
 
     /// Returns the total count across both ranges and zeros.
@@ -301,7 +301,11 @@ impl<const K: usize, const L: usize> HistogramPN<K, L> {
             return Ok(());
         }
 
-        // Check total count overflow.
+        // Check total count overflow.  This covers both sub-histograms:
+        // since pos_count ≤ total and neg_count ≤ total, if the combined
+        // totals fit in u64, each sub-histogram's individual merge also
+        // fits.  merge_buckets is infallible, so the inner merge_from
+        // calls cannot fail after this check passes.
         self.total_count()
             .checked_add(other_total)
             .ok_or(Error::Overflow)?;
@@ -572,10 +576,7 @@ mod tests {
 
         // After sync, both should be at the lower scale.
         // The positive has downscaled, and negative should match.
-        assert!(
-            final_pos <= pos_scale,
-            "positive scale should not increase"
-        );
+        assert!(final_pos <= pos_scale, "positive scale should not increase");
         assert_eq!(
             final_pos, final_neg,
             "scales should be synchronized: pos={final_pos}, neg={final_neg}"
