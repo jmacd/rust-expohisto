@@ -197,11 +197,12 @@ fn main() {
 
     // Configuration
     let contrasts: &[(f64, &str)] = &[
-        (4.0, "4× (2 oct)"),
-        (32.0, "32× (5 oct)"),
-        (1_000.0, "10³ (10 oct)"),
-        (100_000.0, "10⁵ (17 oct)"),
-        (10_000_000.0, "10⁷ (23 oct)"),
+        (10.0, "10×"),
+        (100.0, "10²"),
+        (1_000.0, "10³"),
+        (10_000.0, "10⁴"),
+        (100_000.0, "10⁵"),
+        (1_000_000.0, "10⁶"),
     ];
 
     let counts: &[(usize, &str)] = &[
@@ -347,11 +348,12 @@ fn main() {
     println!();
     println!("| Contrast | Octaves | Example range |");
     println!("|----------|---------|---------------|");
-    println!("| 4×       | 2       | 50ms – 200ms  |");
-    println!("| 32×      | 5       | 10ms – 320ms  |");
+    println!("| 10×      | 3.3     | 10ms – 100ms  |");
+    println!("| 10²      | 6.6     | 1ms – 100ms   |");
     println!("| 10³      | 10      | 1ms – 1s      |");
+    println!("| 10⁴      | 13      | 1ms – 10s     |");
     println!("| 10⁵      | 17      | 1ms – 100s    |");
-    println!("| 10⁷      | 23      | 1μs – 10s     |");
+    println!("| 10⁶      | 20      | 1μs – 1s      |");
     println!();
     println!("**Columns** are the number of measurements per collection interval.");
     println!("A typical OTel SDK collecting every 15–60 seconds at 100–1000 RPS");
@@ -373,7 +375,7 @@ fn main() {
     println!("| Input range | Contrast | Ideal Scale | Relative error |");
     println!("|-------------|----------|-------------|----------------|");
     println!("| 1ms – 4ms   | 4×       | 6           | 0.54%          |");
-    println!("| 1ms – 20ms  | 20×      | 5           | 1.1%           |");
+    println!("| 1ms – 100ms | 10²      | 4           | 2.2%           |");
     println!("| 1ms – 1s    | 10³      | 4           | 2.2%           |");
     println!("| 1ms – 100s  | 10⁵      | 3           | 4.3%           |");
     println!("| 1μs – 10s   | 10⁷      | 2           | 8.6%           |");
