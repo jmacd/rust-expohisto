@@ -18,7 +18,7 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, LogNormal};
 use std::f64::consts::PI;
 
-const NUM_SEEDS: usize = 21; // odd for clean median
+const NUM_SEEDS: usize = 441; // 21×21 for stable medians
 const INITIAL_SCALE: i32 = 10;
 
 // ── Theoretical helpers ──
@@ -164,6 +164,8 @@ fn dispatch_run(
         10 => run_median!(10, ln_mu, ln_sigma, n_max, seeds),
         26 => run_median!(26, ln_mu, ln_sigma, n_max, seeds),
         58 => run_median!(58, ln_mu, ln_sigma, n_max, seeds),
+        122 => run_median!(122, ln_mu, ln_sigma, n_max, seeds),
+        250 => run_median!(250, ln_mu, ln_sigma, n_max, seeds),
         _ => panic!("unsupported N={}", n_words),
     }
 }
@@ -215,9 +217,11 @@ fn main() {
     ];
 
     let sizes: &[(usize, &str, usize)] = &[
-        (10, "S", 128),
-        (26, "M", 256),
-        (58, "L", 512),
+        (10, "XS", 128),
+        (26, "S", 256),
+        (58, "M", 512),
+        (122, "L", 1024),
+        (250, "XL", 2048),
     ];
 
     // ── Print preamble ──
@@ -266,7 +270,7 @@ fn main() {
     println!("exponential histograms fed lognormal-distributed data, as a function");
     println!("of data contrast (max/min ratio) and measurement count per interval.");
     println!();
-    println!("Three histogram sizes are compared:");
+    println!("Five histogram sizes are compared:");
     println!();
     for &(n_words, label, bytes) in sizes {
         let total_bits = n_words * 64;
@@ -390,8 +394,8 @@ fn main() {
     println!("  **higher** scale than the fixed-width 160-bucket default because");
     println!("  narrow counters (B1–B4) provide more slots than 160.");
     println!();
-    println!("- At moderate counts (n ≈ 1K–10K), the L (512B) configuration");
-    println!("  matches or exceeds the 160-bucket default's resolution.");
+    println!("- At moderate counts (n ≈ 1K–10K), L (1024B) and XL (2048B)");
+    println!("  match or exceed the 160-bucket default's resolution.");
     println!();
     println!("- At high counts (n ≈ 100K–1M), counter pressure reduces scale");
     println!("  below the range-only ideal. This is the price of compact storage.");
@@ -402,11 +406,13 @@ fn main() {
     println!();
     println!("| Size | Bytes | Best for |");
     println!("|------|-------|----------|");
-    println!("| S (`Histogram<10>`)  | 128  | Embedded, high-cardinality, `no_std` |");
-    println!("| M (`Histogram<26>`)  | 256  | General-purpose OTel metrics |");
-    println!("| L (`Histogram<58>`)  | 512  | High-resolution, long intervals |");
+    println!("| XS (`Histogram<10>`)  | 128   | Embedded, high-cardinality, `no_std` |");
+    println!("| S  (`Histogram<26>`)  | 256   | Constrained environments, many histograms |");
+    println!("| M  (`Histogram<58>`)  | 512   | General-purpose OTel metrics |");
+    println!("| L  (`Histogram<122>`) | 1024  | High-resolution, long intervals |");
+    println!("| XL (`Histogram<250>`) | 2048  | Maximum resolution, low-cardinality |");
     println!();
     println!("Choose the smallest size whose error% is acceptable for your");
     println!("contrast and count. For most OTel workloads (contrast 10³–10⁵,");
-    println!("n ≈ 1K–100K), the M (256B) configuration provides 2–4% error.");
+    println!("n ≈ 1K–100K), M (512B) or L (1024B) provides 2–9% error.");
 }

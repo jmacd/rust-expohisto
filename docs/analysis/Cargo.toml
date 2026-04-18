@@ -24,3 +24,11 @@ path = "src/bin/validate.rs"
 [[bin]]
 name = "reference_table"
 path = "src/bin/reference_table.rs"
+
+[[bin]]
+name = "closeness"
+path = "src/bin/closeness.rs"
+
+[[bin]]
+name = "recommend"
+path = "src/bin/recommend.rs"
