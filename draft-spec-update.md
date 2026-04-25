@@ -324,42 +324,145 @@ bytes for counters alone. `Histogram<16>` at U16/scale 3 achieves the
 same error rate with 8 octaves of range in 176 bytes total — sufficient
 for most metrics workloads and **7× smaller**.
 
-### Normal Distribution Behavior
+### Sizing Intuition: Steps Down From the Ideal Scale
 
-For normally-distributed data N(μ, σ) with coefficient of variation
-CV = σ/μ, the ±3σ range spans approximately `2.9 × CV` octaves:
+The behavior of a fixed-size variable-width histogram can be reasoned
+about with a single observation:
 
-| CV = σ/μ | ±3σ range | Example |
-|----------|-----------|---------|
-| 0.02     | 0.17 octaves | 500ms ± 10ms |
-| 0.05     | 0.44 octaves | 200ms ± 10ms |
-| 0.10     | 0.89 octaves | 100ms ± 10ms |
-| 0.20     | 2.0 octaves  | 50ms ± 10ms  |
+> **The bucket with the highest density grows linearly with the
+> measurement count, and its growth rate determines how often counters
+> widen.**
 
-Typical response-time distributions have CV in the range 0.05–0.20,
-making the core distribution very compact in logarithmic space. The
-histogram's available range is dominated by headroom for outliers
-rather than the distribution's core.
+Call that growth rate `p_max` — the fraction of measurements that land
+in the densest bucket. Different distributions give different values:
 
-The terminal scale for a given configuration is determined by two
-competing constraints:
+- **Uniform** over the histogram's range: `p_max = 1 / slots`. Every
+  bucket grows at the same rate; widening is the slowest possible.
+- **Normal** with coefficient of variation CV: at scale 0 (one bucket
+  per octave), roughly `0.4 / CV` of measurements land in the modal
+  bucket. Each finer scale step halves the bucket width and so halves
+  `p_max`. Smaller CV concentrates more mass in the mode and forces
+  widening sooner.
+- **Heavy-tailed** (log-normal, exponential, Pareto): `p_max` is
+  smaller than the normal case at the same scale, because mass is
+  spread over more octaves. These distributions widen counters more
+  slowly but consume more octaves of range.
 
-- **Counter constraint**: The mode (densest) bucket accumulates counts
-  at rate `p_mode ≈ (base−1) / (CV × √(2π))` per measurement. When
-  the expected mode count `n × p_mode` exceeds the counter maximum,
-  a widen is triggered. Smaller CV concentrates more probability in
-  the mode bucket, triggering widens earlier.
+Because counter widths progress B1 → B2 → B4 → U8 → U16 → U32 → U64
+(roughly doubling capacity each step), a histogram receiving `n`
+measurements widens until the modal counter holds `n · p_max`.
+Each widening **halves the available slot count**, which is equivalent
+to **one downscale step from the ideal scale**.
 
-- **Range constraint**: The distribution's span in bucket-index space
-  is approximately `2 × CV × d(n) × 2^S / ln(2)` where `d(n)` is
-  the expected extreme of `n` standard normals. When this exceeds the
-  available slot count, a downscale is triggered.
+The terminal configuration is therefore determined by a simple budget:
 
-For typical OTel workloads (n ≈ 1,000–100,000 measurements per
-collection interval), the histogram reaches a steady state at U16
-width with scale 2–4, depending on CV and N. Further transitions
-to U32 or U64 occur only at much larger measurement counts
-(n > 10⁸).
+```
+steps_down_from_ideal  ≈  widenings_from_p_max  +  downscales_for_contrast
+```
+
+where:
+
+- `widenings_from_p_max` is the number of width levels needed to hold
+  `n · p_max` (roughly one level per squaring of `n`).
+- `downscales_for_contrast` is the number of scale reductions needed
+  to fit the distribution's observed span into the remaining slots.
+
+For typical observability workloads — normal-ish core distributions
+with CV in 0.05–0.20, contrast in the 100×–10,000× range, and
+n ≈ 10³–10⁵ per collection interval — the histogram settles at
+**U16 width with scale 2–4**, two to three steps below the ideal
+scale supported by the slot count alone. Heavier tails or larger `n`
+push the terminal width to U32; wider CV or smaller `n` permits a
+finer terminal scale.
+
+### A Calculator Recipe for Sizing
+
+If you know your **contrast** `C` (ratio of largest to smallest value
+you care about, e.g. `p99 / p1`), your **measurement count** `N` per
+collection interval, and your **target relative error** `E` (e.g. `0.05`
+for 5%), you can size a histogram in five steps using a basic scientific
+calculator. The recipe is built on the factorization
+
+```
+slots  =  (octaves of range)  ×  (buckets per octave)
+       =  B  ×  2^K
+```
+
+where `K` is the histogram's scale. The specification's default
+`160 = 10 × 2^4` corresponds to `B = 10` octaves at scale `K = 4`.
+Choosing `B` and `K` is the whole sizing problem.
+
+**Step 1 — Octaves of range you need.**
+```
+B  =  log(C) / log(2)
+```
+*Example:* contrast 1000× → `log(1000) / log(2)  ≈  3 / 0.301  ≈  10` octaves.
+
+**Step 2 — Scale needed for your error target.**
+Relative error halves each time scale doubles, with the rule
+`error ≈ 0.35 / 2^K`. Solve for `K`:
+```
+K  =  log(0.35 / E) / log(2)        (round up)
+```
+*Example:* `E = 0.05` → `log(7) / log(2)  ≈  2.81` → `K = 3`. The error
+will then be `0.35 / 8 ≈ 4.3%`.
+
+**Step 3 — Slots needed.**
+```
+slots  =  B × 2^K
+```
+*Example:* `10 × 2^3 = 80` slots. (At the spec's default `K = 4`, the
+same 10 octaves would require 160 slots — twice as many for half the
+error.)
+
+**Step 4 — Counter width.**
+Estimate the densest bucket count. For a rough upper bound that doesn't
+require knowing CV, assume the mass is spread evenly across the slots:
+```
+mode_count  ≈  N / slots          (uniform assumption, lower bound on width)
+```
+For sharply peaked normal-ish data, multiply by `2` to `4` as a safety
+factor (this corresponds to a CV-based correction; see "Sizing
+Intuition" above). Then pick the smallest counter width whose maximum
+holds `mode_count`:
+
+| If mode_count fits in… | Use width | Bits per counter |
+|------------------------|-----------|------------------|
+| 1                      | B1        | 1                |
+| 3                      | B2        | 2                |
+| 15                     | B4        | 4                |
+| 255                    | U8        | 8                |
+| 65,535                 | U16       | 16               |
+| ~4 × 10⁹               | U32       | 32               |
+
+*Example:* `N = 100,000`, `slots = 80` → `mode_count ≈ 1,250`, with a
+×4 safety factor → `~5,000` → fits in **U16** (16 bits).
+
+**Step 5 — Total storage.**
+```
+bytes  =  slots × bits_per_counter / 8
+words  =  bytes / 8
+```
+Choose `Histogram<words>` (rounded up).
+
+*Example:* `80 × 16 / 8 = 160` bytes of counter data → `Histogram<20>`
+(20 × 64-bit words). Compare with the spec's default 160-bucket
+histogram of full-width 64-bit counters: 1,280 bytes for the same range
+and error — an **8× reduction**.
+
+**Quick sanity table** (from the recipe above):
+
+| Contrast | N        | Error | Octaves B | Scale K | Slots | Width | `Histogram<W>` |
+|----------|----------|-------|-----------|---------|-------|-------|----------------|
+| 100×     | 10,000   | 5%    | 7         | 3       | 56    | U16   | W = 14         |
+| 1,000×   | 100,000  | 5%    | 10        | 3       | 80    | U16   | W = 20         |
+| 1,000×   | 1,000,000| 2%    | 10        | 4       | 160   | U16   | W = 40         |
+| 10,000×  | 100,000  | 10%   | 14        | 2       | 56    | U16   | W = 14         |
+
+The recipe gives a steady-state provisioning size. The histogram begins
+at B1 width (8× more slots than the U16 steady state) and widens
+automatically as data accumulates, so it tolerates conservative sizing
+without runtime cost.
 
 ### Implementation Notes
 
