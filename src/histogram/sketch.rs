@@ -147,6 +147,56 @@ impl<const N: usize> Sketch<N> {
         Ok(self)
     }
 
+    /// Sets the fixed scale to the coarsest value whose worst-case
+    /// relative error does not exceed `target` — a DDSketch-style accuracy
+    /// knob.
+    ///
+    /// The relative-error bound at scale `s` is
+    /// `α(s) = (b - 1) / (b + 1)` with `b = 2^(2^-s)`, which decreases as
+    /// `s` increases. This picks the smallest (coarsest) scale with
+    /// `α(s) <= target`, maximizing the value range covered per word
+    /// before collapse while still guaranteeing the target error for every
+    /// retained bucket.
+    ///
+    /// Requires the `std` feature (uses floating-point `exp2`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScaleError::InvalidScale`] if `target` is not in the open
+    /// interval `(0, 1)`, or if no supported scale is fine enough to meet
+    /// it (i.e. `target` is below the finest table scale's `α`).
+    #[cfg(feature = "std")]
+    pub fn with_relative_error(mut self, target: f64) -> Result<Self, ScaleError> {
+        self.scale = Scale::new(Self::scale_for_relative_error(target)?)?;
+        Ok(self)
+    }
+
+    /// Smallest scale whose `α(s) <= target`, or an error if `target` is
+    /// out of range or finer than the table supports.
+    #[cfg(feature = "std")]
+    fn scale_for_relative_error(target: f64) -> Result<i32, ScaleError> {
+        if !(target > 0.0 && target < 1.0) {
+            return Err(ScaleError::InvalidScale);
+        }
+        let max = table_scale();
+        let mut s = crate::mapping::MIN_SCALE;
+        while s <= max {
+            // b = 2^(2^-s); α = (b - 1)/(b + 1), decreasing in s. For very
+            // negative s, b overflows to +∞ and α → 1.
+            let b = (-(s as f64)).exp2().exp2();
+            let alpha = if b.is_finite() {
+                (b - 1.0) / (b + 1.0)
+            } else {
+                1.0
+            };
+            if alpha <= target {
+                return Ok(s);
+            }
+            s += 1;
+        }
+        Err(ScaleError::InvalidScale)
+    }
+
     /// Sets the minimum (starting) counter width.
     #[inline]
     #[must_use]
@@ -1023,6 +1073,40 @@ mod tests {
         assert_eq!(s.min(), 1.5);
         assert_eq!(s.max(), 100.0);
         assert!((s.sum() - 104.2).abs() < 1e-9);
+    }
+
+    #[cfg(feature = "std")]
+    fn alpha_of(scale: i32) -> f64 {
+        let b = 2f64.powf(2f64.powi(-scale));
+        (b - 1.0) / (b + 1.0)
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn with_relative_error_picks_coarsest_qualifying_scale() {
+        // (target, expected scale): the coarsest scale whose α <= target.
+        for (target, want) in [(0.5, 0), (0.2, 1), (0.1, 2), (0.05, 3)] {
+            let s: Sketch<8> = Sketch::new().with_relative_error(target).unwrap();
+            assert_eq!(s.scale(), want, "target {target}");
+            assert!(alpha_of(want) <= target, "α({want}) must meet {target}");
+            assert!(
+                alpha_of(want - 1) > target,
+                "scale {} would also qualify, so {want} is not coarsest",
+                want - 1
+            );
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn with_relative_error_rejects_out_of_range() {
+        assert!(Sketch::<8>::new().with_relative_error(0.0).is_err());
+        assert!(Sketch::<8>::new().with_relative_error(1.0).is_err());
+        assert!(Sketch::<8>::new().with_relative_error(-0.1).is_err());
+        assert!(Sketch::<8>::new().with_relative_error(2.0).is_err());
+        assert!(Sketch::<8>::new().with_relative_error(f64::NAN).is_err());
+        // Finer than the compiled scale-8 table can represent.
+        assert!(Sketch::<8>::new().with_relative_error(1e-6).is_err());
     }
 
     #[test]
