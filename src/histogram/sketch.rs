@@ -278,6 +278,14 @@ impl<const N: usize> Sketch<N> {
         SketchView { sketch: self }
     }
 
+    /// Returns a contiguous read-only view of this sketch's buckets,
+    /// without going through [`view`](Self::view). Used by the PN view to
+    /// borrow each sub-sketch directly.
+    #[inline]
+    pub(crate) fn buckets(&self) -> SketchBucketView<'_, N> {
+        SketchBucketView { sketch: self }
+    }
+
     /// Slot index of the lowest slot in the window (the underflow slot
     /// once `collapsed`).
     #[inline]
@@ -889,9 +897,7 @@ impl<const N: usize> SketchView<'_, N> {
     /// Returns a contiguous read-only view of the positive buckets.
     #[inline]
     pub fn positive(&self) -> SketchBucketView<'_, N> {
-        SketchBucketView {
-            sketch: self.sketch,
-        }
+        self.sketch.buckets()
     }
 }
 
