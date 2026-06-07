@@ -703,7 +703,7 @@ mod pn;
 pub use pn::{HistogramPN, HistogramPNView};
 
 mod sketch;
-pub use sketch::Sketch;
+pub use sketch::{Sketch, SketchBucketView, SketchBucketsIter, SketchView};
 
 #[cfg(test)]
 mod tests;

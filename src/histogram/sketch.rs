@@ -25,6 +25,8 @@
 //! the OTel base-`2^(2^-scale)` bucket structure (so the result is still a
 //! valid OTel exponential histogram).
 
+use core::fmt;
+
 use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
 use crate::mapping::{table_scale, Scale, ScaleError};
 
@@ -89,6 +91,18 @@ impl<const N: usize> Clone for Sketch<N> {
 impl<const N: usize> Default for Sketch<N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<const N: usize> fmt::Debug for Sketch<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sketch")
+            .field("scale", &self.scale())
+            .field("width", &self.width)
+            .field("count", &self.stats.count)
+            .field("collapsed", &self.collapsed)
+            .field("underflow_count", &self.underflow_count())
+            .finish()
     }
 }
 
@@ -206,6 +220,12 @@ impl<const N: usize> Sketch<N> {
     #[inline]
     pub const fn buckets_empty(&self) -> bool {
         self.live_total == 0
+    }
+
+    /// Returns a read-only, OTel-export-shaped view of the sketch.
+    #[inline]
+    pub fn view(&self) -> SketchView<'_, N> {
+        SketchView { sketch: self }
     }
 
     /// Slot index of the lowest slot in the window (the underflow slot
@@ -724,6 +744,190 @@ impl<const N: usize> Sketch<N> {
         );
     }
 }
+
+/// Read-only, OpenTelemetry-export-shaped view of a [`Sketch`].
+///
+/// Created by [`Sketch::view`]. When [`collapsed`](Self::collapsed) is
+/// true the lowest positive bucket is the underflow placeholder;
+/// [`underflow_count`](Self::underflow_count) reports its mass so a
+/// consumer knows the rank below which the relative-error guarantee does
+/// not hold.
+///
+/// ```
+/// use otel_expohisto::Sketch;
+///
+/// let mut s: Sketch<16> = Sketch::new().with_scale(4).unwrap();
+/// for v in [1.0, 2.0, 2.0, 5.0] {
+///     s.update(v).unwrap();
+/// }
+///
+/// // Project onto the OTel ExponentialHistogram wire fields.
+/// let view = s.view();
+/// let scale = view.scale();
+/// let zero_count = view.zero_count();
+/// let pos = view.positive();
+/// let offset = pos.offset();
+/// let bucket_counts: Vec<u64> = pos.iter().collect();
+///
+/// assert_eq!(view.stats().count, 4);
+/// assert_eq!(bucket_counts.len(), pos.len() as usize);
+/// assert_eq!(bucket_counts.iter().sum::<u64>() + zero_count, 4);
+/// let _ = (scale, offset);
+/// ```
+#[derive(Debug)]
+pub struct SketchView<'a, const N: usize> {
+    sketch: &'a Sketch<N>,
+}
+
+impl<const N: usize> SketchView<'_, N> {
+    /// Returns the scale. Returns 0 when no non-zero value is recorded.
+    #[inline]
+    pub fn scale(&self) -> i32 {
+        if self.sketch.buckets_empty() {
+            0
+        } else {
+            self.sketch.scale()
+        }
+    }
+
+    /// Returns the aggregate statistics (count, sum, min, max). When no
+    /// value has been bucketed, min, max and sum are reported as 0.0.
+    #[inline]
+    pub fn stats(&self) -> Stats {
+        let s = self.sketch.stats;
+        if self.sketch.buckets_empty() {
+            Stats {
+                count: s.count,
+                sum: 0.0,
+                min: 0.0,
+                max: 0.0,
+            }
+        } else {
+            s
+        }
+    }
+
+    /// Returns the count of exactly-zero observations.
+    #[inline]
+    pub fn zero_count(&self) -> u64 {
+        self.sketch.stats.count - self.sketch.live_total
+    }
+
+    /// Returns true once the lowest positive bucket is the underflow
+    /// placeholder (the guarantee holds only for ranks above it).
+    #[inline]
+    pub fn collapsed(&self) -> bool {
+        self.sketch.collapsed
+    }
+
+    /// Returns the count held in the underflow placeholder (0 if not
+    /// collapsed). The guarantee holds for every quantile whose rank
+    /// exceeds `zero_count() + underflow_count()`.
+    #[inline]
+    pub fn underflow_count(&self) -> u64 {
+        self.sketch.underflow_count()
+    }
+
+    /// Returns a contiguous read-only view of the positive buckets.
+    #[inline]
+    pub fn positive(&self) -> SketchBucketView<'_, N> {
+        SketchBucketView {
+            sketch: self.sketch,
+        }
+    }
+}
+
+/// Contiguous read-only view of a [`Sketch`]'s positive buckets.
+///
+/// Iterates from the first to the last non-zero bucket inclusive,
+/// including any interior zero buckets, matching the OpenTelemetry
+/// `offset` + `bucket_counts` wire layout.
+#[derive(Debug)]
+pub struct SketchBucketView<'a, const N: usize> {
+    sketch: &'a Sketch<N>,
+}
+
+impl<const N: usize> SketchBucketView<'_, N> {
+    /// Bucket index of the first non-zero bucket (the OTel `offset`).
+    /// Returns 0 when empty.
+    #[inline]
+    pub fn offset(&self) -> i32 {
+        self.sketch.bucket_bounds().map_or(0, |(lo, _)| lo)
+    }
+
+    /// Number of buckets from the first to the last non-zero bucket
+    /// inclusive — the length of the `bucket_counts` array.
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.sketch
+            .bucket_bounds()
+            .map_or(0, |(lo, hi)| (hi - lo + 1) as u32)
+    }
+
+    /// Returns true when no positive bucket is in use.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.sketch.buckets_empty()
+    }
+
+    /// Returns the current counter width.
+    #[inline]
+    pub fn width(&self) -> Width {
+        self.sketch.width
+    }
+
+    /// Returns an iterator over the contiguous bucket counts, yielding
+    /// [`len`](Self::len) values starting at [`offset`](Self::offset).
+    #[inline]
+    pub fn iter(&self) -> SketchBucketsIter<'_, N> {
+        let (next, last) = self.sketch.bucket_bounds().unwrap_or((0, -1));
+        SketchBucketsIter {
+            sketch: self.sketch,
+            next,
+            last,
+        }
+    }
+}
+
+impl<'a, const N: usize> IntoIterator for &'a SketchBucketView<'a, N> {
+    type Item = u64;
+    type IntoIter = SketchBucketsIter<'a, N>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Iterator over contiguous [`Sketch`] bucket counts.
+#[derive(Debug)]
+pub struct SketchBucketsIter<'a, const N: usize> {
+    sketch: &'a Sketch<N>,
+    next: i32,
+    last: i32,
+}
+
+impl<const N: usize> Iterator for SketchBucketsIter<'_, N> {
+    type Item = u64;
+
+    #[inline]
+    fn next(&mut self) -> Option<u64> {
+        if self.next > self.last {
+            return None;
+        }
+        let c = self.sketch.count_at_slot(self.next);
+        self.next += 1;
+        Some(c)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = (self.last - self.next + 1).max(0) as usize;
+        (n, Some(n))
+    }
+}
+
+impl<const N: usize> ExactSizeIterator for SketchBucketsIter<'_, N> {}
 
 #[cfg(feature = "quantile")]
 impl<const N: usize> Sketch<N> {
@@ -1369,6 +1573,85 @@ mod tests {
         assert_eq!(layout(&ab), layout(&ba), "merge must be commutative");
         assert_eq!(ab.count(), 4000);
         assert_eq!(live_sum(&ab), 4000);
+    }
+
+    #[test]
+    fn view_empty() {
+        let s: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        let v = s.view();
+        assert_eq!(v.scale(), 0, "empty view reports scale 0");
+        assert_eq!(v.stats().count, 0);
+        assert_eq!(v.stats().min, 0.0);
+        assert_eq!(v.stats().max, 0.0);
+        assert_eq!(v.zero_count(), 0);
+        assert!(!v.collapsed());
+        assert_eq!(v.underflow_count(), 0);
+        let p = v.positive();
+        assert!(p.is_empty());
+        assert_eq!(p.offset(), 0);
+        assert_eq!(p.len(), 0);
+        assert_eq!(p.iter().count(), 0);
+    }
+
+    #[test]
+    fn view_basic_stats_and_zero_count() {
+        let mut s: Sketch<16> = Sketch::new().with_scale(4).unwrap();
+        s.update(0.0).unwrap();
+        s.update(0.0).unwrap();
+        s.update(1.5).unwrap();
+        s.update(2.7).unwrap();
+        let v = s.view();
+        assert_eq!(v.scale(), 4);
+        let st = v.stats();
+        assert_eq!(st.count, 4);
+        assert_eq!(st.min, 1.5);
+        assert_eq!(st.max, 2.7);
+        assert!((st.sum - 4.2).abs() < 1e-9);
+        assert_eq!(v.zero_count(), 2, "two exact zeros");
+        // The contiguous bucket counts cover only the non-zero observations.
+        let p = v.positive();
+        let summed: u64 = p.iter().sum();
+        assert_eq!(summed, 2, "two bucketed (non-zero) observations");
+        assert_eq!(p.len() as usize, p.iter().count());
+    }
+
+    #[test]
+    fn view_is_contiguous_with_interior_zeros() {
+        // Scale 0: each bucket is a power-of-two octave. 1.0 -> slot -1,
+        // 8.0 -> slot 2, so the export run is [-1 ..= 2] = [1, 0, 0, 1].
+        let mut s: Sketch<8> = Sketch::new().with_scale(0).unwrap();
+        s.update(1.0).unwrap();
+        s.update(8.0).unwrap();
+        let v = s.view();
+        let p = v.positive();
+        assert_eq!(p.offset(), -1);
+        assert_eq!(p.len(), 4);
+        let counts: std::vec::Vec<u64> = p.iter().collect();
+        assert_eq!(counts, std::vec![1, 0, 0, 1], "interior zeros preserved");
+        // IntoIterator over a reference yields the same sequence.
+        let via_into: std::vec::Vec<u64> = (&p).into_iter().collect();
+        assert_eq!(via_into, counts);
+    }
+
+    #[test]
+    fn view_collapsed_exposes_underflow_as_first_bucket() {
+        let scale = 4;
+        let mut s: Sketch<2> = Sketch::new().with_scale(scale).unwrap();
+        for _ in 0..3 {
+            s.update(1e6).unwrap();
+        }
+        s.update(1e-9).unwrap(); // far below: collapses into underflow
+        let v = s.view();
+        assert!(v.collapsed());
+        assert!(v.underflow_count() >= 1);
+        let p = v.positive();
+        // The first exported bucket is the underflow placeholder, and its
+        // count equals the reported underflow mass.
+        let first = p.iter().next().unwrap();
+        assert_eq!(first, v.underflow_count(), "offset bucket is the underflow");
+        // The whole export plus zeros accounts for every observation.
+        let summed: u64 = p.iter().sum();
+        assert_eq!(summed + v.zero_count(), v.stats().count);
     }
 
     /// Empirically verifies the DDSketch-style relative-error guarantee:
