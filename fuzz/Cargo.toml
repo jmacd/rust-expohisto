@@ -42,3 +42,8 @@ doc = false
 name = "sketch_oracle"
 path = "fuzz_targets/sketch_oracle.rs"
 doc = false
+
+[[bin]]
+name = "sketch_pn_oracle"
+path = "fuzz_targets/sketch_pn_oracle.rs"
+doc = false
