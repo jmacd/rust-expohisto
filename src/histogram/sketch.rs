@@ -37,9 +37,9 @@ enum Place {
     Done,
     /// A counter overflowed; widen to fit `total`, then retry.
     Widen(u64),
-    /// The value's word `widx` is above the window and does not fit;
-    /// slide the window up, then retry.
-    SlideUp(i32),
+    /// The value is above the window and does not fit; slide the window
+    /// up (anchoring at the triggering slot), then retry.
+    SlideUp,
 }
 
 /// A fixed-scale exponential histogram with DDSketch-style collapse-left
@@ -170,20 +170,26 @@ impl<const N: usize> Sketch<N> {
         }
     }
 
-    /// Returns the minimum observed value (0.0 if empty).
+    /// Returns the minimum observed value.
+    ///
+    /// Returns 0.0 when no value has been recorded, or when every
+    /// recorded value was zero (zeros are counted but not bucketed).
     #[inline]
     pub fn min(&self) -> f64 {
-        if self.stats.count == 0 {
+        if self.buckets_empty() {
             0.0
         } else {
             self.stats.min
         }
     }
 
-    /// Returns the maximum observed value (0.0 if empty).
+    /// Returns the maximum observed value.
+    ///
+    /// Returns 0.0 when no value has been recorded, or when every
+    /// recorded value was zero (zeros are counted but not bucketed).
     #[inline]
     pub fn max(&self) -> f64 {
-        if self.stats.count == 0 {
+        if self.buckets_empty() {
             0.0
         } else {
             self.stats.max
@@ -344,11 +350,10 @@ impl<const N: usize> Sketch<N> {
                 Place::Done => return,
                 Place::Widen(total) => {
                     let want = Width::from_max_value(total);
-                    self.collapse_and_repack(want, self.high_slot());
+                    self.collapse_and_repack(want, slot);
                 }
-                Place::SlideUp(widx) => {
-                    let top = self.width.word_to_slot_index(widx + 1) - 1;
-                    self.collapse_and_repack(self.width, top);
+                Place::SlideUp => {
+                    self.collapse_and_repack(self.width, slot);
                 }
             }
         }
@@ -376,7 +381,7 @@ impl<const N: usize> Sketch<N> {
                 self.word_end = widx;
                 return self.add_or_widen(slot, incr);
             }
-            return Place::SlideUp(widx);
+            return Place::SlideUp;
         }
 
         // widx < word_start
@@ -405,17 +410,38 @@ impl<const N: usize> Sketch<N> {
         }
     }
 
-    /// Rebuilds the window keeping the top slots ending at `top_slot`,
-    /// folding everything below the retained range into the lowest slot.
+    /// Rebuilds the window keeping the top slots, folding everything below
+    /// the retained range into the lowest slot.
+    ///
+    /// The window is anchored at the highest non-zero bucket (or
+    /// `must_include`, whichever is greater) — never at a trailing empty
+    /// slot — so that widening, which shrinks the slot capacity, can never
+    /// push live data out of the window. `must_include` is the slot of the
+    /// value that triggered the rebuild and that the retry will write
+    /// (above the window for a slide, at/below it for a counter overflow).
     ///
     /// `want_width` is the minimum output width (widened further if the
     /// folded sum or a kept counter requires it). The scale is unchanged.
-    fn collapse_and_repack(&mut self, want_width: Width, top_slot: i32) {
+    fn collapse_and_repack(&mut self, want_width: Width, must_include: i32) {
         let old_w = self.width;
         let old_base = self.word_base;
         let old_lo = old_w.word_to_slot_index(self.word_start);
         let old_hi = old_w.word_to_slot_index(self.word_end + 1) - 1;
         let clone = self.data;
+
+        // Anchor at the real top: the highest non-zero bucket, or the
+        // triggering value if it sits above the current data.
+        let mut real_hi = i32::MIN;
+        {
+            let mut s = old_lo;
+            while s <= old_hi {
+                if Self::read_bucket(&clone, old_w, old_base, s) != 0 {
+                    real_hi = s;
+                }
+                s += 1;
+            }
+        }
+        let top_slot = must_include.max(real_hi);
 
         // Pick the output width and window together: widening shrinks
         // capacity, which can fold more mass, which can require more
@@ -515,6 +541,187 @@ impl<const N: usize> Sketch<N> {
             }
         });
         first
+    }
+
+    /// Reads the count at an absolute bucket `slot`, returning 0 when the
+    /// slot lies outside the live window. Safe for arbitrary `slot` (it
+    /// never reads a wrapped/stale physical word).
+    #[inline]
+    fn count_at_slot(&self, slot: i32) -> u64 {
+        if self.buckets_empty() || slot < self.low_slot() || slot > self.high_slot() {
+            return 0;
+        }
+        Self::read_bucket(&self.data, self.width, self.word_base, slot)
+    }
+
+    /// Returns `(lowest, highest)` non-zero bucket slot, or `None` if no
+    /// non-zero bucket exists.
+    fn bucket_bounds(&self) -> Option<(i32, i32)> {
+        let mut lo = None;
+        let mut hi = i32::MIN;
+        self.for_each_bucket(|s, _| {
+            if lo.is_none() {
+                lo = Some(s);
+            }
+            hi = s;
+        });
+        lo.map(|l| (l, hi))
+    }
+
+    /// Underflow floor (lowest accurate-or-underflow slot) when collapsed.
+    ///
+    /// `None` when not collapsed. When collapsed this is the word-aligned
+    /// underflow placeholder slot; any merge target must keep its own
+    /// underflow at or below this slot so inaccurate mass never re-enters
+    /// the accurate window.
+    #[inline]
+    fn collapse_floor(&self) -> Option<i32> {
+        if self.collapsed && !self.buckets_empty() {
+            Some(self.low_slot())
+        } else {
+            None
+        }
+    }
+}
+
+impl<const N: usize> Sketch<N> {
+    /// Merges another sketch into this one.
+    ///
+    /// Both sketches share the bucket structure of a fixed scale, so the
+    /// union of their buckets is taken at that scale and, if it does not
+    /// fit in `N` words, collapsed left exactly as during recording. The
+    /// relative-error guarantee is preserved for every quantile above the
+    /// combined underflow mass. The source may have a different pool size
+    /// `M`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ScaleMismatch`] if the two sketches were
+    /// constructed at different scales (a fixed-scale sketch cannot
+    /// rescale to reconcile them). Returns [`Error::Overflow`] if the
+    /// combined total count would exceed `u64::MAX`.
+    pub fn merge_from<const M: usize>(&mut self, other: &Sketch<M>) -> Result<(), Error> {
+        if other.stats.count == 0 {
+            return Ok(());
+        }
+        if self.scale() != other.scale() {
+            return Err(Error::ScaleMismatch);
+        }
+
+        let new_count = self
+            .stats
+            .count
+            .checked_add(other.stats.count)
+            .ok_or(Error::Overflow)?;
+
+        if !other.buckets_empty() {
+            self.merge_repack(other);
+        }
+
+        self.stats.sum += other.stats.sum;
+        self.stats.min = self.stats.min.min(other.stats.min);
+        self.stats.max = self.stats.max.max(other.stats.max);
+        self.stats.count = new_count;
+        Ok(())
+    }
+
+    /// Rebuilds the window from the union of `self` and `other` buckets,
+    /// keeping the top slots and folding the rest into the underflow slot.
+    ///
+    /// Precondition: `other` has at least one non-zero bucket and shares
+    /// `self`'s scale. The underflow floor is raised to cover any
+    /// collapsed input's underflow slot, so the lowest slot of the result
+    /// is always the (word-aligned) underflow placeholder.
+    fn merge_repack<const M: usize>(&mut self, other: &Sketch<M>) {
+        let (other_lo, other_hi) = other.bucket_bounds().expect("other has a non-zero bucket");
+        let (union_lo, top_slot) = match self.bucket_bounds() {
+            Some((slo, shi)) => (slo.min(other_lo), shi.max(other_hi)),
+            None => (other_lo, other_hi),
+        };
+
+        // A collapsed input's underflow mass must stay below the accurate
+        // window. Its slot is word-aligned at any width >= the input's
+        // width, hence at the merge width.
+        let self_floor = self.collapse_floor();
+        let other_floor = other.collapse_floor();
+
+        let old_self = self.clone();
+
+        // Pick output width and window together (fixed point, bounded by
+        // U64). Widening shrinks capacity, folding more mass, which can
+        // require still more width. The window is anchored at the top word
+        // and floored at any collapsed input's underflow word.
+        let mut w = self.width.max(other.width);
+        let low;
+        let new_start;
+        let new_end;
+        let folded_below;
+        loop {
+            let we = w.slot_to_word_index(top_slot);
+            let mut ws = we - (N as i32 - 1);
+            if let Some(f) = self_floor {
+                ws = ws.max(w.slot_to_word_index(f));
+            }
+            if let Some(f) = other_floor {
+                ws = ws.max(w.slot_to_word_index(f));
+            }
+            let lw = w.word_to_slot_index(ws);
+
+            let mut at_or_below = 0u64;
+            let mut above_max = 0u64;
+            let mut below = 0u64;
+            let mut s = union_lo;
+            while s <= top_slot {
+                let c = old_self.count_at_slot(s) + other.count_at_slot(s);
+                if c != 0 {
+                    if s <= lw {
+                        at_or_below += c;
+                        if s < lw {
+                            below += c;
+                        }
+                    } else if c > above_max {
+                        above_max = c;
+                    }
+                }
+                s += 1;
+            }
+
+            let need = w
+                .max(Width::from_max_value(at_or_below))
+                .max(Width::from_max_value(above_max));
+            if need == w {
+                low = lw;
+                new_start = ws;
+                new_end = we;
+                folded_below = below;
+                break;
+            }
+            w = need;
+        }
+
+        // Scatter both sources into a fresh zeroed buffer.
+        self.data = [0u64; N];
+        let new_base = new_start;
+        let mut s = union_lo;
+        while s <= top_slot {
+            let c = old_self.count_at_slot(s) + other.count_at_slot(s);
+            if c != 0 {
+                let dest = if s < low { low } else { s };
+                Self::write_add(&mut self.data, w, new_base, dest, c);
+            }
+            s += 1;
+        }
+
+        self.width = w;
+        self.word_base = new_base;
+        self.word_start = new_start;
+        self.word_end = new_end;
+        self.live_total = old_self.live_total + other.live_total;
+        self.collapsed = self.collapsed || other.collapsed || folded_below > 0;
+        debug_assert!(
+            self.word_end - self.word_start < N as i32,
+            "merge produced a window wider than N words"
+        );
     }
 }
 
@@ -863,6 +1070,307 @@ mod tests {
         assert!(lo <= maxv && maxv <= hi, "max {maxv} not in top bucket [{lo},{hi}]");
     }
 
+    /// Regression: a collapse must anchor at the real highest non-zero
+    /// bucket, never a trailing empty word left by an earlier slide.
+    /// Otherwise a counter-overflow widen on a window with empty high
+    /// words drops the entire live range into the underflow slot — a bug
+    /// that only surfaces for unsorted input. The final state is fully
+    /// determined by the multiset, so shuffled and sorted feeds of the
+    /// same values must agree exactly.
+    #[test]
+    fn collapse_is_order_independent() {
+        let scale = 4;
+        let mut state: u64 = 0xA5A5_1234_DEAD_0001;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        // Wide spread (30 octaves) with many buckets sharing values, so a
+        // tiny pool both collapses and widens its counters.
+        let mut values = std::vec::Vec::with_capacity(60_000);
+        for _ in 0..60_000 {
+            let r = next();
+            let exp = ((r >> 40) % 30) as i32;
+            let frac = 1.0 + ((r >> 8) & 0xffff) as f64 / 65536.0;
+            values.push(frac * 2f64.powi(exp));
+        }
+
+        let mut shuffled: Sketch<16> = Sketch::new().with_scale(scale).unwrap();
+        for &v in &values {
+            shuffled.update(v).unwrap();
+        }
+
+        let mut sorted_vals = values.clone();
+        sorted_vals.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let mut sorted: Sketch<16> = Sketch::new().with_scale(scale).unwrap();
+        for &v in &sorted_vals {
+            sorted.update(v).unwrap();
+        }
+
+        assert!(shuffled.collapsed(), "30 octaves must collapse N=16");
+        assert_eq!(shuffled.count(), sorted.count());
+        assert_eq!(
+            shuffled.width(),
+            sorted.width(),
+            "width is order-independent"
+        );
+        assert_eq!(
+            shuffled.underflow_count(),
+            sorted.underflow_count(),
+            "underflow is order-independent"
+        );
+        assert_eq!(
+            layout(&shuffled),
+            layout(&sorted),
+            "bucket layout is order-independent"
+        );
+        // The bug's symptom was everything collapsing into one slot.
+        assert!(
+            layout(&shuffled).len() > 1,
+            "accurate window degenerated to a single slot"
+        );
+    }
+
+    fn live_sum<const M: usize>(s: &Sketch<M>) -> u64 {
+        let mut t = 0u64;
+        s.for_each_bucket(|_, c| t += c);
+        t
+    }
+
+    /// Collects `(slot, count)` pairs for every non-zero bucket.
+    fn layout<const M: usize>(s: &Sketch<M>) -> std::vec::Vec<(i32, u64)> {
+        let mut v = std::vec::Vec::new();
+        s.for_each_bucket(|idx, c| v.push((idx, c)));
+        v
+    }
+
+    #[test]
+    fn merge_both_empty() {
+        let mut a: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        let b: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        a.merge_from(&b).unwrap();
+        assert_eq!(a.count(), 0);
+        assert!(a.buckets_empty());
+    }
+
+    #[test]
+    fn merge_from_empty_source() {
+        let mut a: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        a.update(1.0).unwrap();
+        a.update(2.0).unwrap();
+        let b: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        let before = layout(&a);
+        a.merge_from(&b).unwrap();
+        assert_eq!(a.count(), 2);
+        assert_eq!(layout(&a), before, "empty source must not change buckets");
+    }
+
+    #[test]
+    fn merge_into_empty_target() {
+        let mut a: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        let mut b: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        for v in [1.0, 2.0, 4.0, 8.0] {
+            b.update(v).unwrap();
+        }
+        a.merge_from(&b).unwrap();
+        assert_eq!(a.count(), 4);
+        assert_eq!(a.min(), 1.0);
+        assert_eq!(a.max(), 8.0);
+        assert_eq!(live_sum(&a), 4);
+        assert_eq!(layout(&a), layout(&b), "merge into empty mirrors source");
+    }
+
+    #[test]
+    fn merge_scale_mismatch_errs() {
+        let mut a: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        let mut b: Sketch<8> = Sketch::new().with_scale(5).unwrap();
+        a.update(1.0).unwrap();
+        b.update(1.0).unwrap();
+        assert_eq!(a.merge_from(&b), Err(Error::ScaleMismatch));
+        // A mismatched empty source is a no-op (count short-circuit).
+        let c: Sketch<8> = Sketch::new().with_scale(7).unwrap();
+        assert_eq!(a.merge_from(&c), Ok(()));
+    }
+
+    #[test]
+    fn merge_disjoint_no_collapse_is_exact() {
+        // Big pool, narrow range: the union fits, so the merged result
+        // must equal one sketch fed all values.
+        let scale = 4;
+        let mut a: Sketch<64> = Sketch::new().with_scale(scale).unwrap();
+        let mut b: Sketch<64> = Sketch::new().with_scale(scale).unwrap();
+        let mut all: Sketch<64> = Sketch::new().with_scale(scale).unwrap();
+        for i in 1..=20 {
+            a.update(i as f64).unwrap();
+            all.update(i as f64).unwrap();
+        }
+        for i in 21..=40 {
+            b.update(i as f64).unwrap();
+            all.update(i as f64).unwrap();
+        }
+        a.merge_from(&b).unwrap();
+        assert!(!a.collapsed());
+        assert_eq!(a.count(), 40);
+        assert_eq!(a.min(), 1.0);
+        assert_eq!(a.max(), 40.0);
+        assert_eq!(layout(&a), layout(&all), "disjoint merge equals single-feed");
+    }
+
+    #[test]
+    fn merge_different_pool_sizes_preserves_count() {
+        let scale = 6;
+        let mut a: Sketch<8> = Sketch::new().with_scale(scale).unwrap();
+        let mut b: Sketch<16> = Sketch::new().with_scale(scale).unwrap();
+        let mut total = 0u64;
+        for i in 1..=300 {
+            a.update(i as f64).unwrap();
+            total += 1;
+        }
+        for i in 1..=300 {
+            b.update((i as f64) * 0.5).unwrap();
+            total += 1;
+        }
+        a.merge_from(&b).unwrap();
+        assert_eq!(a.count(), total);
+        assert_eq!(live_sum(&a), total, "no counts lost across pool sizes");
+        assert_eq!(a.scale(), scale);
+        // Top bucket still brackets the global max (150).
+        assert_eq!(a.max(), 300.0);
+        let mut top = None;
+        a.for_each_bucket(|idx, _| top = Some(idx));
+        let top = top.unwrap();
+        let lo = bucket_lower(scale, top);
+        let hi = bucket_lower(scale, top + 1);
+        assert!(lo <= 300.0 && 300.0 <= hi);
+    }
+
+    #[test]
+    fn merge_with_zeros() {
+        let mut a: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        let mut b: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        a.update(5.0).unwrap();
+        for _ in 0..7 {
+            b.update(0.0).unwrap();
+        }
+        a.merge_from(&b).unwrap();
+        // Zeros add to count but never to buckets.
+        assert_eq!(a.count(), 8);
+        assert_eq!(live_sum(&a), 1);
+        assert_eq!(a.underflow_count(), 0);
+        assert_eq!(a.max(), 5.0);
+        assert_eq!(a.min(), 5.0);
+
+        // Merging an only-zeros sketch into an empty one yields min/max 0.
+        let mut e: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        let mut z: Sketch<8> = Sketch::new().with_scale(4).unwrap();
+        z.update(0.0).unwrap();
+        e.merge_from(&z).unwrap();
+        assert_eq!(e.count(), 1);
+        assert!(e.buckets_empty());
+        assert_eq!(e.min(), 0.0);
+        assert_eq!(e.max(), 0.0);
+    }
+
+    #[test]
+    fn merge_widens_for_combined_counts() {
+        // Both sketches hammer the same value; individually each fits a
+        // narrow counter, but the merged total forces a wider one.
+        let scale = 6;
+        let mut a: Sketch<8> = Sketch::new().with_scale(scale).unwrap();
+        let mut b: Sketch<8> = Sketch::new().with_scale(scale).unwrap();
+        for _ in 0..200 {
+            a.update(42.0).unwrap();
+            b.update(42.0).unwrap();
+        }
+        assert!(a.width() <= Width::U8, "200 fits a byte counter");
+        a.merge_from(&b).unwrap();
+        assert_eq!(a.count(), 400);
+        assert_eq!(live_sum(&a), 400);
+        assert!(a.width() >= Width::U16, "400 needs a wider counter");
+        // All mass in a single bucket.
+        let l = layout(&a);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].1, 400);
+    }
+
+    #[test]
+    fn merge_collapsed_floor_prevents_pollution() {
+        // `a` is collapsed with its window high (around 1e6). `b` holds
+        // only small values far below `a`'s window. Merging must fold all
+        // of `b` into the underflow rather than create accurate buckets
+        // beneath the established underflow floor.
+        let scale = 4;
+        let mut a: Sketch<4> = Sketch::new().with_scale(scale).unwrap();
+        for _ in 0..5 {
+            a.update(1e6).unwrap();
+        }
+        a.update(1e-6).unwrap(); // far below: forces collapse, underflow = 1
+        assert!(a.collapsed());
+        assert_eq!(a.underflow_count(), 1);
+        assert_eq!(live_sum(&a), 6);
+
+        let mut b: Sketch<4> = Sketch::new().with_scale(scale).unwrap();
+        for v in [1e-5, 1e-4, 1e-3, 1e-2] {
+            b.update(v).unwrap(); // all far below a's window
+        }
+        assert!(!b.collapsed());
+
+        a.merge_from(&b).unwrap();
+        assert!(a.collapsed());
+        assert_eq!(a.count(), 10);
+        assert_eq!(live_sum(&a), 10, "no bucketed counts lost");
+        assert_eq!(a.max(), 1e6);
+        // The original underflow (1) plus all four of b folded in.
+        assert_eq!(a.underflow_count(), 5);
+        // No accurate bucket sits below the underflow floor: the only
+        // non-underflow mass is the 1e6 peak (count 5).
+        let floor = a.offset().unwrap();
+        let mut accurate = 0u64;
+        a.for_each_bucket(|idx, c| {
+            if idx > floor {
+                accurate += c;
+            }
+        });
+        assert_eq!(accurate, 5, "only the 1e6 peak stays accurate");
+    }
+
+    #[test]
+    fn merge_is_commutative_same_pool() {
+        // Build two structurally different sketches, then check that
+        // a∪b and b∪a yield identical bucket layouts and state.
+        let scale = 5;
+        let mut a: Sketch<8> = Sketch::new().with_scale(scale).unwrap();
+        let mut b: Sketch<8> = Sketch::new().with_scale(scale).unwrap();
+        let mut x: u64 = 0xDEAD_BEEF;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+            x
+        };
+        for _ in 0..2000 {
+            let e = ((next() >> 40) % 80) as i32 - 30;
+            a.update(2f64.powi(e)).unwrap();
+        }
+        for _ in 0..2000 {
+            let e = ((next() >> 40) % 80) as i32 - 50;
+            b.update(2f64.powi(e)).unwrap();
+        }
+
+        let mut ab = a.clone();
+        ab.merge_from(&b).unwrap();
+        let mut ba = b.clone();
+        ba.merge_from(&a).unwrap();
+
+        assert_eq!(ab.count(), ba.count());
+        assert_eq!(ab.width(), ba.width());
+        assert_eq!(ab.collapsed(), ba.collapsed());
+        assert_eq!(ab.underflow_count(), ba.underflow_count());
+        assert_eq!(layout(&ab), layout(&ba), "merge must be commutative");
+        assert_eq!(ab.count(), 4000);
+        assert_eq!(live_sum(&ab), 4000);
+    }
+
     /// Empirically verifies the DDSketch-style relative-error guarantee:
     /// for every quantile whose true value lies above the underflow
     /// placeholder, the estimate is within `α` of the brute-force truth.
@@ -960,6 +1468,71 @@ mod tests {
         assert!(!s.collapsed(), "bounded range must not collapse");
         assert_eq!(s.underflow_count(), 0);
         check_guarantee(&s, &mut raw, alpha(scale));
+    }
+
+    /// The guarantee must survive a merge: split a wide, collapsing
+    /// distribution across two sketches, merge them, and verify the
+    /// α-bound holds for every quantile above the combined underflow.
+    #[cfg(feature = "quantile")]
+    #[test]
+    fn merge_preserves_guarantee_under_collapse() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Uniform};
+
+        let scale = 4;
+        let mut a: Sketch<16> = Sketch::new().with_scale(scale).unwrap();
+        let mut b: Sketch<16> = Sketch::new().with_scale(scale).unwrap();
+        let mut rng = StdRng::seed_from_u64(0x5EED_1234);
+        // Two wide, independently-drawn spreads over the same support.
+        let da = Uniform::new(0.0f64, 24.0);
+        let db = Uniform::new(0.0f64, 24.0);
+        let mut raw = Vec::with_capacity(200_000);
+        for _ in 0..100_000 {
+            let va = 2f64.powf(da.sample(&mut rng));
+            let vb = 2f64.powf(db.sample(&mut rng));
+            a.update(va).unwrap();
+            b.update(vb).unwrap();
+            raw.push(va);
+            raw.push(vb);
+        }
+        assert!(a.collapsed() && b.collapsed(), "both sides must collapse");
+
+        a.merge_from(&b).unwrap();
+        assert_eq!(a.count(), 200_000);
+        assert_eq!(live_sum(&a), 200_000, "merge lost counts");
+        assert!(a.collapsed());
+        check_guarantee(&a, &mut raw, alpha(scale));
+    }
+
+    /// Merging into a large pool from a bounded spread keeps the entire
+    /// distribution accurate (no collapse) and exact in count.
+    #[cfg(feature = "quantile")]
+    #[test]
+    fn merge_preserves_guarantee_without_collapse() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Uniform};
+
+        let scale = 4;
+        let mut a: Sketch<64> = Sketch::new().with_scale(scale).unwrap();
+        let mut b: Sketch<32> = Sketch::new().with_scale(scale).unwrap();
+        let mut rng = StdRng::seed_from_u64(0xABCD_4321);
+        let dist = Uniform::new(1.0f64, 8.0);
+        let mut raw = Vec::with_capacity(120_000);
+        for _ in 0..60_000 {
+            let va = dist.sample(&mut rng);
+            let vb = dist.sample(&mut rng);
+            a.update(va).unwrap();
+            b.update(vb).unwrap();
+            raw.push(va);
+            raw.push(vb);
+        }
+        a.merge_from(&b).unwrap();
+        assert!(!a.collapsed(), "bounded merge must not collapse");
+        assert_eq!(a.underflow_count(), 0);
+        assert_eq!(a.count(), 120_000);
+        check_guarantee(&a, &mut raw, alpha(scale));
     }
 
     /// The optimal representative must beat the naive lower-boundary
