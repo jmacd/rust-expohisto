@@ -461,8 +461,16 @@ impl<const N: usize> Sketch<N> {
             return self.add_or_widen(slot, incr);
         }
 
-        // Too far below the top to keep accurately: fold into the lowest
-        // slot, which becomes the underflow placeholder.
+        // Too far below the top to keep accurately. The value belongs in
+        // the underflow placeholder, which must sit at the true floor —
+        // the lowest slot of a full N-word window. If the window has not
+        // yet grown to N words, `low_slot()` is above the true floor, so
+        // re-anchor to N words first (collapse_and_repack, via SlideUp);
+        // a later width refinement must not strand this mass inside the
+        // accurate window. Once the window is full, fold into the floor.
+        if self.word_end - self.word_start + 1 < cap_words {
+            return Place::SlideUp;
+        }
         self.collapsed = true;
         self.add_or_widen(self.low_slot(), incr)
     }
@@ -1419,6 +1427,36 @@ mod tests {
             layout(&shuffled).len() > 1,
             "accurate window degenerated to a single slot"
         );
+    }
+
+    /// Regression for a fuzzer-found bug: a far-below value first folded
+    /// while the window was a single *coarse* word (initial width `B2`,
+    /// from an `incr >= 2` first insert) was stranded inside the accurate
+    /// window once later counter widening refined the floor. The fold must
+    /// target the true floor of a full `N`-word window, so the far value's
+    /// entire mass ends up in the underflow placeholder.
+    #[test]
+    fn underflow_not_stranded_after_sub_n_window_fold() {
+        let scale = 7;
+        let v0 = f64::from_bits(0x0300_0000_0000_0000); // normal: the max
+        let v1 = f64::from_bits(0x0000_0000_0003_2600); // subnormal: far below
+        let mut s: Sketch<16> = Sketch::new().with_scale(scale).unwrap();
+        // v0 first (incr 2 starts width at B2, a 1-word coarse window);
+        // v1 then folds. Growing increments force widening afterwards.
+        for incr in [2u64, 16, 512, 16384] {
+            s.record_incr(v0, incr).unwrap();
+            s.record_incr(v1, incr).unwrap();
+        }
+        let each = 2 + 16 + 512 + 16384;
+        assert!(s.collapsed());
+        assert_eq!(s.count(), 2 * each);
+        assert_eq!(live_sum(&s), 2 * each, "no counts lost");
+        // Exactly two non-zero buckets: the underflow (all of v1) and v0;
+        // no inaccurate mass stranded between them.
+        let buckets = layout(&s);
+        assert_eq!(buckets.len(), 2, "stray underflow mass: {buckets:?}");
+        assert_eq!(s.underflow_count(), each, "v1 wholly in underflow");
+        assert_eq!(buckets[1].1, each, "v0 stays accurate");
     }
 
     fn live_sum<const M: usize>(s: &Sketch<M>) -> u64 {
