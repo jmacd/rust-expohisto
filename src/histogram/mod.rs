@@ -697,5 +697,8 @@ const _: () = _assert_send_sync::<HistogramNN<2>>();
 mod pn;
 pub use pn::{HistogramPN, HistogramPNView};
 
+mod sketch;
+pub use sketch::Sketch;
+
 #[cfg(test)]
 mod tests;
