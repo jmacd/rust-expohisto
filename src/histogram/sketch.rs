@@ -59,11 +59,20 @@ pub struct Sketch<const N: usize> {
     word_start: i32,
     word_end: i32,
 
-    /// True once the lowest retained slot has absorbed folded mass and is
-    /// therefore an inaccurate underflow placeholder.
-    collapsed: bool,
+    /// Mass that has been collapsed off the low end of the window. Stored
+    /// as a dedicated `u64` side counter rather than folded into the
+    /// lowest bucket, so the accurate buckets' counter [`Width`] is driven
+    /// only by their own counts (not by the — often dominant — underflow
+    /// mass). `underflow > 0` is exactly the collapsed condition.
+    ///
+    /// Invariant: `underflow` equals the total mass whose bucket index is
+    /// strictly below the window floor [`low_slot`](Self::low_slot). The
+    /// window floor only ever rises (the counter width only grows and the
+    /// top only grows), so once mass is collapsed it stays collapsed.
+    underflow: u64,
 
-    /// Sum of all bucket counts (excludes zero observations).
+    /// Sum of all bucketed counts (accurate buckets plus `underflow`;
+    /// excludes zero observations).
     live_total: u64,
 
     stats: Stats,
@@ -80,7 +89,7 @@ impl<const N: usize> Clone for Sketch<N> {
             word_base: self.word_base,
             word_start: self.word_start,
             word_end: self.word_end,
-            collapsed: self.collapsed,
+            underflow: self.underflow,
             live_total: self.live_total,
             stats: self.stats,
             data: self.data,
@@ -100,8 +109,8 @@ impl<const N: usize> fmt::Debug for Sketch<N> {
             .field("scale", &self.scale())
             .field("width", &self.width)
             .field("count", &self.stats.count)
-            .field("collapsed", &self.collapsed)
-            .field("underflow_count", &self.underflow_count())
+            .field("collapsed", &self.collapsed())
+            .field("underflow_count", &self.underflow)
             .finish()
     }
 }
@@ -125,7 +134,7 @@ impl<const N: usize> Sketch<N> {
             word_base: 0,
             word_start: 0,
             word_end: 0,
-            collapsed: false,
+            underflow: 0,
             live_total: 0,
             stats: Stats::EMPTY,
             data: [0u64; N],
@@ -260,10 +269,12 @@ impl<const N: usize> Sketch<N> {
         }
     }
 
-    /// Returns true once the lowest slot is an underflow placeholder.
+    /// Returns true once the low end of the distribution has collapsed
+    /// into the underflow side counter. Equivalent to
+    /// `underflow_count() > 0`.
     #[inline]
     pub const fn collapsed(&self) -> bool {
-        self.collapsed
+        self.underflow > 0
     }
 
     /// Returns true if no non-zero values have been bucketed.
@@ -286,8 +297,9 @@ impl<const N: usize> Sketch<N> {
         SketchBucketView { sketch: self }
     }
 
-    /// Slot index of the lowest slot in the window (the underflow slot
-    /// once `collapsed`).
+    /// Slot index of the lowest slot in the window — the floor. Mass below
+    /// this index lives in the [`underflow`](Self::underflow) counter and
+    /// is reported, at export time, as part of this slot.
     #[inline]
     fn low_slot(&self) -> i32 {
         self.width.word_to_slot_index(self.word_start)
@@ -299,14 +311,16 @@ impl<const N: usize> Sketch<N> {
         self.width.word_to_slot_index(self.word_end + 1) - 1
     }
 
-    /// Count held in the underflow placeholder (0 if not collapsed).
+    /// Count held in the underflow side counter (0 if not collapsed).
+    ///
+    /// This is the mass whose bucket index is strictly below the window
+    /// floor. At export it is folded into the lowest reported bucket, so a
+    /// consumer that wants the OTel-compatible counts uses
+    /// [`view`](Self::view); a consumer that wants to know how much of the
+    /// lowest bucket is the inaccurate placeholder reads this.
     #[inline]
     pub fn underflow_count(&self) -> u64 {
-        if self.collapsed {
-            Self::read_bucket(&self.data, self.width, self.word_base, self.low_slot())
-        } else {
-            0
-        }
+        self.underflow
     }
 
     /// Records a single observation.
@@ -443,12 +457,6 @@ impl<const N: usize> Sketch<N> {
         let widx = self.width.slot_to_word_index(slot);
         let cap_words = N as i32;
 
-        // Already collapsed and the value is at or below the underflow
-        // placeholder: fold it in.
-        if self.collapsed && slot <= self.low_slot() {
-            return self.add_or_widen(self.low_slot(), incr);
-        }
-
         if widx >= self.word_start && widx <= self.word_end {
             return self.add_or_widen(slot, incr);
         }
@@ -462,25 +470,34 @@ impl<const N: usize> Sketch<N> {
             return Place::SlideUp;
         }
 
-        // widx < word_start
+        // widx < word_start: extend the window down while it still fits in
+        // N words (maximizing accurate range before collapsing). Once the
+        // window is full (only possible after a prior collapse), this
+        // branch is never taken, so the floor only ever rises.
         if self.word_end - widx < cap_words {
             self.zero_fill(widx, self.word_start - 1);
             self.word_start = widx;
             return self.add_or_widen(slot, incr);
         }
 
-        // Too far below the top to keep accurately. The value belongs in
-        // the underflow placeholder, which must sit at the true floor —
-        // the lowest slot of a full N-word window. If the window has not
-        // yet grown to N words, `low_slot()` is above the true floor, so
-        // re-anchor to N words first (collapse_and_repack, via SlideUp);
-        // a later width refinement must not strand this mass inside the
-        // accurate window. Once the window is full, fold into the floor.
+        // Beyond N words below the top: this value cannot be kept
+        // accurately, so it joins the underflow side counter — an O(1)
+        // `u64` add that never widens the accurate buckets.
+        //
+        // First, if the window is not yet the full N words, expand it down
+        // to the canonical floor (`word_end - (N - 1)`). This only happens
+        // on the first underflow and makes the floor a pure function of
+        // the top word and width, so two sketches with the same top and
+        // width always share a floor — which keeps `merge_from`
+        // commutative and the export offset canonical.
         if self.word_end - self.word_start + 1 < cap_words {
-            return Place::SlideUp;
+            let new_start = self.word_end - (cap_words - 1);
+            self.zero_fill(new_start, self.word_start - 1);
+            self.word_start = new_start;
         }
-        self.collapsed = true;
-        self.add_or_widen(self.low_slot(), incr)
+        self.underflow += incr;
+        self.live_total += incr;
+        Place::Done
     }
 
     /// Adds to a slot, updating `live_total`, or returns `Widen` on
@@ -497,17 +514,20 @@ impl<const N: usize> Sketch<N> {
     }
 
     /// Rebuilds the window keeping the top slots, folding everything below
-    /// the retained range into the lowest slot.
+    /// the retained range into the [`underflow`](Self::underflow) side
+    /// counter.
     ///
     /// The window is anchored at the highest non-zero bucket (or
-    /// `must_include`, whichever is greater) — never at a trailing empty
-    /// slot — so that widening, which shrinks the slot capacity, can never
-    /// push live data out of the window. `must_include` is the slot of the
-    /// value that triggered the rebuild and that the retry will write
-    /// (above the window for a slide, at/below it for a counter overflow).
+    /// `must_include`, whichever is greater) — never a trailing empty slot
+    /// — so widening, which shrinks the slot capacity, can never push live
+    /// data out of the window. `must_include` is the slot of the value that
+    /// triggered the rebuild and that the retry will write (above the
+    /// window for a slide, at/below it for a counter overflow).
     ///
-    /// `want_width` is the minimum output width (widened further if the
-    /// folded sum or a kept counter requires it). The scale is unchanged.
+    /// Because the underflow is a side counter, folding mass off the low
+    /// end does **not** affect the counter width: the width is driven only
+    /// by the retained accurate buckets. The width only grows (sticky), so
+    /// the floor only rises and collapsed mass stays collapsed.
     fn collapse_and_repack(&mut self, want_width: Width, must_include: i32) {
         let old_w = self.width;
         let old_base = self.word_base;
@@ -529,79 +549,49 @@ impl<const N: usize> Sketch<N> {
         }
         let top_slot = must_include.max(real_hi);
 
-        // Pick the output width and window together: widening shrinks
-        // capacity, which can fold more mass, which can require more
-        // width. Iterate to a fixed point (bounded by U64). The window is
-        // anchored at the top word so it is always exactly N words wide.
-        let mut w = want_width;
-        let low;
-        let new_start;
-        let new_end;
-        let folded_below;
-        loop {
-            let we = w.slot_to_word_index(top_slot);
-            let ws = we - (N as i32 - 1);
-            let lw = w.word_to_slot_index(ws);
+        // Widen (never narrow) to the requested width. The retained
+        // buckets always fit: they fit at the old, no-wider width, and the
+        // triggering bucket fits at `want_width` by construction. The
+        // window is anchored at the top word so it is always exactly N
+        // words wide.
+        let w = old_w.max(want_width);
+        let we = w.slot_to_word_index(top_slot);
+        let ws = we - (N as i32 - 1);
+        let lw = w.word_to_slot_index(ws);
 
-            let mut at_or_below = 0u64;
-            let mut above_max = 0u64;
-            let mut below = 0u64;
-            let mut s = old_lo;
-            while s <= old_hi {
-                let c = Self::read_bucket(&clone, old_w, old_base, s);
-                if c != 0 {
-                    if s <= lw {
-                        at_or_below += c;
-                        if s < lw {
-                            below += c;
-                        }
-                    } else if c > above_max {
-                        above_max = c;
-                    }
-                }
-                s += 1;
-            }
-
-            let need = w
-                .max(Width::from_max_value(at_or_below))
-                .max(Width::from_max_value(above_max));
-            if need == w {
-                low = lw;
-                new_start = ws;
-                new_end = we;
-                folded_below = below;
-                break;
-            }
-            w = need;
-        }
-
-        // Scatter into a fresh zeroed buffer at the new width/anchor.
+        // Scatter retained accurate buckets into a fresh buffer; fold
+        // everything below the floor into the underflow side counter.
         self.data = [0u64; N];
-        let new_base = new_start;
+        let new_base = ws;
         let mut s = old_lo;
         while s <= old_hi {
             let c = Self::read_bucket(&clone, old_w, old_base, s);
             if c != 0 {
-                let dest = if s < low { low } else { s };
-                Self::write_add(&mut self.data, w, new_base, dest, c);
+                if s >= lw {
+                    Self::write_add(&mut self.data, w, new_base, s, c);
+                } else {
+                    self.underflow += c;
+                }
             }
             s += 1;
         }
 
         self.width = w;
         self.word_base = new_base;
-        self.word_start = new_start;
-        self.word_end = new_end;
+        self.word_start = ws;
+        self.word_end = we;
         debug_assert!(
             self.word_end - self.word_start < N as i32,
             "collapse produced a window wider than N words"
         );
-        if folded_below > 0 {
-            self.collapsed = true;
-        }
     }
 
     /// Calls `f(slot_index, count)` for each non-zero bucket, low to high.
+    ///
+    /// When collapsed, the underflow side counter is folded into the
+    /// lowest window slot (the floor), so the reported lowest bucket
+    /// carries the collapsed mass and the counts sum to the bucketed
+    /// total. This matches the OTel export shape.
     pub fn for_each_bucket(&self, mut f: impl FnMut(i32, u64)) {
         if self.buckets_empty() {
             return;
@@ -610,7 +600,10 @@ impl<const N: usize> Sketch<N> {
         let hi = self.high_slot();
         let mut s = lo;
         while s <= hi {
-            let c = Self::read_bucket(&self.data, self.width, self.word_base, s);
+            let mut c = Self::read_bucket(&self.data, self.width, self.word_base, s);
+            if s == lo {
+                c += self.underflow;
+            }
             if c != 0 {
                 f(s, c);
             }
@@ -618,7 +611,7 @@ impl<const N: usize> Sketch<N> {
         }
     }
 
-    /// Returns the slot index of the lowest non-zero bucket, or `None`.
+    /// Returns the slot index of the lowest reported bucket, or `None`.
     pub fn offset(&self) -> Option<i32> {
         let mut first = None;
         self.for_each_bucket(|s, _| {
@@ -629,9 +622,10 @@ impl<const N: usize> Sketch<N> {
         first
     }
 
-    /// Reads the count at an absolute bucket `slot`, returning 0 when the
-    /// slot lies outside the live window. Safe for arbitrary `slot` (it
-    /// never reads a wrapped/stale physical word).
+    /// Reads the raw accurate count at an absolute bucket `slot` (excluding
+    /// any folded underflow), returning 0 when the slot lies outside the
+    /// live window. Safe for arbitrary `slot` (it never reads a
+    /// wrapped/stale physical word).
     #[inline]
     fn count_at_slot(&self, slot: i32) -> u64 {
         if self.buckets_empty() || slot < self.low_slot() || slot > self.high_slot() {
@@ -640,29 +634,52 @@ impl<const N: usize> Sketch<N> {
         Self::read_bucket(&self.data, self.width, self.word_base, slot)
     }
 
-    /// Returns `(lowest, highest)` non-zero bucket slot, or `None` if no
-    /// non-zero bucket exists.
+    /// Returns `(lowest, highest)` non-zero *accurate* bucket slot
+    /// (ignoring the underflow side counter), or `None` if there is no
+    /// non-zero accurate bucket.
     fn bucket_bounds(&self) -> Option<(i32, i32)> {
-        let mut lo = None;
-        let mut hi = i32::MIN;
-        self.for_each_bucket(|s, _| {
-            if lo.is_none() {
-                lo = Some(s);
+        if self.buckets_empty() {
+            return None;
+        }
+        let lo = self.low_slot();
+        let hi = self.high_slot();
+        let mut first = None;
+        let mut last = i32::MIN;
+        let mut s = lo;
+        while s <= hi {
+            if Self::read_bucket(&self.data, self.width, self.word_base, s) != 0 {
+                if first.is_none() {
+                    first = Some(s);
+                }
+                last = s;
             }
-            hi = s;
-        });
-        lo.map(|l| (l, hi))
+            s += 1;
+        }
+        first.map(|f| (f, last))
     }
 
-    /// Underflow floor (lowest accurate-or-underflow slot) when collapsed.
-    ///
-    /// `None` when not collapsed. When collapsed this is the word-aligned
-    /// underflow placeholder slot; any merge target must keep its own
-    /// underflow at or below this slot so inaccurate mass never re-enters
-    /// the accurate window.
+    /// Returns the lowest and highest slot of the OTel-export run. When
+    /// collapsed, the run starts at the floor (where the underflow is
+    /// reported); otherwise it is the raw accurate extent.
+    fn export_bounds(&self) -> Option<(i32, i32)> {
+        let raw = self.bucket_bounds();
+        if self.underflow > 0 {
+            let lo = self.low_slot();
+            Some((lo, raw.map_or(lo, |(_, h)| h.max(lo))))
+        } else {
+            raw
+        }
+    }
+
+    /// The floor slot of a collapsed sketch (the lowest window slot, where
+    /// the underflow is reported), or `None` when not collapsed. A merge
+    /// must keep the result's floor at or below... no: at or *above* each
+    /// collapsed input's floor, so that input's already-collapsed mass —
+    /// opaque in its `underflow` counter — stays below the merged floor and
+    /// is not wrongly re-exposed as an accurate bucket.
     #[inline]
     fn collapse_floor(&self) -> Option<i32> {
-        if self.collapsed && !self.buckets_empty() {
+        if self.underflow > 0 && !self.buckets_empty() {
             Some(self.low_slot())
         } else {
             None
@@ -711,13 +728,18 @@ impl<const N: usize> Sketch<N> {
         Ok(())
     }
 
-    /// Rebuilds the window from the union of `self` and `other` buckets,
-    /// keeping the top slots and folding the rest into the underflow slot.
+    /// Rebuilds the window from the union of `self` and `other` accurate
+    /// buckets, folding everything below the floor — plus both inputs'
+    /// underflow side counters — into this sketch's underflow counter.
     ///
-    /// Precondition: `other` has at least one non-zero bucket and shares
-    /// `self`'s scale. The underflow floor is raised to cover any
-    /// collapsed input's underflow slot, so the lowest slot of the result
-    /// is always the (word-aligned) underflow placeholder.
+    /// Precondition: `other` has at least one non-zero accurate bucket and
+    /// shares `self`'s scale.
+    ///
+    /// The merge width is at least `max(self.width, other.width)` and the
+    /// top is at least each input's top, so the merged floor is at or above
+    /// each input's floor. Both inputs' already-collapsed mass therefore
+    /// stays below the merged floor — no per-input flooring step is needed,
+    /// because the underflow is a side counter rather than a bucket.
     fn merge_repack<const M: usize>(&mut self, other: &Sketch<M>) {
         let (other_lo, other_hi) = other.bucket_bounds().expect("other has a non-zero bucket");
         let (union_lo, top_slot) = match self.bucket_bounds() {
@@ -725,75 +747,72 @@ impl<const N: usize> Sketch<N> {
             None => (other_lo, other_hi),
         };
 
-        // A collapsed input's underflow mass must stay below the accurate
-        // window. Its slot is word-aligned at any width >= the input's
-        // width, hence at the merge width.
-        let self_floor = self.collapse_floor();
-        let other_floor = other.collapse_floor();
-
         let old_self = self.clone();
 
-        // Pick output width and window together (fixed point, bounded by
-        // U64). Widening shrinks capacity, folding more mass, which can
-        // require still more width. The window is anchored at the top word
-        // and floored at any collapsed input's underflow word.
+        // A collapsed input's underflow is opaque (a single counter), so
+        // the merged floor must stay at or above each input's floor —
+        // otherwise that mass, which is really below the input floor, would
+        // be wrongly re-exposed as accurate buckets above the merged floor.
+        let self_floor = old_self.collapse_floor();
+        let other_floor = other.collapse_floor();
+
+        // Width is driven only by the combined *accurate* bucket counts
+        // (the underflow side counter imposes no width). Start at
+        // max(self, other), then widen to fit the largest combined accurate
+        // bucket. Folding mass off the low end does not push the width, so
+        // this fixed point only iterates on genuine counter saturation.
         let mut w = self.width.max(other.width);
-        let low;
+        let lw;
         let new_start;
         let new_end;
-        let folded_below;
         loop {
             let we = w.slot_to_word_index(top_slot);
             let mut ws = we - (N as i32 - 1);
+            // Raise the floor to cover any collapsed input's floor. The
+            // input floor is word-aligned at the input width, hence also at
+            // the (no-narrower) merge width.
             if let Some(f) = self_floor {
                 ws = ws.max(w.slot_to_word_index(f));
             }
             if let Some(f) = other_floor {
                 ws = ws.max(w.slot_to_word_index(f));
             }
-            let lw = w.word_to_slot_index(ws);
+            let low = w.word_to_slot_index(ws);
 
-            let mut at_or_below = 0u64;
             let mut above_max = 0u64;
-            let mut below = 0u64;
-            let mut s = union_lo;
+            let mut s = low.max(union_lo);
             while s <= top_slot {
                 let c = old_self.count_at_slot(s) + other.count_at_slot(s);
-                if c != 0 {
-                    if s <= lw {
-                        at_or_below += c;
-                        if s < lw {
-                            below += c;
-                        }
-                    } else if c > above_max {
-                        above_max = c;
-                    }
+                if c > above_max {
+                    above_max = c;
                 }
                 s += 1;
             }
 
-            let need = w
-                .max(Width::from_max_value(at_or_below))
-                .max(Width::from_max_value(above_max));
+            let need = w.max(Width::from_max_value(above_max));
             if need == w {
-                low = lw;
+                lw = low;
                 new_start = ws;
                 new_end = we;
-                folded_below = below;
                 break;
             }
             w = need;
         }
 
-        // Scatter both sources into a fresh zeroed buffer.
+        // Scatter combined accurate buckets; fold everything below the
+        // floor, plus both inputs' underflow, into the side counter.
         self.data = [0u64; N];
         let new_base = new_start;
+        self.underflow = old_self.underflow + other.underflow;
         let mut s = union_lo;
         while s <= top_slot {
             let c = old_self.count_at_slot(s) + other.count_at_slot(s);
             if c != 0 {
-                let dest = if s < low { low } else { s };
-                Self::write_add(&mut self.data, w, new_base, dest, c);
+                if s >= lw {
+                    Self::write_add(&mut self.data, w, new_base, s, c);
+                } else {
+                    self.underflow += c;
+                }
             }
             s += 1;
         }
@@ -803,7 +822,6 @@ impl<const N: usize> Sketch<N> {
         self.word_start = new_start;
         self.word_end = new_end;
         self.live_total = old_self.live_total + other.live_total;
-        self.collapsed = self.collapsed || other.collapsed || folded_below > 0;
         debug_assert!(
             self.word_end - self.word_start < N as i32,
             "merge produced a window wider than N words"
@@ -883,7 +901,7 @@ impl<const N: usize> SketchView<'_, N> {
     /// placeholder (the guarantee holds only for ranks above it).
     #[inline]
     pub fn collapsed(&self) -> bool {
-        self.sketch.collapsed
+        self.sketch.collapsed()
     }
 
     /// Returns the count held in the underflow placeholder (0 if not
@@ -916,15 +934,16 @@ impl<const N: usize> SketchBucketView<'_, N> {
     /// Returns 0 when empty.
     #[inline]
     pub fn offset(&self) -> i32 {
-        self.sketch.bucket_bounds().map_or(0, |(lo, _)| lo)
+        self.sketch.export_bounds().map_or(0, |(lo, _)| lo)
     }
 
-    /// Number of buckets from the first to the last non-zero bucket
-    /// inclusive — the length of the `bucket_counts` array.
+    /// Number of buckets from the first to the last reported bucket
+    /// inclusive — the length of the `bucket_counts` array. When collapsed
+    /// the run starts at the floor (which carries the underflow mass).
     #[inline]
     pub fn len(&self) -> u32 {
         self.sketch
-            .bucket_bounds()
+            .export_bounds()
             .map_or(0, |(lo, hi)| (hi - lo + 1) as u32)
     }
 
@@ -941,10 +960,12 @@ impl<const N: usize> SketchBucketView<'_, N> {
     }
 
     /// Returns an iterator over the contiguous bucket counts, yielding
-    /// [`len`](Self::len) values starting at [`offset`](Self::offset).
+    /// [`len`](Self::len) values starting at [`offset`](Self::offset). When
+    /// collapsed, the first value includes the underflow mass folded into
+    /// the floor bucket.
     #[inline]
     pub fn iter(&self) -> SketchBucketsIter<'_, N> {
-        let (next, last) = self.sketch.bucket_bounds().unwrap_or((0, -1));
+        let (next, last) = self.sketch.export_bounds().unwrap_or((0, -1));
         SketchBucketsIter {
             sketch: self.sketch,
             next,
@@ -979,7 +1000,13 @@ impl<const N: usize> Iterator for SketchBucketsIter<'_, N> {
         if self.next > self.last {
             return None;
         }
-        let c = self.sketch.count_at_slot(self.next);
+        let slot = self.next;
+        let mut c = self.sketch.count_at_slot(slot);
+        // The underflow side counter is reported at the floor (the lowest
+        // slot of the window) to keep the export OTel-compatible.
+        if slot == self.sketch.low_slot() {
+            c += self.sketch.underflow;
+        }
         self.next += 1;
         Some(c)
     }
@@ -1374,11 +1401,13 @@ mod tests {
 
     /// Regression: a collapse must anchor at the real highest non-zero
     /// bucket, never a trailing empty word left by an earlier slide.
-    /// Otherwise a counter-overflow widen on a window with empty high
-    /// words drops the entire live range into the underflow slot — a bug
-    /// that only surfaces for unsorted input. The final state is fully
-    /// determined by the multiset, so shuffled and sorted feeds of the
-    /// same values must agree exactly.
+    ///
+    /// Under the separated-underflow design the *exact* underflow/accurate
+    /// boundary is intentionally not order-independent (a low bucket that is
+    /// briefly hot then evicted leaves the counter width — hence the floor —
+    /// order-dependent). But the exact aggregate (count, sum, min, max) and
+    /// the always-accurate top of the distribution are order-independent,
+    /// and no counts are ever lost. This asserts those.
     #[test]
     fn collapse_is_order_independent() {
         let scale = 4;
@@ -1412,27 +1441,24 @@ mod tests {
         }
 
         assert!(shuffled.collapsed(), "30 octaves must collapse N=16");
+        // Exact aggregates are order-independent.
         assert_eq!(shuffled.count(), sorted.count());
-        assert_eq!(
-            shuffled.width(),
-            sorted.width(),
-            "width is order-independent"
-        );
-        assert_eq!(
-            shuffled.underflow_count(),
-            sorted.underflow_count(),
-            "underflow is order-independent"
-        );
-        assert_eq!(
-            layout(&shuffled),
-            layout(&sorted),
-            "bucket layout is order-independent"
-        );
-        // The bug's symptom was everything collapsing into one slot.
-        assert!(
-            layout(&shuffled).len() > 1,
-            "accurate window degenerated to a single slot"
-        );
+        assert_eq!(shuffled.min(), sorted.min());
+        assert_eq!(shuffled.max(), sorted.max());
+        assert!((shuffled.sum() - sorted.sum()).abs() <= shuffled.sum().abs() * 1e-12);
+        // No counts are ever lost, in either order (for_each_bucket already
+        // folds the underflow into the floor slot).
+        assert_eq!(live_sum(&shuffled), shuffled.count());
+        assert_eq!(live_sum(&sorted), sorted.count());
+        // The always-accurate top bucket agrees across orders.
+        let top = |s: &Sketch<16>| {
+            let mut t = None;
+            s.for_each_bucket(|idx, c| t = Some((idx, c)));
+            t.unwrap()
+        };
+        assert_eq!(top(&shuffled).0, top(&sorted).0, "top bucket index");
+        // The accurate window must not degenerate to a single slot.
+        assert!(layout(&shuffled).len() > 1, "accurate window degenerated");
     }
 
     /// Regression for a fuzzer-found bug: a far-below value first folded

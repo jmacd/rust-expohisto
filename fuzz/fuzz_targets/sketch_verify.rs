@@ -120,6 +120,21 @@ pub fn verify_sketch<const N: usize>(
     assert_eq!(stats.min, expected_min, "{label} N={N} scale={scale}: min");
     assert_eq!(stats.max, expected_max, "{label} N={N} scale={scale}: max");
 
+    // Sum is checked with tolerance: f64 accumulation order differs from a
+    // brute-force re-sum, so it is not bit-exact (and is not asserted to be
+    // order-independent at the bit level for the same reason). Skip when
+    // the brute-force sum is not finite (overflow to ±inf), since the exact
+    // accumulation order then governs whether/where inf appears.
+    let expected_sum: f64 = recorded.iter().map(|&(v, i)| v * i as f64).sum();
+    if expected_sum.is_finite() {
+        let sum_tol = expected_sum.abs() * 1e-9 + 1e-9;
+        assert!(
+            (stats.sum - expected_sum).abs() <= sum_tol,
+            "{label} N={N} scale={scale}: sum {} vs expected {expected_sum}",
+            stats.sum,
+        );
+    }
+
     // Brute-force per-bucket counts at the fixed scale. record_incr rounds
     // subnormals to (biased_exp=1, significand=1); map the resulting f64
     // through the same path so the oracle agrees.
@@ -151,21 +166,28 @@ pub fn verify_sketch<const N: usize>(
     );
 
     if v.collapsed() {
-        // Lowest slot is the underflow placeholder: it holds every count
-        // at or below the floor; slots above it are exact.
-        let uf_expected: u64 = expected
+        // The underflow is a side counter reported at the floor (offset):
+        //   counts[0]            == mass at-or-below the floor
+        //   underflow_count()    == mass strictly below the floor
+        //   counts[k>=1]         == exact accurate buckets above the floor
+        let uf_at_or_below: u64 = expected
             .iter()
             .filter(|(&idx, _)| idx <= offset)
             .map(|(_, &c)| c)
             .sum();
+        let uf_strict: u64 = expected
+            .iter()
+            .filter(|(&idx, _)| idx < offset)
+            .map(|(_, &c)| c)
+            .sum();
         assert_eq!(
-            counts[0], uf_expected,
-            "{label} N={N} scale={scale}: underflow fold",
+            counts[0], uf_at_or_below,
+            "{label} N={N} scale={scale}: floor bucket (underflow + accurate@floor)",
         );
         assert_eq!(
-            counts[0],
             v.underflow_count(),
-            "{label} N={N} scale={scale}: underflow_count vs offset bucket",
+            uf_strict,
+            "{label} N={N} scale={scale}: underflow_count (strictly below floor)",
         );
         for (k, &c) in counts.iter().enumerate().skip(1) {
             let idx = offset + k as i32;

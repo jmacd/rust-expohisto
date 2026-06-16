@@ -171,25 +171,37 @@ fn check_pn<const K: usize, const L: usize>(scale: i32, ops: &[Op]) {
     let s = build::<K, L>(scale, ops);
     verify_pn(&s, ops, scale, "record");
 
-    // Order independence: sorted and reversed feeds must match.
-    let original = pn_snapshot(&s);
+    // The exact partition is order-dependent (separated underflow), but the
+    // aggregates are not. verify_pn pins each order against the ops.
+    let original = pn_agg(&s);
 
     let mut sorted: Vec<Op> = ops.to_vec();
     sorted.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap());
     let s_sorted = build::<K, L>(scale, &sorted);
+    verify_pn(&s_sorted, &sorted, scale, "record/sorted");
     assert_eq!(
-        pn_snapshot(&s_sorted),
+        pn_agg(&s_sorted),
         original,
-        "K={K} L={L} scale={scale}: sorted feed diverged",
+        "K={K} L={L} scale={scale}: sorted feed changed an aggregate",
     );
 
     let reversed: Vec<Op> = ops.iter().rev().copied().collect();
     let s_rev = build::<K, L>(scale, &reversed);
+    verify_pn(&s_rev, &reversed, scale, "record/reversed");
     assert_eq!(
-        pn_snapshot(&s_rev),
+        pn_agg(&s_rev),
         original,
-        "K={K} L={L} scale={scale}: reversed feed diverged",
+        "K={K} L={L} scale={scale}: reversed feed changed an aggregate",
     );
+}
+
+/// Order-independent fingerprint of a `SketchPN` (sum excluded — it
+/// differs by ULPs across orders; `verify_pn`/`verify_sketch` check it
+/// per-order with tolerance).
+fn pn_agg<const K: usize, const L: usize>(s: &SketchPN<K, L>) -> (u64, u64, u64, u64) {
+    let v = s.view();
+    let st = v.stats();
+    (st.count, st.min.to_bits(), st.max.to_bits(), v.zero_count())
 }
 
 fn check_merge_same<const K: usize, const L: usize>(
@@ -203,6 +215,8 @@ fn check_merge_same<const K: usize, const L: usize>(
     a.merge_from(&b).unwrap();
     verify_pn(&a, all, scale, "merge_same");
 
+    // Each sub-range rebuilds symmetrically from the union, so a single PN
+    // merge is exactly commutative for equal pool sizes.
     let mut b2 = build::<K, L>(scale, right);
     let a2 = build::<K, L>(scale, left);
     b2.merge_from(&a2).unwrap();

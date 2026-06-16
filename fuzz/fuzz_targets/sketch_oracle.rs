@@ -126,26 +126,41 @@ fn check_sketch<const N: usize>(scale: i32, ops: &[Op]) {
     let s = build::<N>(scale, ops);
     verify_sketch(&s, &pairs(ops), scale, "record");
 
-    // Order independence: the final state must not depend on insertion
-    // order. Sorted and reversed feeds of the same multiset must agree.
-    let original = snapshot(&s);
+    // Under the separated-underflow design the exact partition is
+    // intentionally order-dependent, but the aggregates and the
+    // always-accurate top of the distribution are not. (Each order is also
+    // independently checked against the ops by verify_sketch above.)
+    let original = agg(&s);
 
     let mut sorted: Vec<Op> = ops.to_vec();
     sorted.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap());
     let s_sorted = build::<N>(scale, &sorted);
+    verify_sketch(&s_sorted, &pairs(&sorted), scale, "record/sorted");
     assert_eq!(
-        snapshot(&s_sorted),
+        agg(&s_sorted),
         original,
-        "N={N} scale={scale}: sorted feed diverged from original",
+        "N={N} scale={scale}: sorted feed changed an order-independent aggregate",
     );
 
     let reversed: Vec<Op> = ops.iter().rev().copied().collect();
     let s_rev = build::<N>(scale, &reversed);
+    verify_sketch(&s_rev, &pairs(&reversed), scale, "record/reversed");
     assert_eq!(
-        snapshot(&s_rev),
+        agg(&s_rev),
         original,
-        "N={N} scale={scale}: reversed feed diverged from original",
+        "N={N} scale={scale}: reversed feed changed an order-independent aggregate",
     );
+}
+
+/// Order-independent fingerprint: count, min, max, and the
+/// always-accurate top bucket index. (Sum is excluded — f64 accumulation
+/// order makes it differ by ULPs across insert orders; it is checked
+/// per-order with tolerance in `verify_sketch`.)
+fn agg<const N: usize>(s: &Sketch<N>) -> (u64, u64, u64, i32) {
+    let v = s.view();
+    let st = v.stats();
+    let top = v.positive().offset() + v.positive().len() as i32 - 1;
+    (st.count, st.min.to_bits(), st.max.to_bits(), top)
 }
 
 fn check_merge_same<const N: usize>(scale: i32, left: &[Op], right: &[Op], all: &[Op]) {
@@ -154,7 +169,8 @@ fn check_merge_same<const N: usize>(scale: i32, left: &[Op], right: &[Op], all: 
     a.merge_from(&b).unwrap();
     verify_sketch(&a, &pairs(all), scale, "merge_same");
 
-    // Merge is commutative for equal pool sizes.
+    // A single merge rebuilds symmetrically from the union, so merge is
+    // exactly commutative for equal pool sizes (unlike sequential inserts).
     let mut b2 = build::<N>(scale, right);
     let a2 = build::<N>(scale, left);
     b2.merge_from(&a2).unwrap();
