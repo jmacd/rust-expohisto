@@ -30,6 +30,7 @@ use core::fmt;
 use crate::float64::{get_biased_exponent, get_significand, unbias_exponent, NAN_INF_BIASED};
 use crate::mapping::{table_scale, Scale, ScaleError};
 
+use super::swar::{spread, widen};
 use super::width::Width;
 use super::{Error, Stats};
 
@@ -387,6 +388,17 @@ impl<const N: usize> Sketch<N> {
         addr.retrieve_counter(buf[idx])
     }
 
+    /// Sum of all lane values in one packed `width` word (SWAR horizontal
+    /// reduction). Used to fold an evicted word into the underflow counter.
+    #[inline]
+    fn lane_sum(width: Width, word: u64) -> u64 {
+        if width == Width::U64 {
+            word
+        } else {
+            widen(width, Width::U64, word)
+        }
+    }
+
     /// Adds `incr` to the counter at `slot`, assuming it fits `width`.
     #[inline]
     fn write_add(buf: &mut [u64; N], width: Width, base: i32, slot: i32, incr: u64) {
@@ -557,23 +569,54 @@ impl<const N: usize> Sketch<N> {
         let w = old_w.max(want_width);
         let we = w.slot_to_word_index(top_slot);
         let ws = we - (N as i32 - 1);
-        let lw = w.word_to_slot_index(ws);
 
-        // Scatter retained accurate buckets into a fresh buffer; fold
-        // everything below the floor into the underflow side counter.
+        // Scatter the retained accurate buckets into a fresh buffer one
+        // packed word at a time (SWAR), folding everything below the floor
+        // into the underflow counter. Same width → word copy; wider → each
+        // source word fans out to `2^delta` destination words via `spread`
+        // (a pure counter-width change, no bucket merging). Evicted words
+        // are reduced with a SWAR horizontal lane-sum.
+        let old_ws_word = self.word_start;
+        let old_we_word = self.word_end;
         self.data = [0u64; N];
         let new_base = ws;
-        let mut s = old_lo;
-        while s <= old_hi {
-            let c = Self::read_bucket(&clone, old_w, old_base, s);
-            if c != 0 {
-                if s >= lw {
-                    Self::write_add(&mut self.data, w, new_base, s, c);
-                } else {
-                    self.underflow += c;
+        let delta = w as u32 - old_w as u32;
+        if delta == 0 {
+            let mut owidx = old_ws_word;
+            while owidx <= old_we_word {
+                let word = clone[(owidx - old_base).rem_euclid(N as i32) as usize];
+                if word != 0 {
+                    if owidx >= ws {
+                        self.data[(owidx - new_base).rem_euclid(N as i32) as usize] = word;
+                    } else {
+                        self.underflow += Self::lane_sum(old_w, word);
+                    }
                 }
+                owidx += 1;
             }
-            s += 1;
+        } else {
+            let chunk_bits = 64u32 >> delta;
+            let chunk_mask = (1u64 << chunk_bits) - 1;
+            let mut owidx = old_ws_word;
+            while owidx <= old_we_word {
+                let word = clone[(owidx - old_base).rem_euclid(N as i32) as usize];
+                if word != 0 {
+                    for k in 0..(1i32 << delta) {
+                        let chunk = (word >> (k as u32 * chunk_bits)) & chunk_mask;
+                        if chunk == 0 {
+                            continue;
+                        }
+                        let new_widx = (owidx << delta) + k;
+                        if new_widx >= ws {
+                            self.data[(new_widx - new_base).rem_euclid(N as i32) as usize] =
+                                spread(old_w, w, chunk);
+                        } else {
+                            self.underflow += Self::lane_sum(old_w, chunk);
+                        }
+                    }
+                }
+                owidx += 1;
+            }
         }
 
         self.width = w;

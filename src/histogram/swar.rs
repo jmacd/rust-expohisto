@@ -201,6 +201,117 @@ pub(crate) fn narrow(before: Width, after: Width, w: u64) -> u64 {
     }
 }
 
+// ── Single-step SWAR spread primitives ───────────────────────────────
+//
+// The inverse of the narrow steps: each function takes a u64 whose low
+// `64 * before_bits / after_bits` bits hold the source lanes packed
+// contiguously and zero-extends every lane into the next-wider lane,
+// filling the whole word.  These are classic "bit-spreading" (Morton)
+// sequences — the exact reverse of the `nstep_*` mask-and-compact chains.
+
+/// B1 → B2: spread 32 contiguous 1-bit lanes into 32 2-bit lanes.
+#[inline(always)]
+fn sstep_b1_b2(w: u64) -> u64 {
+    let w = w & 0x0000_0000_FFFF_FFFF;
+    let w = (w | (w << 16)) & 0x0000_FFFF_0000_FFFF;
+    let w = (w | (w << 8)) & 0x00FF_00FF_00FF_00FF;
+    let w = (w | (w << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    let w = (w | (w << 2)) & 0x3333_3333_3333_3333;
+    (w | (w << 1)) & 0x5555_5555_5555_5555
+}
+
+/// B2 → B4: spread 16 contiguous 2-bit lanes into 16 4-bit lanes.
+#[inline(always)]
+fn sstep_b2_b4(w: u64) -> u64 {
+    let w = w & 0x0000_0000_FFFF_FFFF;
+    let w = (w | (w << 16)) & 0x0000_FFFF_0000_FFFF;
+    let w = (w | (w << 8)) & 0x00FF_00FF_00FF_00FF;
+    let w = (w | (w << 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    (w | (w << 2)) & 0x3333_3333_3333_3333
+}
+
+/// B4 → U8: spread 8 contiguous 4-bit lanes into 8 8-bit lanes.
+#[inline(always)]
+fn sstep_b4_u8(w: u64) -> u64 {
+    let w = w & 0x0000_0000_FFFF_FFFF;
+    let w = (w | (w << 16)) & 0x0000_FFFF_0000_FFFF;
+    let w = (w | (w << 8)) & 0x00FF_00FF_00FF_00FF;
+    (w | (w << 4)) & 0x0F0F_0F0F_0F0F_0F0F
+}
+
+/// U8 → U16: spread 4 contiguous 8-bit lanes into 4 16-bit lanes.
+#[inline(always)]
+fn sstep_u8_u16(w: u64) -> u64 {
+    let w = w & 0x0000_0000_FFFF_FFFF;
+    let w = (w | (w << 16)) & 0x0000_FFFF_0000_FFFF;
+    (w | (w << 8)) & 0x00FF_00FF_00FF_00FF
+}
+
+/// U16 → U32: spread 2 contiguous 16-bit lanes into 2 32-bit lanes.
+#[inline(always)]
+fn sstep_u16_u32(w: u64) -> u64 {
+    let w = w & 0x0000_0000_FFFF_FFFF;
+    (w | (w << 16)) & 0x0000_FFFF_0000_FFFF
+}
+
+/// U32 → U64: place the low 32-bit lane in the low half (already there).
+#[inline(always)]
+fn sstep_u32_u64(w: u64) -> u64 {
+    w & 0x0000_0000_FFFF_FFFF
+}
+
+/// Spread a single u64 word from `before` lane width to the wider `after`
+/// lane width.
+///
+/// The inverse of [`narrow`]: the low `64 × before_bits / after_bits`
+/// bits of `w` are read as contiguous `before`-width lanes and each is
+/// zero-extended into an `after`-width lane, filling the whole word. No
+/// lane value changes (unlike [`widen`], which sums adjacent lanes); this
+/// is a pure counter-width change at a fixed bucket resolution.
+#[inline]
+pub(crate) fn spread(before: Width, after: Width, w: u64) -> u64 {
+    use Width::*;
+    debug_assert!(before < after);
+    match (before, after) {
+        // B1 → *
+        (B1, B2) => sstep_b1_b2(w),
+        (B1, B4) => sstep_b2_b4(sstep_b1_b2(w)),
+        (B1, U8) => sstep_b4_u8(sstep_b2_b4(sstep_b1_b2(w))),
+        (B1, U16) => sstep_u8_u16(sstep_b4_u8(sstep_b2_b4(sstep_b1_b2(w)))),
+        (B1, U32) => sstep_u16_u32(sstep_u8_u16(sstep_b4_u8(sstep_b2_b4(sstep_b1_b2(w))))),
+        (B1, U64) => {
+            sstep_u32_u64(sstep_u16_u32(sstep_u8_u16(sstep_b4_u8(sstep_b2_b4(sstep_b1_b2(w))))))
+        }
+
+        // B2 → *
+        (B2, B4) => sstep_b2_b4(w),
+        (B2, U8) => sstep_b4_u8(sstep_b2_b4(w)),
+        (B2, U16) => sstep_u8_u16(sstep_b4_u8(sstep_b2_b4(w))),
+        (B2, U32) => sstep_u16_u32(sstep_u8_u16(sstep_b4_u8(sstep_b2_b4(w)))),
+        (B2, U64) => sstep_u32_u64(sstep_u16_u32(sstep_u8_u16(sstep_b4_u8(sstep_b2_b4(w))))),
+
+        // B4 → *
+        (B4, U8) => sstep_b4_u8(w),
+        (B4, U16) => sstep_u8_u16(sstep_b4_u8(w)),
+        (B4, U32) => sstep_u16_u32(sstep_u8_u16(sstep_b4_u8(w))),
+        (B4, U64) => sstep_u32_u64(sstep_u16_u32(sstep_u8_u16(sstep_b4_u8(w)))),
+
+        // U8 → *
+        (U8, U16) => sstep_u8_u16(w),
+        (U8, U32) => sstep_u16_u32(sstep_u8_u16(w)),
+        (U8, U64) => sstep_u32_u64(sstep_u16_u32(sstep_u8_u16(w))),
+
+        // U16 → *
+        (U16, U32) => sstep_u16_u32(w),
+        (U16, U64) => sstep_u32_u64(sstep_u16_u32(w)),
+
+        // U32 → U64
+        (U32, U64) => sstep_u32_u64(w),
+
+        _ => unreachable!(),
+    }
+}
+
 /// SWAR addition with per-lane overflow detection.
 ///
 /// Returns `Some(a + b)` if no lane overflows, or `None` if any lane
@@ -602,6 +713,77 @@ mod tests {
             assert_eq!(swar_add_checked(0, 0, w), Some(0));
             assert_eq!(swar_add_checked(42, 0, w), Some(42));
             assert_eq!(swar_add_checked(0, 42, w), Some(42));
+        }
+    }
+
+    // ── spread: inverse of narrow ───────────────────────────────────
+
+    #[test]
+    fn spread_single_step_examples() {
+        // Mirrors the narrow single-step tests, reversed.
+        assert_eq!(
+            spread(Width::U8, Width::U16, pack_u8x8([10, 20, 30, 40, 0, 0, 0, 0])),
+            pack_u16x4([10, 20, 30, 40]),
+        );
+        assert_eq!(
+            spread(Width::U16, Width::U32, pack_u16x4([1000, 2000, 0, 0])),
+            pack_u32x2(1000, 2000),
+        );
+        assert_eq!(spread(Width::U32, Width::U64, 0xFFFF_FFFF), 0xFFFF_FFFF);
+        assert_eq!(
+            spread(Width::B4, Width::U8, pack_b4x16([1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
+            pack_u8x8([1, 2, 3, 0, 0, 0, 0, 0]),
+        );
+        assert_eq!(
+            spread(Width::B1, Width::B2, pack_b2x32_low_as_b1([1, 0, 1, 1])),
+            pack_b2x32([1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        );
+    }
+
+    /// Pack `n` 1-bit values contiguously into the low bits (the input
+    /// layout `spread` expects for a B1 source).
+    fn pack_b2x32_low_as_b1(v: [u8; 4]) -> u64 {
+        v.iter()
+            .enumerate()
+            .fold(0u64, |a, (i, &b)| a | (((b & 1) as u64) << i))
+    }
+
+    #[test]
+    fn spread_is_inverse_of_narrow() {
+        // For every widening pair and a range of per-lane values that fit
+        // the narrower width, narrow∘spread is the identity.
+        let widths = [
+            Width::B1,
+            Width::B2,
+            Width::B4,
+            Width::U8,
+            Width::U16,
+            Width::U32,
+            Width::U64,
+        ];
+        for (bi, &before) in widths.iter().enumerate() {
+            for &after in &widths[bi + 1..] {
+                // Build a word of `before`-width lanes with assorted values.
+                let lane_bits = 1u32 << (before as u32);
+                let max = before.counter_max();
+                let lanes = 64 / lane_bits;
+                let mut packed = 0u64;
+                for j in 0..lanes {
+                    let val = (j as u64 * 7 + 1) & max;
+                    packed |= val << (j * lane_bits);
+                }
+                // Only the low `64*before/after` source bits are meaningful
+                // to spread; mask the rest off first.
+                let src_bits = 64u32 * lane_bits / (1u32 << (after as u32));
+                let src = if src_bits >= 64 {
+                    packed
+                } else {
+                    packed & ((1u64 << src_bits) - 1)
+                };
+                let spread_w = spread(before, after, src);
+                let back = narrow(after, before, spread_w);
+                assert_eq!(back, src, "narrow∘spread != id for {before:?}->{after:?}");
+            }
         }
     }
 }
