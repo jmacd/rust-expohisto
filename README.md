@@ -19,6 +19,7 @@ Exponential histograms provide a compact, high-resolution representation of valu
 - **Sub-byte counters**: 1-bit bucket counters (B1) maximize resolution; auto-widen on overflow
 - **Configurable table size**: Trade static memory for lookup acceleration at higher scales
 - **Quantile estimation**: CDF-walk with linear interpolation over the bucket distribution
+- **Guaranteed relative error**: `Sketch<N>` / `SketchPN<K, L>` offer a fixed-scale, DDSketch-style collapse-left mode with a worst-case relative-error bound (see [Relative-error mode](#relative-error-mode-sketch))
 - **Compact configuration**: 2-byte `Settings` struct pairs `Scale` + `Width`; histograms track both initial and current settings
 - **`no_std` compatible**: Only the `std::error::Error` impls require the `std` feature
 - **Zero `unsafe` code**: Entirely safe Rust; no `unsafe` blocks anywhere in the crate
@@ -52,6 +53,37 @@ let stats = v.stats();
 println!("count: {}, sum: {}", stats.count, stats.sum);
 println!("scale: {}", v.scale());
 ```
+
+## Relative-error mode (`Sketch`)
+
+`Sketch<N>` trades auto-scaling for a **guaranteed relative error**, in the
+style of [DDSketch](https://arxiv.org/abs/1908.10693). The scale is fixed at
+construction, so every retained bucket has a worst-case relative error
+`α = (b − 1)/(b + 1)` with `b = 2^(2^−scale)`. When a value won't fit the
+current window, the structure **collapses the left (small-value) side**
+instead of downscaling — the largest values keep full resolution and the
+dropped small buckets fold into an underflow counter. This is ideal for
+latency tails, where the high quantiles matter and the low end does not.
+
+```rust
+use otel_expohisto::Sketch;
+
+// Coarsest scale whose worst-case relative error is within 1%.
+let mut s: Sketch<16> = Sketch::new().with_relative_error(0.01).unwrap();
+for v in [1.0, 2.0, 5.0, 12.0, 30.0, 100.0, 1e6] {
+    s.update(v).unwrap();
+}
+
+let v = s.view();
+println!("scale: {}, p-tail accurate above underflow", v.scale());
+println!("underflow (inaccurate low mass): {}", v.underflow_count());
+// `v.positive()` yields an OTel-compatible contiguous `bucket_counts` run.
+```
+
+`SketchPN<K, L>` is the signed counterpart (a positive and a negative
+`Sketch` plus a zero count). For the guarantee, the collapse mechanics, the
+order-dependence tradeoff, and sizing, see
+[Collapse-Left Design](docs/collapse-design.md).
 
 ## Performance
 
@@ -97,6 +129,7 @@ are rejected by `Scale::new()`. Selected examples:
 
 - **[Design & Architecture](docs/design.md)** — Exponential scale theory, index mapping algorithms, lookup table design, crate structure
 - **[Implementation Details](docs/internals.md)** — Literal mode, sub-byte counters (SWAR), parameter selection, API overview
+- **[Collapse-Left Design](docs/collapse-design.md)** — `Sketch` / `SketchPN`: the relative-error guarantee, the underflow side counter, collapse mechanics, the order-dependence tradeoff, and sizing
 - **[Reference](docs/reference.md)** — Error handling, thread safety, `no_std` support, testing, OTel spec compatibility
 - **[Historical Notes](docs/history.md)** — Origins of the lookup table algorithm
 
