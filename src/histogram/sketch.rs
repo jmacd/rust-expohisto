@@ -45,6 +45,17 @@ enum Place {
     SlideUp,
 }
 
+/// A read-only descriptor of one packed-bucket source for
+/// [`Sketch::scatter_source`]: a `[u64; M]` ring buffer plus its anchor,
+/// word range, and counter width.
+struct Src<'a, const M: usize> {
+    data: &'a [u64; M],
+    base: i32,
+    word_start: i32,
+    word_end: i32,
+    width: Width,
+}
+
 /// A fixed-scale exponential histogram with DDSketch-style collapse-left
 /// behavior and a relative-error guarantee.
 ///
@@ -570,26 +581,64 @@ impl<const N: usize> Sketch<N> {
         let we = w.slot_to_word_index(top_slot);
         let ws = we - (N as i32 - 1);
 
-        // Scatter the retained accurate buckets into a fresh buffer one
-        // packed word at a time (SWAR), folding everything below the floor
-        // into the underflow counter. Same width → word copy; wider → each
-        // source word fans out to `2^delta` destination words via `spread`
-        // (a pure counter-width change, no bucket merging). Evicted words
-        // are reduced with a SWAR horizontal lane-sum.
+        // Scatter the (single) source — the old accurate buckets — into a
+        // fresh buffer via the shared SWAR helper, folding everything below
+        // the floor into the underflow counter.
         let old_ws_word = self.word_start;
         let old_we_word = self.word_end;
         self.data = [0u64; N];
-        let new_base = ws;
-        let delta = w as u32 - old_w as u32;
+        Self::scatter_source(
+            &mut self.data,
+            &mut self.underflow,
+            ws,
+            w,
+            Src {
+                data: &clone,
+                base: old_base,
+                word_start: old_ws_word,
+                word_end: old_we_word,
+                width: old_w,
+            },
+        );
+
+        self.width = w;
+        self.word_base = ws;
+        self.word_start = ws;
+        self.word_end = we;
+        debug_assert!(
+            self.word_end - self.word_start < N as i32,
+            "collapse produced a window wider than N words"
+        );
+    }
+
+    /// Adds one source's accurate buckets into `dest` at the destination
+    /// `(w, ws)` layout — `dest` is indexed with base `ws` — folding
+    /// everything below the floor word `ws` into `*underflow` via a SWAR
+    /// horizontal lane-sum. Contributions are **added** (`+=`), so this
+    /// serves both collapse (one source into a fresh buffer) and merge (two
+    /// sources accumulated); callers must size `w` so no lane overflows.
+    ///
+    /// Same width → word copy; wider → each source word fans out to
+    /// `2^delta` destination words via [`spread`] (a pure counter-width
+    /// change, no bucket merging).
+    #[inline]
+    fn scatter_source<const M: usize>(
+        dest: &mut [u64; N],
+        underflow: &mut u64,
+        ws: i32,
+        w: Width,
+        src: Src<'_, M>,
+    ) {
+        let delta = w as u32 - src.width as u32;
         if delta == 0 {
-            let mut owidx = old_ws_word;
-            while owidx <= old_we_word {
-                let word = clone[(owidx - old_base).rem_euclid(N as i32) as usize];
+            let mut owidx = src.word_start;
+            while owidx <= src.word_end {
+                let word = src.data[(owidx - src.base).rem_euclid(M as i32) as usize];
                 if word != 0 {
                     if owidx >= ws {
-                        self.data[(owidx - new_base).rem_euclid(N as i32) as usize] = word;
+                        dest[(owidx - ws).rem_euclid(N as i32) as usize] += word;
                     } else {
-                        self.underflow += Self::lane_sum(old_w, word);
+                        *underflow += Self::lane_sum(src.width, word);
                     }
                 }
                 owidx += 1;
@@ -597,9 +646,9 @@ impl<const N: usize> Sketch<N> {
         } else {
             let chunk_bits = 64u32 >> delta;
             let chunk_mask = (1u64 << chunk_bits) - 1;
-            let mut owidx = old_ws_word;
-            while owidx <= old_we_word {
-                let word = clone[(owidx - old_base).rem_euclid(N as i32) as usize];
+            let mut owidx = src.word_start;
+            while owidx <= src.word_end {
+                let word = src.data[(owidx - src.base).rem_euclid(M as i32) as usize];
                 if word != 0 {
                     for k in 0..(1i32 << delta) {
                         let chunk = (word >> (k as u32 * chunk_bits)) & chunk_mask;
@@ -608,25 +657,16 @@ impl<const N: usize> Sketch<N> {
                         }
                         let new_widx = (owidx << delta) + k;
                         if new_widx >= ws {
-                            self.data[(new_widx - new_base).rem_euclid(N as i32) as usize] =
-                                spread(old_w, w, chunk);
+                            dest[(new_widx - ws).rem_euclid(N as i32) as usize] +=
+                                spread(src.width, w, chunk);
                         } else {
-                            self.underflow += Self::lane_sum(old_w, chunk);
+                            *underflow += Self::lane_sum(src.width, chunk);
                         }
                     }
                 }
                 owidx += 1;
             }
         }
-
-        self.width = w;
-        self.word_base = new_base;
-        self.word_start = ws;
-        self.word_end = we;
-        debug_assert!(
-            self.word_end - self.word_start < N as i32,
-            "collapse produced a window wider than N words"
-        );
     }
 
     /// Calls `f(slot_index, count)` for each non-zero bucket, low to high.
@@ -805,7 +845,6 @@ impl<const N: usize> Sketch<N> {
         // bucket. Folding mass off the low end does not push the width, so
         // this fixed point only iterates on genuine counter saturation.
         let mut w = self.width.max(other.width);
-        let lw;
         let new_start;
         let new_end;
         loop {
@@ -834,7 +873,6 @@ impl<const N: usize> Sketch<N> {
 
             let need = w.max(Width::from_max_value(above_max));
             if need == w {
-                lw = low;
                 new_start = ws;
                 new_end = we;
                 break;
@@ -842,26 +880,42 @@ impl<const N: usize> Sketch<N> {
             w = need;
         }
 
-        // Scatter combined accurate buckets; fold everything below the
-        // floor, plus both inputs' underflow, into the side counter.
+        // Accumulate both sources into a fresh buffer with the shared SWAR
+        // scatter helper (the width fixed point above guarantees no lane
+        // overflows the merge width). Each source's below-floor accurate
+        // mass — plus both inputs' underflow counters — folds into the
+        // merged underflow.
         self.data = [0u64; N];
-        let new_base = new_start;
         self.underflow = old_self.underflow + other.underflow;
-        let mut s = union_lo;
-        while s <= top_slot {
-            let c = old_self.count_at_slot(s) + other.count_at_slot(s);
-            if c != 0 {
-                if s >= lw {
-                    Self::write_add(&mut self.data, w, new_base, s, c);
-                } else {
-                    self.underflow += c;
-                }
-            }
-            s += 1;
-        }
+        Self::scatter_source(
+            &mut self.data,
+            &mut self.underflow,
+            new_start,
+            w,
+            Src {
+                data: &old_self.data,
+                base: old_self.word_base,
+                word_start: old_self.word_start,
+                word_end: old_self.word_end,
+                width: old_self.width,
+            },
+        );
+        Self::scatter_source(
+            &mut self.data,
+            &mut self.underflow,
+            new_start,
+            w,
+            Src {
+                data: &other.data,
+                base: other.word_base,
+                word_start: other.word_start,
+                word_end: other.word_end,
+                width: other.width,
+            },
+        );
 
         self.width = w;
-        self.word_base = new_base;
+        self.word_base = new_start;
         self.word_start = new_start;
         self.word_end = new_end;
         self.live_total = old_self.live_total + other.live_total;
