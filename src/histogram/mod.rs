@@ -63,10 +63,6 @@ pub enum Error {
     /// Invalid value: NaN or ±Inf for all histogram types, or negative
     /// for [`HistogramNN`].
     Extreme,
-    /// Merge of two fixed-scale [`Sketch`]es whose scales differ. A
-    /// `Sketch` cannot change scale, so differing scales are
-    /// irreconcilable. Construct both with the same scale to merge.
-    ScaleMismatch,
 }
 
 impl fmt::Display for Error {
@@ -74,7 +70,6 @@ impl fmt::Display for Error {
         f.write_str(match self {
             Self::Overflow => "histogram total count overflow",
             Self::Extreme => "invalid extreme value",
-            Self::ScaleMismatch => "cannot merge sketches with different scales",
         })
     }
 }
@@ -701,12 +696,6 @@ const _: () = _assert_send_sync::<HistogramNN<2>>();
 
 mod pn;
 pub use pn::{HistogramPN, HistogramPNView};
-
-mod sketch;
-pub use sketch::{Sketch, SketchBucketView, SketchBucketsIter, SketchView};
-
-mod sketch_pn;
-pub use sketch_pn::{SketchPN, SketchPNView};
 
 #[cfg(test)]
 mod tests;
