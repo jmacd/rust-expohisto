@@ -26,7 +26,7 @@ cargo check --target thumbv7em-none-eabihf --no-default-features
 
 Always use `--features bench-all` for building and testing — it enables all feature-gated code (`logarithm`, `quantile`, `scale-8`, `bench-internals`).
 
-MSRV is 1.73.
+MSRV is 1.83.
 
 ## Architecture
 

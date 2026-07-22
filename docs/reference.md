@@ -56,7 +56,7 @@ The crate includes comprehensive validation at multiple levels:
   - `stateful_oracle` — state-machine fuzzer with interleaved update/merge/clear/read operations
   - `rng_stress` — large histogram (N=160) with millions of random values
 - **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 16
-- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
+- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.83), and example checks
 
 ## Examples
 
