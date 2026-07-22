@@ -4,18 +4,18 @@
 //! Promoted read-only view of a histogram.
 
 use super::width::{SlotAddr, Width};
-use super::{Histogram, Stats};
+use super::{HistogramNN, Stats};
 
 /// Read-only view of a histogram's data.
 ///
-/// Created by [`Histogram::view`], which may promote from literal mode
+/// Created by [`HistogramNN::view`], which may promote from literal mode
 /// to bucket mode internally. All accessors take `&self`, so a
 /// `HistogramView` can be shared freely once obtained.
 ///
 /// ```
-/// use otel_expohisto::Histogram;
+/// use otel_expohisto::HistogramNN;
 ///
-/// let mut h: Histogram<16> = Histogram::new();
+/// let mut h: HistogramNN<16> = HistogramNN::new();
 /// h.update(1.5).unwrap();
 /// h.update(2.7).unwrap();
 ///
@@ -26,7 +26,7 @@ use super::{Histogram, Stats};
 /// ```
 #[derive(Debug)]
 pub struct HistogramView<'a, const N: usize> {
-    pub(super) hist: &'a Histogram<N>,
+    pub(crate) hist: &'a HistogramNN<N>,
 }
 
 impl<const N: usize> HistogramView<'_, N> {
@@ -70,7 +70,7 @@ impl<const N: usize> HistogramView<'_, N> {
 /// Read-only view of bucket data in a histogram.
 #[derive(Debug)]
 pub struct BucketView<'a, const N: usize> {
-    pub(super) hist: &'a Histogram<N>,
+    pub(crate) hist: &'a HistogramNN<N>,
 }
 
 impl<const N: usize> BucketView<'_, N> {
@@ -145,7 +145,7 @@ impl<'a, const N: usize> IntoIterator for &'a BucketView<'a, N> {
 /// Iterator over bucket counts.
 #[derive(Debug)]
 pub struct BucketsIter<'a, const N: usize> {
-    hist: &'a Histogram<N>,
+    hist: &'a HistogramNN<N>,
     addr: Option<SlotAddr<'a>>,
     remaining: usize,
 }

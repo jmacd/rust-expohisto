@@ -21,13 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Configurable lookup table scale** — `scale-1` through `scale-16` features
   trade binary size for finer resolution support
 - `Histogram::merge_from()` — merge from any histogram (same or different `N`)
+- `HistogramPN<K, L>` — positive+negative histogram with independent pool sizes
+  and automatic scale synchronization
 
 - `Histogram::with_min_width()` — skip sub-byte widths for faster ops
-- `Width::B0` — literal mode represented as a width variant; disable via `with_min_width(Width::B1)` when value range
-  is known upfront
 - `BucketView` — borrow-based read access to bucket data with iteration
 - OTel SDK specification compatibility (count, sum, min, max, positive buckets)
 - +Inf and subnormal value handling
-- 140 unit tests and 4 fuzz targets
+- 160+ unit tests and 4 fuzz targets
 - Comprehensive documentation: design theory, implementation internals,
   OTel spec compatibility matrix (see `docs/`), and README overview

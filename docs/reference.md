@@ -56,7 +56,7 @@ The crate includes comprehensive validation at multiple levels:
   - `stateful_oracle` — state-machine fuzzer with interleaved update/merge/clear/read operations
   - `rng_stress` — large histogram (N=160) with millions of random values
 - **Exhaustive boundary validation** — upper-inclusive semantics verified over all ~3 billion f64 values in the first sub-bucket at scale 16
-- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.73), and example checks
+- **CI matrix** — tests across 4 feature combinations (`bench-all`, `scale-8`, `--no-default-features --features scale-8`, `--no-default-features`), plus clippy, rustfmt, doc, MSRV (1.83), and example checks
 
 ## Examples
 
@@ -134,7 +134,9 @@ The spec requires all histogram aggregations to collect count, sum, min, and max
 
 ### Negative Values
 
-The spec defines both positive and negative bucket ranges. **This implementation only supports non-negative values** — there is a single `positive` bucket set and no `negative` counterpart. The use case is recording non-negative measurements (latencies, sizes, counts) which is the overwhelmingly common case. Adding negative bucket support would double the per-histogram memory footprint.
+The spec defines both positive and negative bucket ranges. `HistogramNN<N>` (aliased as `Histogram<N>`) supports only non-negative values — there is a single positive bucket set. This is suitable for the common case of non-negative measurements (latencies, sizes, counts).
+
+For values of any sign, use `HistogramPN<K, L>` which maintains independent positive (`K` words) and negative (`L` words) bucket ranges. Both sub-histograms are automatically synchronized to the same scale after each update or merge.
 
 ### Merging
 

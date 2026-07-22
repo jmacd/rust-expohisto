@@ -1,0 +1,34 @@
+[package]
+name = "expohisto-analysis"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+otel-expohisto = { path = "../..", features = ["boundary", "quantile", "scale-10"] }
+rand = "0.8"
+rand_distr = "0.4"
+
+[[bin]]
+name = "theoretical"
+path = "src/bin/theoretical.rs"
+
+[[bin]]
+name = "simulate"
+path = "src/bin/simulate.rs"
+
+[[bin]]
+name = "validate"
+path = "src/bin/validate.rs"
+
+[[bin]]
+name = "reference_table"
+path = "src/bin/reference_table.rs"
+
+[[bin]]
+name = "closeness"
+path = "src/bin/closeness.rs"
+
+[[bin]]
+name = "recommend"
+path = "src/bin/recommend.rs"

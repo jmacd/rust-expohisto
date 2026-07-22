@@ -25,11 +25,11 @@ Exponential histograms provide a compact, high-resolution representation of valu
 - **Zero runtime dependencies**: Only a build dependency (`expohisto-mapping-gen`) for compile-time table generation
 - **Comprehensive testing**: Unit tests and fuzz targets
 
-**Minimum Supported Rust Version (MSRV):** 1.73
+**Minimum Supported Rust Version (MSRV):** 1.83
 
 ### Limitations
 
-- **Positive buckets only** — This crate implements a single positive bucket set. The OTel spec defines both positive and negative bucket ranges; negative values are rejected. This is suitable for the common case of non-negative measurements (latencies, sizes, counts). Adding negative bucket support would double the per-histogram memory footprint.
+- **`HistogramNN` is positive-only** — `HistogramNN<N>` (aliased as `Histogram<N>`) implements a single positive bucket set; negative values are rejected. This is suitable for the common case of non-negative measurements (latencies, sizes, counts). For values of any sign, use `HistogramPN<K, L>` which maintains independent positive and negative bucket ranges with synchronized scales.
 
 ## Quick Start
 

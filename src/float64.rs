@@ -34,22 +34,16 @@ pub const MAX_NORMAL_EXPONENT: i32 = EXPONENT_BIAS;
 /// Smallest normal f64 value: 2^-1022 (same as `f64::MIN_POSITIVE`).
 pub const MIN_VALUE: f64 = f64::MIN_POSITIVE;
 
-/// MSRV-compatible const `f64::to_bits()` (const-stable since 1.83;
-/// `transmute` has been const-stable since 1.56).
+/// Const `f64::to_bits()` (const-stable since Rust 1.83).
 #[inline]
-#[allow(unknown_lints, unnecessary_transmutes)]
 pub const fn to_bits(v: f64) -> u64 {
-    // SAFETY: f64 and u64 have the same size and alignment.
-    unsafe { core::mem::transmute(v) }
+    v.to_bits()
 }
 
-/// MSRV-compatible const `f64::from_bits()` (const-stable since 1.83;
-/// `transmute` has been const-stable since 1.56).
+/// Const `f64::from_bits()` (const-stable since Rust 1.83).
 #[inline]
-#[allow(unknown_lints, unnecessary_transmutes)]
 pub const fn from_bits(bits: u64) -> f64 {
-    // SAFETY: u64 and f64 have the same size and alignment.
-    unsafe { core::mem::transmute(bits) }
+    f64::from_bits(bits)
 }
 
 /// Extracts the unbiased base-2 exponent from an f64.

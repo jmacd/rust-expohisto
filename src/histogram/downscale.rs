@@ -5,9 +5,9 @@
 
 use super::swar::{narrow, widen};
 use super::width::{Width, ALL_WIDTHS};
-use super::Histogram;
+use super::HistogramNN;
 
-impl<const N: usize> Histogram<N> {
+impl<const N: usize> HistogramNN<N> {
     /// Widen every active word from `before` to `after` and return
     /// the OR-fold of all lanes at the new width.
     pub(crate) fn widen_words(&mut self, before: Width, after: Width) -> u64 {

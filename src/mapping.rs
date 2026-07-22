@@ -55,7 +55,7 @@ pub const fn table_scale() -> i32 {
 
 /// Converts values to bucket indices at a given scale.
 ///
-/// Scale fits in −10..=20 and is stored as `i8` for compactness.
+/// Scale fits in −10..=16 and is stored as `i8` for compactness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Scale(i8);

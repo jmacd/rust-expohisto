@@ -4,7 +4,7 @@ Thanks for your interest! This document covers setup, testing, and project conve
 
 ## Prerequisites
 
-- **Rust stable** (≥ 1.73) for building and testing
+- **Rust stable** (≥ 1.83) for building and testing
 - **Rust nightly** for fuzz testing (`cargo +nightly fuzz`)
 
 ## Building and Testing
